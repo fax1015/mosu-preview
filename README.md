@@ -1,16 +1,17 @@
-# mosu! Map Preview (Chrome Extension)
+# mosu! preview
 
-A Manifest V3 Chrome extension popup that previews osu! beatmaps directly from the active tab.
+an extension popup that previews osu! beatmaps directly from the active tab.
 
-## How it works
+## how it works
 
-1. Open an osu! beatmap page.
-2. Click the extension icon.
-3. The popup validates the URL, fetches `https://osu.ppy.sh/osu/{beatmapId}`, parses hit objects, and renders a map preview.
+1. open an osu! beatmap page.
+2. click the extension icon.
+3. the popup validates the URL, fetches `https://osu.ppy.sh/osu/{beatmapId}`, parses hit objects, and renders a map preview.
+4. no loading time is needed, as the extension uses the preview audio first, and fetches the full audio in the background.
 
-The extension only works on valid osu beatmap URLs.
+the extension only works on valid osu beatmap URLs.
 
-## Supported URL formats
+## supported url formats
 
 - `https://osu.ppy.sh/beatmapsets/{setId}#osu/{beatmapId}`
 - `https://osu.ppy.sh/beatmapsets/{setId}#taiko/{beatmapId}`
@@ -18,15 +19,15 @@ The extension only works on valid osu beatmap URLs.
 - `https://osu.ppy.sh/beatmapsets/{setId}#mania/{beatmapId}`
 - `https://osu.ppy.sh/beatmaps/{beatmapId}`
 
-## Install locally
+## install locally
 
-1. Open Chrome and go to `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Click **Load unpacked**.
-4. Select this folder: `C:\Users\Kyson\Documents\GitHub\mosu!-preview`.
+1. open chrome and go to `chrome://extensions`.
+2. enable **Developer mode**.
+3. click **Load unpacked**.
+4. select the `mosu-preview` folder.
 
-## Notes
+## notes
 
-- No Tauri/Rust dependencies are used.
-- Preview playback is a visual simulation based on beatmap timing.
-- If a beatmap URL does not include a beatmap difficulty ID, popup shows an error.
+this extension is kinda like a "refreshed" version of [osu! preview](https://github.com/JerryZhu99/osu-preview), updated to fit chrome's manifest V3. credits to [JerryZhu99](https://github.com/JerryZhu99) for the original idea.
+
+firefox support may be coming in the future?

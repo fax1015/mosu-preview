@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "mosu! preview",
+  "version": "0.1.0",
+  "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://osu.ppy.sh/*",
+    "https://b.ppy.sh/*",
+    "https://catboy.best/*",
+    "https://api.chimu.moe/*",
+    "https://osu.direct/*"
+  ],
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "action": {
+    "default_title": "mosu! preview",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "32": "assets/icons/icon32.png",
+      "48": "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
+    }
+  },
+  "options_page": "options.html"
+}

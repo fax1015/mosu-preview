@@ -1,0 +1,123 @@
+@font-face {
+  font-family: 'Torus';
+  src: url('./assets/fonts/Torus-Regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Torus';
+  src: url('./assets/fonts/Torus-SemiBold.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Torus';
+  src: url('./assets/fonts/Torus-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg-primary: rgb(24, 23, 28);
+  --bg-secondary: rgb(36, 34, 42);
+  --bg-tertiary: rgb(48, 46, 56);
+  --bg-quaternary: rgb(60, 58, 70);
+  --text-primary: rgb(255, 255, 255);
+  --text-secondary: rgb(148, 143, 163);
+  --accent-primary: rgb(140, 102, 255);
+  --success: rgb(59, 207, 128);
+  --error: rgb(214, 64, 64);
+  --border-radius: 0.75rem;
+  --shadow: 0 16px 42px rgba(0, 0, 0, 0.5);
+  --font-family-sans: 'Torus', sans-serif;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  line-height: 1.5;
+  font-family: var(--font-family-sans);
+  color: var(--text-primary);
+  background:
+    radial-gradient(1200px 700px at 10% -20%, rgba(93, 122, 191, 0.16), transparent 58%),
+    radial-gradient(1100px 660px at 100% 0%, rgba(100, 76, 168, 0.14), transparent 52%),
+    var(--bg-primary);
+}
+
+.settings-page {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.settings-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(36, 34, 42, 0.96);
+  border-radius: var(--border-radius);
+  padding: 1rem;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+}
+
+.settings-card h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.settings-subtitle {
+  margin: 0.35rem 0 0.95rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.settings-label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
+.settings-select {
+  width: 100%;
+  max-width: 360px;
+  border-radius: var(--border-radius);
+  border: 2px solid var(--bg-quaternary);
+  background: rgba(24, 23, 28, 0.9);
+  color: var(--text-primary);
+  padding: 0.5rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+
+.settings-select:hover,
+.settings-select:focus-visible {
+  border-color: var(--accent-primary);
+  outline: none;
+}
+
+.settings-help {
+  margin: 0.55rem 0 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+}
+
+.settings-status {
+  min-height: 1.15rem;
+  margin: 0.7rem 0 0;
+  color: var(--success);
+  font-size: 0.86rem;
+}

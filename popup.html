@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>mosu! Beatmap Preview</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="map-preview-popup is-open" id="mapPreviewPopup">
+        <div class="map-preview-header">
+          <div class="map-preview-headings">
+            <div class="map-preview-title-row">
+              <p class="map-preview-title" id="mapPreviewTitle">Map Preview</p>
+              <span class="map-preview-version" id="mapPreviewVersion"></span>
+            </div>
+          </div>
+        </div>
+      <div class="map-preview-canvas-wrap">
+        <canvas id="mapPreviewCanvas" class="map-preview-canvas" width="1024" height="768"></canvas>
+        <button type="button" class="map-preview-audio-badge is-preview" id="mapPreviewAudioBadge">Preview audio</button>
+        <div class="map-preview-toggle-indicator" id="mapPreviewToggleIndicator" aria-hidden="true">
+          <svg class="map-preview-toggle-icon map-preview-toggle-icon--play" viewBox="0 0 384 512">
+            <path
+              d="M73 39c-14.8-8.5-33.1-8.7-48-.6S0 54.1 0 71v370c0 16.9 9 32.5 25 41.6s33.2 8.8 48 .6l304-185c14.2-8.6 23-24 23-40.8s-8.8-32.2-23-40.8L73 39z"
+            />
+          </svg>
+          <svg class="map-preview-toggle-icon map-preview-toggle-icon--pause" viewBox="0 0 320 512">
+            <path
+              d="M48 64C21.5 64 0 85.5 0 112V400c0 26.5 21.5 48 48 48H80c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48H48zM240 64c-26.5 0-48 21.5-48 48V400c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48H240z"
+            />
+          </svg>
+        </div>
+      </div>
+      <div class="map-preview-controls">
+        <button type="button" class="secondary-button map-preview-play-btn" id="mapPreviewPlayBtn" disabled>1x</button>
+        <canvas id="mapPreviewTimeline" class="list-timeline map-preview-timeline" aria-label="Preview timeline"></canvas>
+        <span class="map-preview-time-label" id="mapPreviewTimeLabel">0:00 / 0:00</span>
+        <label class="map-preview-volume-control" for="mapPreviewVolume" title="Volume">
+          <span class="map-preview-volume-label" id="mapPreviewVolumeLabel">80%</span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value="80"
+            step="1"
+            class="map-preview-volume-slider"
+            id="mapPreviewVolume"
+            aria-label="Audio volume"
+          />
+        </label>
+      </div>
+      <div class="map-preview-debug-panel" id="mapPreviewDebugPanel" hidden>
+        <div class="map-preview-debug-header">
+          <p class="map-preview-debug-title">Audio Debug</p>
+          <div class="map-preview-debug-actions">
+            <button type="button" class="map-preview-debug-btn" id="mapPreviewDebugRunBtn">Run test</button>
+            <button type="button" class="map-preview-debug-btn" id="mapPreviewDebugClearBtn">Clear</button>
+          </div>
+        </div>
+        <p class="map-preview-debug-status" id="mapPreviewDebugStatus">No data yet.</p>
+        <pre class="map-preview-debug-log" id="mapPreviewDebugLog">No logs yet.</pre>
+      </div>
+      <div class="map-preview-unsupported" id="mapPreviewUnsupported" aria-live="polite">
+        <pre class="map-preview-unsupported-ascii" id="mapPreviewUnsupportedAscii" aria-hidden="true"></pre>
+        <p class="map-preview-unsupported-title">unsupported website :(</p>
+      </div>
+    </div>
+
+    <script type="module" src="src/popup.js"></script>
+  </body>
+</html>

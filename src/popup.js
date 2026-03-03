@@ -1,5 +1,15 @@
 import { parseMetadata, parseMapPreviewData, parseBreakPeriods } from './parser.js';
 import { PreviewRenderer, clamp } from './renderer.js';
+import {
+  PROVIDER_OVERRIDE_KEY,
+  AUDIO_VOLUME_KEY,
+  DEFAULT_AUDIO_VOLUME,
+  MANIA_SCROLL_SPEED_KEY,
+  MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+  STANDARD_SNAKING_SLIDERS_KEY,
+  STANDARD_SLIDER_END_CIRCLES_KEY,
+  normalizePreviewSettings,
+} from './settings.js';
 
 const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
@@ -36,9 +46,6 @@ const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
 const MAX_ZIP_AUDIO_ENTRY_BYTES = 48 * 1024 * 1024;
 const MAX_ZIP_ENTRY_INFLATE_RATIO = 80;
 const MAX_ZIP_ENTRIES = 6000;
-const PROVIDER_OVERRIDE_KEY = 'providerOverride';
-const AUDIO_VOLUME_KEY = 'audioVolume';
-const DEFAULT_AUDIO_VOLUME = 0.8;
 const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
 const AUDIO_BADGE_AUTO_HIDE_DELAY_MS = 3500;
 const FETCH_TIMEOUT_MS = 18000;
@@ -128,6 +135,10 @@ const state = {
   playbackSpeed: 1,
   unsupportedAsciiTimer: null,
   unsupportedAsciiField: null,
+  maniaScrollSpeed: normalizePreviewSettings().maniaScrollSpeed,
+  maniaScaleScrollSpeedWithBpm: normalizePreviewSettings().maniaScaleScrollSpeedWithBpm,
+  standardSnakingSliders: normalizePreviewSettings().standardSnakingSliders,
+  standardSliderEndCircles: normalizePreviewSettings().standardSliderEndCircles,
 };
 
 state.audio.preload = 'auto';
@@ -465,6 +476,22 @@ const readAudioVolumeSetting = () => new Promise((resolve) => {
   });
 });
 
+const readManiaPreviewSettings = () => new Promise((resolve) => {
+  chrome.storage.sync.get([
+    MANIA_SCROLL_SPEED_KEY,
+    MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+    STANDARD_SNAKING_SLIDERS_KEY,
+    STANDARD_SLIDER_END_CIRCLES_KEY,
+  ], (items) => {
+    const error = chrome.runtime.lastError;
+    if (error) {
+      resolve(normalizePreviewSettings());
+      return;
+    }
+    resolve(normalizePreviewSettings(items));
+  });
+});
+
 const writeAudioVolumeSetting = (volume) => new Promise((resolve) => {
   chrome.storage.sync.set({ [AUDIO_VOLUME_KEY]: clamp(volume, 0, 1) }, () => {
     const error = chrome.runtime.lastError;
@@ -484,6 +511,15 @@ const applyAudioVolume = (volume) => {
   if (volumeLabel) {
     volumeLabel.textContent = `${Math.round(nextVolume * 100)}%`;
   }
+};
+
+const applyManiaPreviewSettings = (settings = {}) => {
+  const normalized = normalizePreviewSettings(settings);
+  state.maniaScrollSpeed = normalized.maniaScrollSpeed;
+  state.maniaScaleScrollSpeedWithBpm = normalized.maniaScaleScrollSpeedWithBpm;
+  state.standardSnakingSliders = normalized.standardSnakingSliders;
+  state.standardSliderEndCircles = normalized.standardSliderEndCircles;
+  renderer.setPreviewSettings(normalized);
 };
 
 const formatPlaybackSpeedLabel = (speed) => {
@@ -1719,6 +1755,11 @@ const initializePreviewForCurrentTab = async () => {
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
   applyAudioVolume(await readAudioVolumeSetting());
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
+  applyManiaPreviewSettings(await readManiaPreviewSettings());
+  addDebugLog(
+    `init: mania scroll speed ${state.maniaScrollSpeed}`
+    + (state.maniaScaleScrollSpeedWithBpm ? ' (scaled with BPM)' : ' (fixed)'),
+  );
 
   try {
     setStatus('Checking current tab...');
@@ -2025,5 +2066,35 @@ window.addEventListener('unload', () => {
 
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
+applyManiaPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
 initializePreviewForCurrentTab();
+
+if (chrome.storage?.onChanged?.addListener) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'sync') {
+      return;
+    }
+
+    if (
+      changes[MANIA_SCROLL_SPEED_KEY]
+      || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
+      || changes[STANDARD_SNAKING_SLIDERS_KEY]
+      || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
+    ) {
+      applyManiaPreviewSettings({
+        maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
+        maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
+          ?? state.maniaScaleScrollSpeedWithBpm,
+        standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
+          ?? state.standardSnakingSliders,
+        standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
+          ?? state.standardSliderEndCircles,
+      });
+
+      if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {
+        renderFrame();
+      }
+    }
+  });
+}

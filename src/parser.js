@@ -72,6 +72,7 @@ export const parseMapPreviewData = (content, options = {}) => {
 
   let section = '';
   let sliderMultiplier = 1.0;
+  let sliderTickRate = 1.0;
   let circleSize = 5;
   let approachRate = 5;
   let overallDifficulty = 5;
@@ -144,6 +145,8 @@ export const parseMapPreviewData = (content, options = {}) => {
 
       if (key === 'slidermultiplier') {
         sliderMultiplier = value || 1.0;
+      } else if (key === 'slidertickrate') {
+        sliderTickRate = value || 1.0;
       } else if (key === 'circlesize') {
         circleSize = value;
       } else if (key === 'approachrate') {
@@ -169,7 +172,9 @@ export const parseMapPreviewData = (content, options = {}) => {
       timingPoints.push({
         time,
         beatLength,
+        meter: Number.parseInt(parts[2], 10) || 4,
         uninherited: parts.length > 6 ? parts[6] === '1' : true,
+        effects: Number.parseInt(parts[7], 10) || 0,
       });
       continue;
     }
@@ -255,14 +260,36 @@ export const parseMapPreviewData = (content, options = {}) => {
 
   let bpmMin = 0;
   let bpmMax = 0;
-  const uninheritedBpms = timingPoints
+  let primaryBpm = 0;
+  const uninheritedTimingPoints = timingPoints
     .filter((tp) => tp.uninherited && Number.isFinite(tp.beatLength) && tp.beatLength > 0)
-    .map((tp) => 60000 / tp.beatLength)
-    .filter((bpm) => Number.isFinite(bpm) && bpm > 0);
+    .map((tp) => ({
+      time: tp.time,
+      bpm: 60000 / tp.beatLength,
+    }))
+    .filter((tp) => Number.isFinite(tp.bpm) && tp.bpm > 0);
 
-  if (uninheritedBpms.length > 0) {
+  if (uninheritedTimingPoints.length > 0) {
+    const uninheritedBpms = uninheritedTimingPoints.map((tp) => tp.bpm);
     bpmMin = Math.min(...uninheritedBpms);
     bpmMax = Math.max(...uninheritedBpms);
+
+    let longestSectionDuration = -1;
+    for (let i = 0; i < uninheritedTimingPoints.length; i += 1) {
+      const sectionStart = uninheritedTimingPoints[i].time;
+      const sectionEnd = i + 1 < uninheritedTimingPoints.length
+        ? uninheritedTimingPoints[i + 1].time
+        : maxObjectTime;
+      const duration = Math.max(0, sectionEnd - sectionStart);
+      if (duration > longestSectionDuration) {
+        longestSectionDuration = duration;
+        primaryBpm = uninheritedTimingPoints[i].bpm;
+      }
+    }
+
+    if (!(Number.isFinite(primaryBpm) && primaryBpm > 0)) {
+      primaryBpm = uninheritedTimingPoints[0].bpm;
+    }
   }
 
   return {
@@ -273,8 +300,20 @@ export const parseMapPreviewData = (content, options = {}) => {
     stackLeniency: Number.isFinite(stackLeniency) ? stackLeniency : 0.7,
     mode: Number.isFinite(mode) ? Math.min(Math.max(mode, 0), 3) : 0,
     sliderMultiplier: Number.isFinite(sliderMultiplier) ? sliderMultiplier : 1.0,
+    sliderTickRate: Number.isFinite(sliderTickRate) ? sliderTickRate : 1.0,
     bpmMin,
     bpmMax,
+    primaryBpm: Number.isFinite(primaryBpm) && primaryBpm > 0 ? primaryBpm : 0,
+    timingPoints: uninheritedTimingPoints,
+    timingControlPoints: timingPoints.map((tp) => ({
+      time: tp.time,
+      beatLength: tp.beatLength,
+      meter: Number.isFinite(tp.meter) && tp.meter > 0 ? tp.meter : 4,
+      uninherited: Boolean(tp.uninherited),
+      bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
+      svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,
+      omitFirstBarLine: Boolean((tp.effects || 0) & 8),
+    })),
     comboColours: parseColours(content),
     maxObjectTime,
   };

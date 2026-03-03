@@ -84,10 +84,40 @@ body {
   color: var(--text-secondary);
 }
 
+.settings-group + .settings-group {
+  margin-top: 1.15rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-section-title {
+  margin: 0 0 0.7rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.68);
+}
+
 .settings-label {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   margin-bottom: 0.35rem;
   font-weight: 600;
+}
+
+.settings-inline-value {
+  color: rgb(255, 222, 123);
+  font-weight: 700;
+}
+
+.settings-speed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 0.75rem;
+  align-items: center;
 }
 
 .settings-select {
@@ -107,6 +137,73 @@ body {
 .settings-select:focus-visible {
   border-color: var(--accent-primary);
   outline: none;
+}
+
+.settings-range {
+  width: 100%;
+  appearance: none;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(237, 209, 220, 0.9), rgba(201, 113, 156, 0.9));
+  outline: none;
+}
+
+.settings-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  background: rgb(255, 222, 123);
+  box-shadow: 0 0 0 4px rgba(255, 222, 123, 0.18);
+  cursor: pointer;
+}
+
+.settings-range::-moz-range-thumb {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.96);
+  border-radius: 50%;
+  background: rgb(255, 222, 123);
+  box-shadow: 0 0 0 4px rgba(255, 222, 123, 0.18);
+  cursor: pointer;
+}
+
+.settings-range::-moz-range-track {
+  height: 0.4rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(237, 209, 220, 0.9), rgba(201, 113, 156, 0.9));
+}
+
+.settings-number {
+  width: 100%;
+  border-radius: var(--border-radius);
+  border: 2px solid var(--bg-quaternary);
+  background: rgba(24, 23, 28, 0.9);
+  color: var(--text-primary);
+  padding: 0.5rem 0.7rem;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.settings-number:hover,
+.settings-number:focus-visible {
+  border-color: var(--accent-primary);
+  outline: none;
+}
+
+.settings-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-top: 0.7rem;
+  font-weight: 600;
+}
+
+.settings-toggle input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: rgb(255, 222, 123);
 }
 
 .settings-help {

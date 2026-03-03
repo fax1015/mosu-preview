@@ -1,15 +1,27 @@
+import {
+  DEFAULT_MANIA_SCROLL_SPEED,
+  DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM,
+  calculateManiaScrollTimeMs,
+} from './settings.js';
+
 const OSU_WIDTH = 512;
 const OSU_HEIGHT = 384;
 const STACK_OFFSET_OSU = 5.2;
 const DRAWN_CIRCLE_RADIUS_SCALE = 0.93;
-const CIRCLE_POST_HIT_FADE_MS = 42;
-const LONG_OBJECT_POST_HIT_FADE_MS = 88;
+const CIRCLE_POST_HIT_FADE_MS = 120;
+const LONG_OBJECT_POST_HIT_FADE_MS = 140;
 const FOLLOW_POINT_FADE_LEAD_MS = 120;
 const FOLLOW_POINT_FADE_OUT_MS = 120;
 const SLIDER_HEAD_HIT_FADE_MS = 120;
 const SLIDER_HEAD_HIT_SCALE_BOOST = 0.2;
 const COMBO_NUMBER_FONT_SCALE = 0.84;
-const OBJECT_VISUAL_MAX_ALPHA = 0.9;
+const OBJECT_VISUAL_MAX_ALPHA = 0.84;
+const STANDARD_OBJECT_SHADOW_ALPHA = 0.26;
+const STANDARD_OBJECT_SHADOW_SCALE = 1.12;
+const STANDARD_FADE_IN_BASE_MS = 400;
+const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
+const APPROACH_CIRCLE_START_SCALE = 4;
+const MANIA_SCROLL_TRAVEL_HEIGHT_SCALE = 1.34;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -22,6 +34,10 @@ const getApproachPreemptMs = (ar) => {
   }
   return 1200 - (150 * (value - 5));
 };
+
+const getStandardFadeInMs = (preemptMs) => (
+  STANDARD_FADE_IN_BASE_MS * Math.min(1, Math.max(0, preemptMs) / STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS)
+);
 
 const formatTime = (ms) => {
   const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
@@ -90,6 +106,19 @@ const trimPathToLength = (points, targetLength) => {
   }
 
   return dedupeAdjacentPoints(trimmed);
+};
+
+const getPathLength = (points) => {
+  const cleanPoints = dedupeAdjacentPoints(points);
+  if (cleanPoints.length < 2) {
+    return 0;
+  }
+
+  let totalLength = 0;
+  for (let i = 1; i < cleanPoints.length; i += 1) {
+    totalLength += pointDistance(cleanPoints[i - 1], cleanPoints[i]);
+  }
+  return totalLength;
 };
 
 const evaluateBezierPoint = (controlPoints, t) => {
@@ -411,6 +440,19 @@ const getObjectEndPositionOsu = (object) => {
   return getObjectStartPositionOsu(object);
 };
 
+const getSliderTailPositionOsu = (object) => {
+  if (!object || object.kind !== 'slider') {
+    return getObjectEndPositionOsu(object);
+  }
+
+  const path = buildSliderPathPointsOsu(object);
+  if (path.length > 0) {
+    return path[path.length - 1];
+  }
+
+  return getObjectStartPositionOsu(object);
+};
+
 const drawReverseIndicator = (ctx, position, direction, size, alpha = 1) => {
   const length = Math.hypot(direction.x, direction.y);
   if (!Number.isFinite(length) || length <= 0.001) {
@@ -459,6 +501,11 @@ const drawComboNumber = (ctx, text, x, y, radius, alpha = 1) => {
   ctx.strokeText(String(text), x, y + 0.5);
   ctx.fillStyle = `rgba(255, 255, 255, ${textAlpha})`;
   ctx.fillText(String(text), x, y + 0.5);
+};
+
+const deterministicUnitValue = (seed) => {
+  const x = Math.sin(seed * 12.9898) * 43758.5453;
+  return x - Math.floor(x);
 };
 
 const assignComboIndices = (objects, comboColours = DEFAULT_COLOURS) => {
@@ -664,6 +711,15 @@ export class PreviewRenderer {
     this.comboColours = DEFAULT_COLOURS;
     this.catcherRenderX = Number.NaN;
     this.catcherRenderTime = Number.NaN;
+    this.catchCatcherTrailSamples = [];
+    this.catchHyperDashHitEffects = [];
+    this.catchTriggeredHitEffects = new Set();
+    this.catchLastEffectTime = Number.NaN;
+    this.maniaScrollSpeed = DEFAULT_MANIA_SCROLL_SPEED;
+    this.maniaScaleScrollSpeedWithBpm = DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM;
+    this.standardSnakingSliders = false;
+    this.standardSliderEndCircles = true;
+    this.catchRenderObjects = null;
   }
 
   setBeatmap(mapData, breaks, durationMs) {
@@ -677,17 +733,485 @@ export class PreviewRenderer {
 
     if (Array.isArray(this.mapData?.objects)) {
       assignComboIndices(this.mapData.objects, this.comboColours);
+      this.catchRenderObjects = null;
       if ((this.mapData.mode ?? 0) === 0) {
         applyPreviewStacking(this.mapData.objects, this.mapData.approachRate, this.mapData.stackLeniency);
       } else {
         this.catcherRenderX = Number.NaN;
         this.catcherRenderTime = Number.NaN;
+        this.catchCatcherTrailSamples = [];
+        this.catchHyperDashHitEffects = [];
+        this.catchTriggeredHitEffects = new Set();
+        this.catchLastEffectTime = Number.NaN;
       }
     }
   }
 
   setTime(ms) {
     this.currentTimeMs = clamp(ms, 0, this.durationMs || 1);
+  }
+
+  setPreviewSettings(settings = {}) {
+    if (Object.hasOwn(settings, 'maniaScrollSpeed')) {
+      this.maniaScrollSpeed = settings.maniaScrollSpeed;
+    }
+    if (Object.hasOwn(settings, 'maniaScaleScrollSpeedWithBpm')) {
+      this.maniaScaleScrollSpeedWithBpm = Boolean(settings.maniaScaleScrollSpeedWithBpm);
+    }
+    if (Object.hasOwn(settings, 'standardSnakingSliders')) {
+      this.standardSnakingSliders = Boolean(settings.standardSnakingSliders);
+    }
+    if (Object.hasOwn(settings, 'standardSliderEndCircles')) {
+      this.standardSliderEndCircles = Boolean(settings.standardSliderEndCircles);
+    }
+  }
+
+  getCurrentManiaBpm(currentTime) {
+    const timingPoints = Array.isArray(this.mapData?.timingPoints) ? this.mapData.timingPoints : [];
+    let activeBpm = Number.isFinite(this.mapData?.bpmMin) && this.mapData.bpmMin > 0
+      ? this.mapData.bpmMin
+      : 120;
+
+    for (const timingPoint of timingPoints) {
+      if (!timingPoint || timingPoint.time > currentTime) {
+        break;
+      }
+      if (Number.isFinite(timingPoint.bpm) && timingPoint.bpm > 0) {
+        activeBpm = timingPoint.bpm;
+      }
+    }
+
+    return activeBpm;
+  }
+
+  getManiaTimingControlPoints() {
+    return Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
+  }
+
+  getManiaReferenceBpm() {
+    const primaryBpm = Number(this.mapData?.primaryBpm);
+    if (Number.isFinite(primaryBpm) && primaryBpm > 0) {
+      return primaryBpm;
+    }
+    const fallbackBpm = Number(this.mapData?.bpmMin);
+    return Number.isFinite(fallbackBpm) && fallbackBpm > 0 ? fallbackBpm : 120;
+  }
+
+  getManiaTimingState(time) {
+    const controlPoints = this.getManiaTimingControlPoints();
+    let beatLength = 60000 / 120;
+    let svMultiplier = 1;
+
+    for (const point of controlPoints) {
+      if (!point || point.time > time) {
+        break;
+      }
+
+      if (point.uninherited && point.beatLength > 0) {
+        beatLength = point.beatLength;
+        svMultiplier = 1;
+      } else if (!point.uninherited && point.svMultiplier > 0) {
+        svMultiplier = point.svMultiplier;
+      }
+    }
+
+    return {
+      beatLength,
+      bpm: 60000 / Math.max(1, beatLength),
+      svMultiplier,
+    };
+  }
+
+  getManiaPixelsPerMs(time, playfieldHeight) {
+    const state = this.getManiaTimingState(time);
+    const baseScrollTimeMs = calculateManiaScrollTimeMs(this.maniaScrollSpeed, 120, false);
+    const basePixelsPerMs = playfieldHeight / Math.max(1, baseScrollTimeMs);
+    const referenceBpm = this.maniaScaleScrollSpeedWithBpm ? 120 : this.getManiaReferenceBpm();
+    const bpmScale = state.bpm / Math.max(1, referenceBpm);
+    return basePixelsPerMs * bpmScale * state.svMultiplier;
+  }
+
+  getManiaScrollOffset(startTime, endTime, playfieldHeight) {
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime === endTime) {
+      return 0;
+    }
+
+    const direction = endTime >= startTime ? 1 : -1;
+    const fromTime = direction > 0 ? startTime : endTime;
+    const toTime = direction > 0 ? endTime : startTime;
+    const controlPoints = this.getManiaTimingControlPoints();
+    let distance = 0;
+    let segmentStart = fromTime;
+
+    for (const point of controlPoints) {
+      if (!point || point.time <= fromTime) {
+        continue;
+      }
+      if (point.time >= toTime) {
+        break;
+      }
+
+      distance += this.getManiaPixelsPerMs(segmentStart, playfieldHeight) * (point.time - segmentStart);
+      segmentStart = point.time;
+    }
+
+    distance += this.getManiaPixelsPerMs(segmentStart, playfieldHeight) * (toTime - segmentStart);
+    return distance * direction;
+  }
+
+  getTaikoTimingControlPoints() {
+    return Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
+  }
+
+  getTaikoTimingState(time) {
+    const controlPoints = this.getTaikoTimingControlPoints();
+    let beatLength = 60000 / 120;
+    let svMultiplier = 1;
+    let meter = 4;
+    let sectionStart = 0;
+    let omitFirstBarLine = false;
+
+    for (const point of controlPoints) {
+      if (!point || point.time > time) {
+        break;
+      }
+
+      if (point.uninherited && point.beatLength > 0) {
+        beatLength = point.beatLength;
+        svMultiplier = 1;
+        meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
+        sectionStart = point.time;
+        omitFirstBarLine = Boolean(point.omitFirstBarLine);
+      } else if (!point.uninherited && point.svMultiplier > 0) {
+        svMultiplier = point.svMultiplier;
+      }
+    }
+
+    return {
+      beatLength,
+      svMultiplier,
+      meter,
+      sectionStart,
+      omitFirstBarLine,
+    };
+  }
+
+  getTaikoPixelsPerMs(time, playfieldWidth) {
+    const timing = this.getTaikoTimingState(time);
+    const baseSliderVelocity = Number.isFinite(this.mapData?.sliderMultiplier) && this.mapData.sliderMultiplier > 0
+      ? this.mapData.sliderMultiplier
+      : 1.4;
+    const scale = playfieldWidth / OSU_WIDTH;
+    const pixelsPerBeat = 100 * baseSliderVelocity * timing.svMultiplier * scale;
+    return pixelsPerBeat / Math.max(1, timing.beatLength);
+  }
+
+  getTaikoScrollOffset(startTime, endTime, playfieldWidth) {
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime === endTime) {
+      return 0;
+    }
+
+    const direction = endTime >= startTime ? 1 : -1;
+    const fromTime = direction > 0 ? startTime : endTime;
+    const toTime = direction > 0 ? endTime : startTime;
+    const controlPoints = this.getTaikoTimingControlPoints();
+    let distance = 0;
+    let segmentStart = fromTime;
+
+    for (const point of controlPoints) {
+      if (!point || point.time <= fromTime) {
+        continue;
+      }
+      if (point.time >= toTime) {
+        break;
+      }
+
+      distance += this.getTaikoPixelsPerMs(segmentStart, playfieldWidth) * (point.time - segmentStart);
+      segmentStart = point.time;
+    }
+
+    distance += this.getTaikoPixelsPerMs(segmentStart, playfieldWidth) * (toTime - segmentStart);
+    return distance * direction;
+  }
+
+  getTaikoMeasureLines(visibleStart, visibleEnd) {
+    const controlPoints = this.getTaikoTimingControlPoints().filter((point) => point?.uninherited && point.beatLength > 0);
+    if (controlPoints.length === 0 || visibleEnd < visibleStart) {
+      return [];
+    }
+
+    const lines = [];
+    for (let i = 0; i < controlPoints.length; i += 1) {
+      const point = controlPoints[i];
+      const sectionStart = point.time;
+      const sectionEnd = (i + 1 < controlPoints.length) ? controlPoints[i + 1].time : visibleEnd + (point.beatLength * point.meter);
+      const sectionVisibleStart = Math.max(visibleStart, sectionStart);
+      const sectionVisibleEnd = Math.min(visibleEnd, sectionEnd);
+      if (sectionVisibleEnd < sectionVisibleStart) {
+        continue;
+      }
+
+      const meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
+      const measureLength = point.beatLength * meter;
+      if (!Number.isFinite(measureLength) || measureLength <= 0) {
+        continue;
+      }
+
+      let measureIndex = Math.floor((sectionVisibleStart - sectionStart) / measureLength);
+      if ((sectionStart + (measureIndex * measureLength)) < sectionVisibleStart) {
+        measureIndex += 1;
+      }
+
+      for (; ; measureIndex += 1) {
+        const measureTime = sectionStart + (measureIndex * measureLength);
+        if (measureTime > sectionVisibleEnd) {
+          break;
+        }
+        if (measureIndex === 0 && point.omitFirstBarLine) {
+          continue;
+        }
+        lines.push(measureTime);
+      }
+    }
+
+    return lines;
+  }
+
+  getCatchTimingState(time) {
+    const controlPoints = Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
+    let beatLength = 60000 / 120;
+
+    for (const point of controlPoints) {
+      if (!point || point.time > time) {
+        break;
+      }
+      if (point.uninherited && point.beatLength > 0) {
+        beatLength = point.beatLength;
+      }
+    }
+
+    return {
+      beatLength,
+      bpm: 60000 / Math.max(1, beatLength),
+    };
+  }
+
+  getStandardTimingState(time) {
+    const controlPoints = Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
+    let beatLength = 60000 / 120;
+    let svMultiplier = 1;
+
+    for (const point of controlPoints) {
+      if (!point || point.time > time) {
+        break;
+      }
+      if (point.uninherited && point.beatLength > 0) {
+        beatLength = point.beatLength;
+      } else if (!point.uninherited && point.svMultiplier > 0) {
+        svMultiplier = point.svMultiplier;
+      }
+    }
+
+    return {
+      beatLength,
+      svMultiplier,
+      bpm: 60000 / Math.max(1, beatLength),
+    };
+  }
+
+  buildStandardSliderTicks(object) {
+    if (!object || object.kind !== 'slider') {
+      return [];
+    }
+
+    const sliderTickRate = Number.isFinite(this.mapData?.sliderTickRate) && this.mapData.sliderTickRate > 0
+      ? this.mapData.sliderTickRate
+      : 1;
+    const stackIndex = object.stackIndex || 0;
+    if (
+      Array.isArray(object._cachedStandardSliderTicks)
+      && object._cachedStandardSliderTickRate === sliderTickRate
+      && object._cachedStandardSliderStackIndex === stackIndex
+    ) {
+      return object._cachedStandardSliderTicks;
+    }
+
+    const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
+    const slides = Math.max(1, object.slides || 1);
+    const spanDuration = totalDuration / slides;
+    const beatLength = this.getStandardTimingState(object.time).beatLength;
+    const tickInterval = sliderTickRate > 0 ? (beatLength / sliderTickRate) : spanDuration;
+    const ticks = [];
+
+    if (!(Number.isFinite(tickInterval) && tickInterval > 0)) {
+      object._cachedStandardSliderTicks = ticks;
+      object._cachedStandardSliderTickRate = sliderTickRate;
+      object._cachedStandardSliderStackIndex = stackIndex;
+      return ticks;
+    }
+
+    for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
+      const spanStart = object.time + (spanIndex * spanDuration);
+      const spanEnd = Math.min(object.endTime, spanStart + spanDuration);
+      for (let tickTime = spanStart + tickInterval; tickTime < (spanEnd - 0.001); tickTime += tickInterval) {
+        ticks.push({
+          time: tickTime,
+          position: getSliderBallPositionOsu(object, tickTime),
+        });
+      }
+    }
+
+    object._cachedStandardSliderTicks = ticks;
+    object._cachedStandardSliderTickRate = sliderTickRate;
+    object._cachedStandardSliderStackIndex = stackIndex;
+    return ticks;
+  }
+
+  buildCatchSliderRenderObjects(object) {
+    const renderObjects = [];
+    const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
+    const slides = Math.max(1, object.slides || 1);
+    const spanDuration = totalDuration / slides;
+    const beatLength = this.getCatchTimingState(object.time).beatLength;
+    const sliderTickRate = Number.isFinite(this.mapData?.sliderTickRate) && this.mapData.sliderTickRate > 0
+      ? this.mapData.sliderTickRate
+      : 1;
+    const tickInterval = sliderTickRate > 0 ? (beatLength / sliderTickRate) : spanDuration;
+    const tinyInterval = Math.max(45, Math.min(90, tickInterval / 4));
+
+    const pushAtTime = (time, type) => {
+      const position = getSliderBallPositionOsu(object, clamp(time, object.time, object.endTime));
+      renderObjects.push({
+        time,
+        x: position.x,
+        type,
+        comboIndex: object.comboIndex || 0,
+      });
+    };
+
+    pushAtTime(object.time, 'fruit');
+    for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
+      const spanStart = object.time + (spanIndex * spanDuration);
+      const spanEnd = Math.min(object.endTime, spanStart + spanDuration);
+      const anchors = [spanStart];
+
+      if (Number.isFinite(tickInterval) && tickInterval > 0) {
+        for (let tickTime = spanStart + tickInterval; tickTime < (spanEnd - 0.001); tickTime += tickInterval) {
+          anchors.push(tickTime);
+          pushAtTime(tickTime, 'droplet');
+        }
+      }
+
+      anchors.push(spanEnd);
+      if (spanEnd > object.time && spanEnd <= object.endTime) {
+        pushAtTime(spanEnd, 'fruit');
+      }
+
+      anchors.sort((a, b) => a - b);
+      for (let i = 1; i < anchors.length; i += 1) {
+        const segmentStart = anchors[i - 1];
+        const segmentEnd = anchors[i];
+        for (let tinyTime = segmentStart + tinyInterval; tinyTime < (segmentEnd - 0.001); tinyTime += tinyInterval) {
+          const position = getSliderBallPositionOsu(object, tinyTime);
+          renderObjects.push({
+            time: tinyTime,
+            x: position.x,
+            type: 'tinyDroplet',
+            comboIndex: object.comboIndex || 0,
+          });
+        }
+      }
+    }
+
+    return renderObjects;
+  }
+
+  buildCatchSpinnerRenderObjects(object) {
+    const renderObjects = [];
+    const duration = Math.max(1, object.endTime - object.time);
+    const beatLength = this.getCatchTimingState(object.time).beatLength;
+    const bananaInterval = Math.max(20, Math.min(44, beatLength / 8));
+    const count = Math.max(18, Math.floor(duration / bananaInterval));
+
+    for (let i = 0; i <= count; i += 1) {
+      const time = object.time + ((duration * i) / Math.max(1, count));
+      const seed = (object.time * 0.0017) + (i * 0.61803398875);
+      const x = deterministicUnitValue(seed) * OSU_WIDTH;
+      renderObjects.push({
+        time,
+        x,
+        type: 'banana',
+        comboIndex: object.comboIndex || 0,
+      });
+    }
+
+    return renderObjects;
+  }
+
+  getCatchRenderObjects() {
+    if (Array.isArray(this.catchRenderObjects)) {
+      return this.catchRenderObjects;
+    }
+
+    const built = [];
+    const objects = Array.isArray(this.mapData?.objects) ? this.mapData.objects : [];
+    for (const object of objects) {
+      if (!object) {
+        continue;
+      }
+
+      if (object.kind === 'spinner') {
+        built.push(...this.buildCatchSpinnerRenderObjects(object));
+      } else if (object.kind === 'slider') {
+        built.push(...this.buildCatchSliderRenderObjects(object));
+      } else {
+        built.push({
+          time: object.time,
+          x: object.x,
+          type: 'fruit',
+          comboIndex: object.comboIndex || 0,
+        });
+      }
+    }
+
+    built.sort((a, b) => a.time - b.time);
+    for (let i = 0; i < built.length; i += 1) {
+      built[i].renderId = i;
+    }
+    this.catchRenderObjects = built;
+    return built;
+  }
+
+  applyCatchHyperDashIndicators(catchObjects, catcherWidthOsu) {
+    if (!Array.isArray(catchObjects) || catchObjects.length === 0) {
+      return;
+    }
+
+    const actionable = catchObjects.filter((object) => object && (object.type === 'fruit' || object.type === 'droplet'));
+    const dashSpeedOsuPerMs = 1.0;
+
+    for (const object of catchObjects) {
+      if (object) {
+        object.hyperDash = false;
+        object.hyperDashFollowUp = false;
+      }
+    }
+
+    for (let i = 0; i < actionable.length - 1; i += 1) {
+      const current = actionable[i];
+      const next = actionable[i + 1];
+      const dt = next.time - current.time;
+      if (!(Number.isFinite(dt) && dt > 0)) {
+        continue;
+      }
+
+      const requiredDistance = Math.max(0, Math.abs(next.x - current.x) - catcherWidthOsu);
+      const dashReach = dt * dashSpeedOsuPerMs;
+      if (requiredDistance > dashReach) {
+        current.hyperDash = true;
+        next.hyperDashFollowUp = true;
+      }
+    }
   }
 
   getDurationLabel() {
@@ -719,20 +1243,44 @@ export class PreviewRenderer {
     const laneY = playfieldY + (playfieldHeight * 0.5);
     const laneHeight = playfieldHeight * 0.22;
     const judgeX = playfieldX + (playfieldWidth * 0.12);
-    const noteTravelWidth = playfieldWidth * 0.82;
-    const lookAheadMs = 1200;
-    const lookBehindMs = 180;
-    const visibleEnd = currentTime + lookAheadMs + 80;
-    const visibleStart = currentTime - lookBehindMs;
+    const laneRightOverflow = Math.max(18, playfieldWidth * 0.055);
+    const laneRightEdge = playfieldX + playfieldWidth + laneRightOverflow;
+    const noteTravelWidth = (playfieldWidth * 0.82) + laneRightOverflow;
+    const rightFadeWidth = Math.max(12, noteTravelWidth * 0.07);
+    const rightFadeStartX = (judgeX + noteTravelWidth) - rightFadeWidth;
+    const maxVisibleAheadMs = 8000;
+    const maxVisibleBehindMs = 400;
+    const spinnerFadeInMs = 1400;
+    const visibleEnd = currentTime + maxVisibleAheadMs;
+    const visibleStart = currentTime - maxVisibleBehindMs;
     const donColor = { r: 242, g: 86, b: 86 };
     const katColor = { r: 92, g: 166, b: 255 };
     const rollColor = { r: 255, g: 196, b: 84 };
+    const taikoFadeAlphaAtX = (x) => {
+      if (x <= rightFadeStartX) {
+        return 1;
+      }
+      return clamp(((judgeX + noteTravelWidth) - x) / Math.max(rightFadeWidth, 1), 0, 1);
+    };
+    const taikoPositionAt = (targetTime, speedReferenceTime = targetTime) => (
+      judgeX + ((targetTime - currentTime) * this.getTaikoPixelsPerMs(speedReferenceTime, playfieldWidth))
+    );
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(playfieldX, playfieldY, playfieldWidth, playfieldHeight);
+    ctx.clip();
 
     ctx.fillStyle = 'rgba(28, 30, 36, 0.9)';
-    ctx.fillRect(playfieldX, laneY - (laneHeight / 2), playfieldWidth, laneHeight);
+    ctx.fillRect(playfieldX, laneY - (laneHeight / 2), laneRightEdge - playfieldX, laneHeight);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(playfieldX + 0.5, laneY - (laneHeight / 2) + 0.5, playfieldWidth - 1, laneHeight - 1);
+    ctx.strokeRect(
+      playfieldX + 0.5,
+      laneY - (laneHeight / 2) + 0.5,
+      (laneRightEdge - playfieldX) - 1,
+      laneHeight - 1,
+    );
 
     const receptorRadius = Math.max(8, laneHeight * 0.38);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.16)';
@@ -744,6 +1292,32 @@ export class PreviewRenderer {
     ctx.beginPath();
     ctx.arc(judgeX, laneY, receptorRadius, 0, Math.PI * 2);
     ctx.stroke();
+
+    const measureLineTop = laneY - (laneHeight * 0.72);
+    const measureLineBottom = laneY + (laneHeight * 0.72);
+    for (const measureTime of this.getTaikoMeasureLines(visibleStart, visibleEnd)) {
+      const x = taikoPositionAt(measureTime, measureTime);
+      if (x < (playfieldX - 12) || x > (laneRightEdge + 12)) {
+        continue;
+      }
+
+      const futureDistance = Math.max(0, x - judgeX);
+      const pastDistance = Math.max(0, judgeX - x);
+      const alpha = measureTime >= currentTime
+        ? (0.08 + (0.18 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1)))
+        : (0.22 * clamp(1 - (pastDistance / Math.max(receptorRadius * 2.8, 1)), 0, 1));
+      const fadedAlpha = alpha * taikoFadeAlphaAtX(x);
+      if (fadedAlpha <= 0.02) {
+        continue;
+      }
+
+      ctx.strokeStyle = `rgba(255,255,255,${fadedAlpha})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 0.5, measureLineTop);
+      ctx.lineTo(x + 0.5, measureLineBottom);
+      ctx.stroke();
+    }
 
     for (const object of objects) {
       if (object.time > visibleEnd) {
@@ -760,12 +1334,13 @@ export class PreviewRenderer {
         const radiusEnd = laneHeight * 0.28;
         const radius = radiusStart - ((radiusStart - radiusEnd) * progress);
         const alpha = currentTime < object.time
-          ? clamp(1 - ((object.time - currentTime) / lookAheadMs), 0, 1) * 0.6
+          ? clamp(1 - ((object.time - currentTime) / spinnerFadeInMs), 0, 1) * 0.6
           : clamp(1 - ((currentTime - object.endTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1) * 0.8;
-        if (alpha <= 0.02) {
+        const fadedAlpha = alpha * taikoFadeAlphaAtX(judgeX);
+        if (fadedAlpha <= 0.02) {
           continue;
         }
-        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        ctx.strokeStyle = `rgba(255,255,255,${fadedAlpha})`;
         ctx.lineWidth = Math.max(2, laneHeight * 0.14);
         ctx.beginPath();
         ctx.arc(judgeX, laneY, radius, 0, Math.PI * 2);
@@ -774,28 +1349,38 @@ export class PreviewRenderer {
       }
 
       if (object.kind === 'slider' || object.kind === 'hold') {
-        const headDt = object.time - currentTime;
-        const tailDt = object.endTime - currentTime;
-        const headX = judgeX + ((headDt / lookAheadMs) * noteTravelWidth);
-        const tailX = judgeX + ((tailDt / lookAheadMs) * noteTravelWidth);
+        const headX = taikoPositionAt(object.time, object.time);
+        const tailX = taikoPositionAt(object.endTime, object.time);
         const leftX = Math.min(headX, tailX);
         const rightX = Math.max(headX, tailX);
-        if (rightX < (playfieldX - 24) || leftX > (playfieldX + playfieldWidth + 24)) {
+        if (rightX < (playfieldX - 24) || leftX > (laneRightEdge + 24)) {
           continue;
         }
 
         let alpha = 0.86;
-        if (headDt > 0) {
-          alpha = 0.18 + (0.68 * clamp(1 - (headDt / lookAheadMs), 0, 1));
+        if (object.time > currentTime) {
+          const futureDistance = Math.max(0, headX - judgeX);
+          alpha = 0.18 + (0.68 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1));
         } else if (currentTime > object.endTime) {
           alpha = 0.86 * clamp(1 - ((currentTime - object.endTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1);
         }
+        const rollFadeAlpha = taikoFadeAlphaAtX(rightX);
+        alpha *= rollFadeAlpha;
         if (alpha <= 0.02) {
           continue;
         }
 
         const rollThickness = Math.max(6, laneHeight * 0.48);
-        ctx.strokeStyle = withAlpha(rollColor, alpha * 0.9);
+        if (rightX > rightFadeStartX) {
+          const rollGradient = ctx.createLinearGradient(leftX, laneY, rightX, laneY);
+          const fadeStop = clamp((rightFadeStartX - leftX) / Math.max(rightX - leftX, 1), 0, 1);
+          rollGradient.addColorStop(0, withAlpha(rollColor, alpha * 0.9));
+          rollGradient.addColorStop(fadeStop, withAlpha(rollColor, alpha * 0.9));
+          rollGradient.addColorStop(1, withAlpha(rollColor, 0));
+          ctx.strokeStyle = rollGradient;
+        } else {
+          ctx.strokeStyle = withAlpha(rollColor, alpha * 0.9);
+        }
         ctx.lineWidth = rollThickness;
         ctx.lineCap = 'round';
         ctx.beginPath();
@@ -803,7 +1388,16 @@ export class PreviewRenderer {
         ctx.lineTo(rightX, laneY);
         ctx.stroke();
 
-        ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28);
+        if (rightX > rightFadeStartX) {
+          const highlightGradient = ctx.createLinearGradient(leftX, laneY, rightX, laneY);
+          const fadeStop = clamp((rightFadeStartX - leftX) / Math.max(rightX - leftX, 1), 0, 1);
+          highlightGradient.addColorStop(0, withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28));
+          highlightGradient.addColorStop(fadeStop, withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28));
+          highlightGradient.addColorStop(1, withAlpha({ r: 255, g: 255, b: 255 }, 0));
+          ctx.strokeStyle = highlightGradient;
+        } else {
+          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28);
+        }
         ctx.lineWidth = Math.max(1.2, rollThickness * 0.22);
         ctx.beginPath();
         ctx.moveTo(leftX, laneY);
@@ -812,18 +1406,19 @@ export class PreviewRenderer {
         continue;
       }
 
-      const dt = object.time - currentTime;
-      const x = judgeX + ((dt / lookAheadMs) * noteTravelWidth);
-      if (x < (playfieldX - 20) || x > (playfieldX + playfieldWidth + 20)) {
+      const x = taikoPositionAt(object.time, object.time);
+      if (x < (playfieldX - 20) || x > (laneRightEdge + 20)) {
         continue;
       }
 
       let alpha = 0.88;
-      if (dt > 0) {
-        alpha = 0.2 + (0.68 * clamp(1 - (dt / lookAheadMs), 0, 1));
-      } else if (dt < 0) {
-        alpha = 0.88 * clamp(1 - ((-dt) / CIRCLE_POST_HIT_FADE_MS), 0, 1);
+      if (object.time > currentTime) {
+        const futureDistance = Math.max(0, x - judgeX);
+        alpha = 0.2 + (0.68 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1));
+      } else if (object.time < currentTime) {
+        alpha = 0.88 * clamp(1 - ((currentTime - object.time) / CIRCLE_POST_HIT_FADE_MS), 0, 1);
       }
+      alpha *= taikoFadeAlphaAtX(x);
       if (alpha <= 0.02) {
         continue;
       }
@@ -844,16 +1439,18 @@ export class PreviewRenderer {
       ctx.arc(x, laneY, radius, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    ctx.restore();
   }
 
   renderCatch(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight) {
-    const objects = this.mapData.objects;
+    const catchObjects = this.getCatchRenderObjects();
     const currentTime = this.currentTimeMs;
     const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
     const comboColours = this.comboColours;
     const circleSize = this.mapData.circleSize;
     const catcherY = playfieldY + (playfieldHeight * 0.9);
-    const lookAheadMs = Math.max(900, preemptMs);
+    const lookAheadMs = preemptMs;
     const postCatchFadeMs = 16;
     const lookBehindMs = Math.max(36, postCatchFadeMs + 14);
     const visibleStart = currentTime - lookBehindMs;
@@ -868,49 +1465,8 @@ export class PreviewRenderer {
 
     const mapX = (x) => playfieldX + ((clamp(x, 0, OSU_WIDTH) / OSU_WIDTH) * playfieldWidth);
 
-    let targetCatcherX = playfieldX + (playfieldWidth / 2);
-    let previousObject = null;
-    let nextObject = null;
-    for (const object of objects) {
-      if (!object || object.kind === 'spinner') {
-        continue;
-      }
-      if (object.time <= currentTime) {
-        previousObject = object;
-        continue;
-      }
-      nextObject = object;
-      break;
-    }
-
-    if (previousObject && nextObject && nextObject.time > previousObject.time) {
-      const t = clamp((currentTime - previousObject.time) / (nextObject.time - previousObject.time), 0, 1);
-      const prevX = mapX(previousObject.x);
-      const nextX = mapX(nextObject.x);
-      targetCatcherX = prevX + ((nextX - prevX) * t);
-    } else if (nextObject) {
-      targetCatcherX = mapX(nextObject.x);
-    } else if (previousObject) {
-      targetCatcherX = mapX(previousObject.x);
-    }
-
-    const lastRenderX = Number.isFinite(this.catcherRenderX) ? this.catcherRenderX : Number.NaN;
-    const lastRenderTime = Number.isFinite(this.catcherRenderTime) ? this.catcherRenderTime : Number.NaN;
-    const deltaTime = currentTime - lastRenderTime;
-    if (!Number.isFinite(lastRenderX) || !Number.isFinite(lastRenderTime) || deltaTime < 0 || deltaTime > 220) {
-      this.catcherRenderX = targetCatcherX;
-    } else {
-      const blend = clamp(deltaTime / 110, 0.14, 1);
-      this.catcherRenderX = lastRenderX + ((targetCatcherX - lastRenderX) * blend);
-    }
-    this.catcherRenderTime = currentTime;
-    const catcherX = this.catcherRenderX;
-
     const catcherWidth = Math.max(42, playfieldWidth * 0.1);
     const catcherHeight = Math.max(8, playfieldHeight * 0.03);
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.fillRect(catcherX - (catcherWidth / 2), catcherY - (catcherHeight / 2), catcherWidth, catcherHeight);
-
     const baseFruitRadius = Math.max(6, playfieldHeight * 0.038);
     const csRadiusScale = clamp(getCircleRadius(circleSize) / getCircleRadius(5), 0.45, 1.8);
     const fruitRadius = baseFruitRadius * csRadiusScale;
@@ -918,15 +1474,231 @@ export class PreviewRenderer {
     const catchContactY = catcherY - (catcherHeight / 2) - fruitRadius + 0.5;
     const dropDistance = Math.max(1, catchContactY - spawnY);
     const pixelsPerMs = dropDistance / lookAheadMs;
+    const catcherWidthOsu = (catcherWidth / Math.max(1, playfieldWidth)) * OSU_WIDTH;
+    this.applyCatchHyperDashIndicators(catchObjects, catcherWidthOsu);
+    const drawCatcherBody = (x, y, width, height, fillStyle) => {
+      ctx.fillStyle = fillStyle;
+      ctx.fillRect(x - (width / 2), y - (height / 2), width, height);
+    };
 
-    for (const object of objects) {
+    const objectScreenY = (time) => {
+      const dt = time - currentTime;
+      const fallingY = catchContactY - (dt * pixelsPerMs);
+      return clamp(fallingY, spawnY, catchContactY);
+    };
+
+    const walkSpeedPxPerMs = (playfieldWidth / OSU_WIDTH) * 0.5;
+    const dashSpeedPxPerMs = walkSpeedPxPerMs * 2;
+    const resolveCatchMoveSpeedPxPerMs = (startX, endX, availableMs, hyperDashActive = false) => {
+      const distancePx = Math.abs(endX - startX);
+      if (!(distancePx > 0.001) || !(availableMs > 0)) {
+        return 0;
+      }
+
+      const requiredSpeedPxPerMs = distancePx / Math.max(availableMs, 1);
+      if (hyperDashActive) {
+        return Math.max(dashSpeedPxPerMs, requiredSpeedPxPerMs);
+      }
+      if (requiredSpeedPxPerMs <= walkSpeedPxPerMs) {
+        return walkSpeedPxPerMs;
+      }
+      if (requiredSpeedPxPerMs <= dashSpeedPxPerMs) {
+        return dashSpeedPxPerMs;
+      }
+      return Math.max(dashSpeedPxPerMs, requiredSpeedPxPerMs);
+    };
+    const getCatchTravelPosition = (startX, endX, startTime, endTime, sampleTime, speedPxPerMs) => {
+      const distancePx = Math.abs(endX - startX);
+      if (!(distancePx > 0.001) || !(endTime > startTime) || !(speedPxPerMs > 0)) {
+        return endX;
+      }
+
+      const moveDurationMs = distancePx / speedPxPerMs;
+      const moveStartTime = endTime - moveDurationMs;
+      if (sampleTime <= moveStartTime) {
+        return startX;
+      }
+      if (sampleTime >= endTime) {
+        return endX;
+      }
+
+      const travelledPx = (sampleTime - moveStartTime) * speedPxPerMs;
+      return startX + (Math.sign(endX - startX) * travelledPx);
+    };
+    const visibleCatchTargets = [];
+    for (const object of catchObjects) {
+      if (!object || object.type === 'banana') {
+        continue;
+      }
+
+      const dt = object.time - currentTime;
+      if (dt > lookAheadMs || dt < -postCatchFadeMs) {
+        continue;
+      }
+
+      const y = objectScreenY(object.time);
+      if (y < playfieldY - 12 || y > catcherY + 8) {
+        continue;
+      }
+
+      visibleCatchTargets.push(object);
+    }
+
+    const lastRenderX = Number.isFinite(this.catcherRenderX) ? this.catcherRenderX : Number.NaN;
+    const lastRenderTime = Number.isFinite(this.catcherRenderTime) ? this.catcherRenderTime : Number.NaN;
+    const deltaTime = currentTime - lastRenderTime;
+    let previousVisible = null;
+    let nextVisible = null;
+    if (visibleCatchTargets.length > 0) {
+      for (const object of visibleCatchTargets) {
+        if (object.time <= currentTime) {
+          previousVisible = object;
+          continue;
+        }
+        nextVisible = object;
+        break;
+      }
+    }
+
+    let catcherX = Number.isFinite(lastRenderX)
+      ? lastRenderX
+      : (playfieldX + (playfieldWidth / 2));
+    if (previousVisible && nextVisible && nextVisible.time > previousVisible.time) {
+      const previousX = mapX(previousVisible.x);
+      const nextX = mapX(nextVisible.x);
+      const moveSpeedPxPerMs = resolveCatchMoveSpeedPxPerMs(
+        previousX,
+        nextX,
+        nextVisible.time - previousVisible.time,
+        previousVisible.hyperDash,
+      );
+      catcherX = getCatchTravelPosition(
+        previousX,
+        nextX,
+        previousVisible.time,
+        nextVisible.time,
+        currentTime,
+        moveSpeedPxPerMs,
+      );
+    } else if (nextVisible && nextVisible.time > currentTime) {
+      const nextX = mapX(nextVisible.x);
+      const moveSpeedPxPerMs = resolveCatchMoveSpeedPxPerMs(
+        catcherX,
+        nextX,
+        nextVisible.time - currentTime,
+        false,
+      );
+      if (Number.isFinite(lastRenderTime) && deltaTime > 0 && deltaTime <= 220 && moveSpeedPxPerMs > 0) {
+        const stepPx = moveSpeedPxPerMs * deltaTime;
+        const distancePx = nextX - catcherX;
+        if (Math.abs(distancePx) <= stepPx) {
+          catcherX = nextX;
+        } else {
+          catcherX += Math.sign(distancePx) * stepPx;
+        }
+      } else {
+        catcherX = nextX;
+      }
+    } else if (previousVisible) {
+      catcherX = mapX(previousVisible.x);
+    }
+
+    this.catcherRenderX = catcherX;
+    if (!Number.isFinite(lastRenderX) || !Number.isFinite(lastRenderTime) || deltaTime < 0 || deltaTime > 220) {
+      this.catchCatcherTrailSamples = [];
+    }
+    this.catcherRenderTime = currentTime;
+    catcherX = this.catcherRenderX;
+
+    if (!Number.isFinite(this.catchLastEffectTime) || currentTime < this.catchLastEffectTime - 8 || currentTime > this.catchLastEffectTime + 2000) {
+      this.catchHyperDashHitEffects = [];
+      this.catchTriggeredHitEffects = new Set();
+    }
+    this.catchLastEffectTime = currentTime;
+
+    const catcherVelocity = (Number.isFinite(lastRenderX) && Number.isFinite(deltaTime) && deltaTime > 0)
+      ? Math.abs(catcherX - lastRenderX) / deltaTime
+      : 0;
+    this.catchCatcherTrailSamples.push({ time: currentTime, x: catcherX });
+    const trailWindowMs = 220;
+    this.catchCatcherTrailSamples = this.catchCatcherTrailSamples.filter((sample) => (currentTime - sample.time) <= trailWindowMs);
+    const velocityTrailStrength = clamp((catcherVelocity - 0.26) / 0.92, 0, 1);
+    const velocityAfterimageCount = Math.max(0, Math.floor(velocityTrailStrength * 14));
+    if (velocityAfterimageCount > 0 && this.catchCatcherTrailSamples.length > 1) {
+      const trailLookbackMs = 36 + (170 * velocityTrailStrength);
+      for (let i = velocityAfterimageCount; i >= 1; i -= 1) {
+        const targetAge = (i / velocityAfterimageCount) * trailLookbackMs;
+        const targetTime = currentTime - targetAge;
+        let trailSample = this.catchCatcherTrailSamples[0];
+        for (const sample of this.catchCatcherTrailSamples) {
+          trailSample = sample;
+          if (sample.time >= targetTime) {
+            break;
+          }
+        }
+
+        const layerProgress = 1 - ((i - 1) / velocityAfterimageCount);
+        const easedAlpha = (0.018 + (0.17 * velocityTrailStrength)) * Math.pow(layerProgress, 1.35);
+        drawCatcherBody(
+          trailSample.x,
+          catcherY,
+          catcherWidth,
+          catcherHeight,
+          `rgba(255, 255, 255, ${easedAlpha})`,
+        );
+      }
+    }
+
+    for (const object of catchObjects) {
+      if (!object || object.type === 'banana') {
+        continue;
+      }
+      if (!(object.hyperDash || object.hyperDashFollowUp) || this.catchTriggeredHitEffects.has(object.renderId)) {
+        continue;
+      }
+
+      const hitElapsed = currentTime - object.time;
+      if (hitElapsed < 0 || hitElapsed > postCatchFadeMs) {
+        continue;
+      }
+
+      this.catchTriggeredHitEffects.add(object.renderId);
+      this.catchHyperDashHitEffects.push({
+        x: catcherX,
+        y: catcherY,
+        startTime: currentTime,
+      });
+    }
+
+    const remainingHitEffects = [];
+    for (const effect of this.catchHyperDashHitEffects) {
+      const age = currentTime - effect.startTime;
+      if (age < 0 || age > 220) {
+        continue;
+      }
+
+      const progress = clamp(age / 220, 0, 1);
+      const alpha = 0.42 * Math.pow(1 - progress, 1.5);
+      const scale = 1 + (0.18 * progress);
+      const lift = catcherHeight * 0.8 * progress;
+      const width = catcherWidth * scale;
+      const height = catcherHeight * scale;
+      drawCatcherBody(effect.x, effect.y - lift, width, height, `rgba(255, 70, 70, ${alpha})`);
+      remainingHitEffects.push(effect);
+    }
+    this.catchHyperDashHitEffects = remainingHitEffects;
+
+    drawCatcherBody(catcherX, catcherY, catcherWidth, catcherHeight, 'rgba(255,255,255,0.85)');
+
+    const dropletColor = { r: 176, g: 242, b: 255 };
+    const tinyDropletColor = { r: 238, g: 252, b: 255 };
+    const bananaColor = { r: 255, g: 222, b: 84 };
+
+    for (const object of catchObjects) {
       if (object.time > visibleEnd) {
         break;
       }
       if (object.time < visibleStart) {
-        continue;
-      }
-      if (object.kind === 'spinner') {
         continue;
       }
 
@@ -958,16 +1730,37 @@ export class PreviewRenderer {
         continue;
       }
 
-      const combo = comboColours[object.comboIndex % comboColours.length] || DEFAULT_COLOURS[0];
-      ctx.fillStyle = withAlpha(combo, alpha);
+      let color = comboColours[object.comboIndex % comboColours.length] || DEFAULT_COLOURS[0];
+      let radius = fruitRadius;
+      if (object.type === 'droplet') {
+        color = dropletColor;
+        radius = fruitRadius * 0.58;
+      } else if (object.type === 'tinyDroplet') {
+        color = tinyDropletColor;
+        radius = Math.max(1.6, fruitRadius * 0.26);
+      } else if (object.type === 'banana') {
+        color = bananaColor;
+        radius = fruitRadius * 0.42;
+      }
+
+      ctx.fillStyle = withAlpha(color, alpha);
       ctx.beginPath();
-      ctx.arc(x, y, fruitRadius, 0, Math.PI * 2);
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
       ctx.fill();
-      ctx.strokeStyle = `rgba(255,255,255,${clamp(alpha * 0.8, 0, 1)})`;
-      ctx.lineWidth = Math.max(1.2, fruitRadius * 0.18);
-      ctx.beginPath();
-      ctx.arc(x, y, fruitRadius, 0, Math.PI * 2);
-      ctx.stroke();
+      if (object.hyperDash) {
+        ctx.strokeStyle = `rgba(255, 111, 145, ${clamp(alpha * 0.95, 0, 1)})`;
+        ctx.lineWidth = Math.max(1.2, radius * 0.2);
+        ctx.beginPath();
+        ctx.arc(x, y, radius + Math.max(2, radius * 0.28), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (object.type !== 'tinyDroplet') {
+        ctx.strokeStyle = `rgba(255,255,255,${clamp(alpha * 0.8, 0, 1)})`;
+        ctx.lineWidth = Math.max(1, radius * 0.18);
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
   }
 
@@ -975,39 +1768,32 @@ export class PreviewRenderer {
     const objects = this.mapData.objects;
     const currentTime = this.currentTimeMs;
     const circleSize = this.mapData.circleSize;
-    const approachRate = this.mapData.approachRate;
-    const overallDifficulty = this.mapData.overallDifficulty;
     const keys = clamp(Math.round(circleSize || 4), 1, 10);
     const laneAreaWidth = playfieldWidth * 0.62;
     const laneAreaX = playfieldX + ((playfieldWidth - laneAreaWidth) / 2);
     const laneWidth = laneAreaWidth / keys;
     const receptorY = playfieldY + (playfieldHeight * 0.88);
-    const diffValue = clamp(
-      Number.isFinite(overallDifficulty)
-        ? overallDifficulty
-        : (Number.isFinite(approachRate) ? approachRate : 5),
-      0,
-      10,
-    );
-    const diffProgress = Math.pow(diffValue / 10, 0.95);
-    const lookAheadMs = 1500 - (diffProgress * 1100);
     const lookBehindMs = 80;
-    const speed = (receptorY - (playfieldY + 8)) / lookAheadMs;
     const visibleStart = currentTime - lookBehindMs;
-    const visibleEnd = currentTime + lookAheadMs + 180;
+    const visibleEnd = currentTime + 10000;
     const centerLane = (keys % 2 === 1) ? Math.floor(keys / 2) : -1;
-    const leftBase = { r: 86, g: 154, b: 255 };
-    const rightBase = { r: 255, g: 120, b: 178 };
-    const centerBase = { r: 255, g: 211, b: 108 };
+    const lightPinkBase = { r: 232, g: 210, b: 223 };
+    const pinkBase = { r: 205, g: 113, b: 160 };
+    const centerBase = { r: 231, g: 211, b: 58 };
 
     const getLaneGroupBase = (lane) => {
       if (lane === centerLane) {
         return centerBase;
       }
       if (centerLane >= 0) {
-        return lane < centerLane ? leftBase : rightBase;
+        const distanceFromCenter = Math.abs(lane - centerLane);
+        return (distanceFromCenter % 2 === 1) ? pinkBase : lightPinkBase;
       }
-      return lane < (keys / 2) ? leftBase : rightBase;
+      const half = keys / 2;
+      const distanceFromSplit = lane < half
+        ? ((half - 1) - lane)
+        : (lane - half);
+      return (distanceFromSplit % 2 === 0) ? pinkBase : lightPinkBase;
     };
 
     for (let lane = 0; lane < keys; lane += 1) {
@@ -1032,8 +1818,13 @@ export class PreviewRenderer {
     const lanePadding = Math.max(2, laneWidth * 0.12);
     const noteWidth = Math.max(4, laneWidth - (lanePadding * 2));
     const noteHeight = Math.max(8, playfieldHeight * 0.03);
+    // Mania notes spawn a bit above the visible field, so use a slightly larger travel distance.
+    const scrollTravelHeight = playfieldHeight * MANIA_SCROLL_TRAVEL_HEIGHT_SCALE;
+    const currentPixelsPerMs = Math.max(0.001, this.getManiaPixelsPerMs(currentTime, scrollTravelHeight));
+    const topFadeHeight = Math.max(16, playfieldHeight * 0.11);
+    const topFadeEndY = playfieldY + topFadeHeight;
     const postJudgeTravelPx = Math.max(receptorHalf, noteHeight * 0.25);
-    const postJudgeDelayMs = postJudgeTravelPx / Math.max(speed, 0.001);
+    const postJudgeDelayMs = postJudgeTravelPx / currentPixelsPerMs;
     const holdBodyBottomClampY = receptorY + receptorHalf;
     const receptorVanishCenterY = receptorY + (receptorHalf * 0.5);
     const receptorVanishFadePx = Math.max(1, receptorHalf);
@@ -1057,9 +1848,7 @@ export class PreviewRenderer {
       }
 
       let alpha = 0.9;
-      if (dt > 0) {
-        alpha = 0.24 + (0.66 * clamp(1 - (dt / lookAheadMs), 0, 1));
-      } else if (isHoldNote) {
+      if (isHoldNote) {
         alpha = 0.9;
       } else if (dt < 0) {
         const postHitElapsed = (-dt) - postJudgeDelayMs;
@@ -1080,14 +1869,25 @@ export class PreviewRenderer {
       );
       const laneX = laneAreaX + (lane * laneWidth);
       const noteX = laneX + lanePadding;
-      const rawHeadY = receptorY - ((object.time - currentTime) * speed) - (noteHeight / 2);
+      const rawHeadY = receptorY - this.getManiaScrollOffset(currentTime, object.time, scrollTravelHeight) - (noteHeight / 2);
       const headY = (isHoldNote && currentTime >= object.time && currentTime <= holdEndClampTime)
         ? (receptorY - (noteHeight / 2))
         : rawHeadY;
       const shouldRenderHoldBody = isHoldNote && currentTime <= holdEndClampTime;
 
+      const noteCenterY = headY + (noteHeight / 2);
+      if (!isHoldNote && dt > 0) {
+        const futureDistance = clamp(receptorY - noteCenterY, 0, playfieldHeight);
+        alpha = 0.24 + (0.66 * clamp(1 - (futureDistance / Math.max(playfieldHeight, 1)), 0, 1));
+      }
+      if (noteCenterY < topFadeEndY) {
+        alpha *= clamp((noteCenterY - playfieldY) / Math.max(topFadeHeight, 1), 0, 1);
+        if (alpha <= 0.02) {
+          continue;
+        }
+      }
+
       if (!isHoldNote) {
-        const noteCenterY = headY + (noteHeight / 2);
         if (noteCenterY > receptorVanishCenterY) {
           const overPx = noteCenterY - receptorVanishCenterY;
           alpha *= clamp(1 - (overPx / receptorVanishFadePx), 0, 1);
@@ -1105,7 +1905,7 @@ export class PreviewRenderer {
       };
 
       if (shouldRenderHoldBody) {
-        const tailY = receptorY - ((object.endTime - currentTime) * speed) + (noteHeight / 2);
+        const tailY = receptorY - this.getManiaScrollOffset(currentTime, object.endTime, scrollTravelHeight) + (noteHeight / 2);
         const bodyTop = Math.max(playfieldY - 20, Math.min(headY, tailY));
         const bodyBottom = Math.min(
           holdBodyBottomClampY,
@@ -1113,7 +1913,20 @@ export class PreviewRenderer {
         );
         const bodyHeight = bodyBottom - bodyTop;
         if (bodyHeight > 2) {
-          ctx.fillStyle = withAlpha(groupBase, alpha * 0.35);
+          const bodyAlpha = alpha * 0.35;
+          if (bodyTop < topFadeEndY) {
+            const fadeStop = clamp((topFadeEndY - bodyTop) / Math.max(bodyHeight, 1), 0, 1);
+            const startAlpha = bodyTop <= playfieldY
+              ? 0
+              : bodyAlpha * clamp((bodyTop - playfieldY) / Math.max(topFadeHeight, 1), 0, 1);
+            const bodyGradient = ctx.createLinearGradient(0, bodyTop, 0, bodyBottom);
+            bodyGradient.addColorStop(0, withAlpha(groupBase, startAlpha));
+            bodyGradient.addColorStop(fadeStop, withAlpha(groupBase, bodyAlpha));
+            bodyGradient.addColorStop(1, withAlpha(groupBase, bodyAlpha));
+            ctx.fillStyle = bodyGradient;
+          } else {
+            ctx.fillStyle = withAlpha(groupBase, bodyAlpha);
+          }
           ctx.fillRect(noteX + (noteWidth * 0.2), bodyTop, noteWidth * 0.6, bodyHeight);
         }
       }
@@ -1180,6 +1993,7 @@ export class PreviewRenderer {
     });
 
     const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
+    const timeFadeInMs = getStandardFadeInMs(preemptMs);
     const circleRadius = getCircleRadius(this.mapData.circleSize) * scale;
     const drawnCircleRadius = circleRadius * DRAWN_CIRCLE_RADIUS_SCALE;
     const sliderBodyRadius = Math.max(2, drawnCircleRadius * 0.95);
@@ -1204,25 +2018,22 @@ export class PreviewRenderer {
       visibleObjects.push(object);
     }
 
-    visibleObjects.sort((a, b) => {
-      const aIsFuture = a.time > this.currentTimeMs;
-      const bIsFuture = b.time > this.currentTimeMs;
-      if (aIsFuture !== bIsFuture) {
-        return aIsFuture ? -1 : 1;
-      }
-      return a.time - b.time;
-    });
+    visibleObjects.sort((a, b) => b.time - a.time);
 
     for (const object of visibleObjects) {
       const combo = this.comboColours[object.comboIndex % this.comboColours.length] || DEFAULT_COLOURS[0];
+      let sliderReverseIndicators = [];
       let sliderHeadCanvasPoint = null;
+      let sliderTailCanvasPoint = null;
       let sliderHeadElapsedMs = -1;
       let sliderHeadHitProgress = 0;
       let sliderHeadHitAlpha = 0;
       let sliderHeadHitRadius = drawnCircleRadius;
       if (object.kind === 'slider') {
         const sliderHead = getObjectStartPositionOsu(object);
+        const sliderTail = getSliderTailPositionOsu(object);
         sliderHeadCanvasPoint = toCanvas(sliderHead.x, sliderHead.y);
+        sliderTailCanvasPoint = toCanvas(sliderTail.x, sliderTail.y);
         sliderHeadElapsedMs = this.currentTimeMs - object.time;
         if (sliderHeadElapsedMs >= 0) {
           sliderHeadHitProgress = clamp(sliderHeadElapsedMs / SLIDER_HEAD_HIT_FADE_MS, 0, 1);
@@ -1246,8 +2057,9 @@ export class PreviewRenderer {
 
       let baseAlpha = OBJECT_VISUAL_MAX_ALPHA;
       if (timeUntil > 0) {
-        const fadeInProgress = 1 - clamp(timeUntil / preemptMs, 0, 1);
-        baseAlpha = OBJECT_VISUAL_MAX_ALPHA * Math.pow(fadeInProgress, 2.2);
+        const fadeInElapsedMs = preemptMs - timeUntil;
+        const fadeInProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+        baseAlpha = OBJECT_VISUAL_MAX_ALPHA * fadeInProgress;
       } else if (timeSinceFadeAnchor > 0) {
         const fadeOutProgress = clamp(timeSinceFadeAnchor / fadeWindowMs, 0, 1);
         const fadeOutAlpha = Math.pow(1 - fadeOutProgress, 1.8);
@@ -1265,13 +2077,25 @@ export class PreviewRenderer {
         objectRenderRadius = drawnCircleRadius * (1 + (SLIDER_HEAD_HIT_SCALE_BOOST * circleHitEaseOut));
       }
       if (objectRenderAlpha <= 0.001) continue;
+      const sliderSharedOutlineAlpha = clamp((objectRenderAlpha * 1.12) + 0.03, 0, 1);
+      const sliderSharedOutlineWidth = Math.max(1.3, objectRenderRadius * 0.1);
 
       if (object.kind === 'slider') {
-        const pathPoints = buildSliderPathPointsOsu(object).map((p) => toCanvas(p.x, p.y));
+        const fullPathPoints = buildSliderPathPointsOsu(object);
+        let sliderDrawPointsOsu = fullPathPoints;
+        if (this.standardSnakingSliders && timeUntil > 0) {
+          const fadeInElapsedMs = preemptMs - timeUntil;
+          const snakeProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+          const fullPathLength = getPathLength(fullPathPoints);
+          if (fullPathLength > 0) {
+            sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * snakeProgress);
+          }
+        }
+        const pathPoints = sliderDrawPointsOsu.map((p) => toCanvas(p.x, p.y));
         if (pathPoints.length > 1) {
-          const sliderBodyOutlineAlpha = clamp((baseAlpha * 0.9) + 0.015, 0, 0.86);
-          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, sliderBodyOutlineAlpha);
-          ctx.lineWidth = (sliderBodyRadius * 2) + Math.max(1.3, circleRadius * 0.16);
+          const sliderShadowAlpha = clamp(baseAlpha * 0.24, 0, 0.3);
+          ctx.strokeStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderShadowAlpha);
+          ctx.lineWidth = (sliderBodyRadius * 2 * STANDARD_OBJECT_SHADOW_SCALE) + Math.max(1.6, circleRadius * 0.2);
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
           ctx.beginPath();
@@ -1281,7 +2105,18 @@ export class PreviewRenderer {
           }
           ctx.stroke();
 
-          ctx.strokeStyle = withAlpha(combo, baseAlpha * 0.65);
+          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, sliderSharedOutlineAlpha);
+          ctx.lineWidth = (sliderBodyRadius * 2) + (sliderSharedOutlineWidth * 2);
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.beginPath();
+          ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+          for (let i = 1; i < pathPoints.length; i += 1) {
+            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+          }
+          ctx.stroke();
+
+          ctx.strokeStyle = withAlpha(combo, baseAlpha * 0.56);
           ctx.lineWidth = sliderBodyRadius * 2;
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
@@ -1291,6 +2126,29 @@ export class PreviewRenderer {
             ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
           }
           ctx.stroke();
+
+          const sliderTicks = this.buildStandardSliderTicks(object);
+          const tickRadius = Math.max(1.6, drawnCircleRadius * 0.14);
+          for (const tick of sliderTicks) {
+            if (!tick?.position) {
+              continue;
+            }
+
+            const tickElapsed = this.currentTimeMs - tick.time;
+            let tickAlpha = objectRenderAlpha * 0.72;
+            if (tickElapsed > 0) {
+              tickAlpha *= clamp(1 - (tickElapsed / SLIDER_HEAD_HIT_FADE_MS), 0, 1);
+            }
+            if (tickAlpha <= 0.001) {
+              continue;
+            }
+
+            const tickPoint = toCanvas(tick.position.x, tick.position.y);
+            ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, tickAlpha);
+            ctx.beginPath();
+            ctx.arc(tickPoint.x, tickPoint.y, tickRadius, 0, Math.PI * 2);
+            ctx.fill();
+          }
 
           if ((object.slides || 1) > 1) {
             const startPoint = pathPoints[0];
@@ -1305,9 +2163,19 @@ export class PreviewRenderer {
             };
             const indicatorSize = Math.max(5, drawnCircleRadius * 0.45);
 
-            drawReverseIndicator(ctx, endPoint, endDir, indicatorSize, baseAlpha * 0.95);
+            sliderReverseIndicators.push({
+              position: endPoint,
+              direction: endDir,
+              size: indicatorSize,
+              alpha: baseAlpha * 0.95,
+            });
             if ((object.slides || 1) >= 3) {
-              drawReverseIndicator(ctx, startPoint, startDir, indicatorSize, baseAlpha * 0.95);
+              sliderReverseIndicators.push({
+                position: startPoint,
+                direction: startDir,
+                size: indicatorSize,
+                alpha: baseAlpha * 0.95,
+              });
             }
           }
         }
@@ -1323,6 +2191,12 @@ export class PreviewRenderer {
         );
         const spinnerRadius = spinnerStartRadius - ((spinnerStartRadius - spinnerEndRadius) * spinnerProgress);
 
+        ctx.strokeStyle = withAlpha({ r: 0, g: 0, b: 0 }, baseAlpha * 0.28);
+        ctx.lineWidth = Math.max(3, drawnCircleRadius * 0.46);
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, spinnerRadius, 0, Math.PI * 2);
+        ctx.stroke();
+
         ctx.strokeStyle = withAlpha(combo, baseAlpha * 0.8);
         ctx.lineWidth = Math.max(2, drawnCircleRadius * 0.3);
         ctx.beginPath();
@@ -1333,37 +2207,110 @@ export class PreviewRenderer {
 
       if (timeUntil > 0 && timeUntil <= preemptMs) {
         const approachProgress = clamp(timeUntil / preemptMs, 0, 1);
-        const approachRadius = drawnCircleRadius * (1 + 2.2 * approachProgress);
-        const fadeInProgress = 1 - approachProgress;
-        ctx.strokeStyle = withAlpha(combo, (0.55 * fadeInProgress) + 0.06);
+        const approachRadius = drawnCircleRadius * (1 + ((APPROACH_CIRCLE_START_SCALE - 1) * approachProgress));
+        const approachFadeInElapsedMs = preemptMs - timeUntil;
+        const approachAlpha = 0.9 * clamp(approachFadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+        ctx.strokeStyle = withAlpha(combo, approachAlpha);
         ctx.lineWidth = Math.max(1.5, drawnCircleRadius * 0.14);
         ctx.beginPath();
         ctx.arc(point.x, point.y, approachRadius, 0, Math.PI * 2);
         ctx.stroke();
       }
 
-      const objectBodyBaseAlpha = clamp((objectRenderAlpha * 0.9) + 0.015, 0, 0.86);
-      const objectBodyComboAlpha = clamp(objectRenderAlpha * 0.65, 0, 1);
-      ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectBodyBaseAlpha);
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, objectRenderRadius, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = withAlpha(combo, objectBodyComboAlpha);
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, objectRenderRadius, 0, Math.PI * 2);
-      ctx.fill();
-
+      const objectBodyBaseAlpha = clamp((objectRenderAlpha * 0.8) + 0.012, 0, 0.78);
+      const objectBodyComboAlpha = clamp(objectRenderAlpha * 0.56, 0, 1);
       const objectOutlineAlpha = clamp((objectRenderAlpha * 1.12) + 0.03, 0, 1);
       const objectOutlineWidth = Math.max(1.3, objectRenderRadius * 0.1);
       const objectOutlineRadius = Math.max(0.5, objectRenderRadius - (objectOutlineWidth * 0.5));
-      ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectOutlineAlpha);
-      ctx.lineWidth = objectOutlineWidth;
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, objectOutlineRadius, 0, Math.PI * 2);
-      ctx.stroke();
+      const sliderBallVisible = object.kind === 'slider'
+        && this.currentTimeMs >= object.time
+        && this.currentTimeMs <= object.endTime;
+      const renderPrimaryCircle = object.kind !== 'slider'
+        || this.currentTimeMs < object.time
+        || sliderBallVisible;
+      if (object.kind === 'slider' && this.standardSliderEndCircles && sliderTailCanvasPoint) {
+        ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, objectRenderAlpha * STANDARD_OBJECT_SHADOW_ALPHA);
+        ctx.beginPath();
+        ctx.arc(
+          sliderTailCanvasPoint.x,
+          sliderTailCanvasPoint.y,
+          drawnCircleRadius * STANDARD_OBJECT_SHADOW_SCALE,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+
+        ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectBodyBaseAlpha);
+        ctx.beginPath();
+        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, drawnCircleRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = withAlpha(combo, objectBodyComboAlpha);
+        ctx.beginPath();
+        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, drawnCircleRadius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectOutlineAlpha);
+        ctx.lineWidth = objectOutlineWidth;
+        ctx.beginPath();
+        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, objectOutlineRadius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      if (renderPrimaryCircle) {
+        if (sliderBallVisible) {
+          const sliderBallRadius = objectRenderRadius * 0.92;
+          ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectRenderAlpha * 0.5);
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, sliderBallRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectOutlineAlpha);
+          ctx.lineWidth = objectOutlineWidth;
+          ctx.beginPath();
+          ctx.arc(
+            point.x,
+            point.y,
+            Math.max(0.5, sliderBallRadius - (objectOutlineWidth * 0.5)),
+            0,
+            Math.PI * 2,
+          );
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, objectRenderAlpha * STANDARD_OBJECT_SHADOW_ALPHA);
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, objectRenderRadius * STANDARD_OBJECT_SHADOW_SCALE, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectBodyBaseAlpha);
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, objectRenderRadius, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = withAlpha(combo, objectBodyComboAlpha);
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, objectRenderRadius, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectOutlineAlpha);
+          ctx.lineWidth = objectOutlineWidth;
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, objectOutlineRadius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      }
 
       if (object.kind === 'slider' && sliderHeadCanvasPoint && sliderHeadHitAlpha > 0.001) {
+        ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderHeadHitAlpha * 0.3);
+        ctx.beginPath();
+        ctx.arc(
+          sliderHeadCanvasPoint.x,
+          sliderHeadCanvasPoint.y,
+          sliderHeadHitRadius * 1.1,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+
         ctx.fillStyle = withAlpha(combo, sliderHeadHitAlpha);
         ctx.beginPath();
         ctx.arc(sliderHeadCanvasPoint.x, sliderHeadCanvasPoint.y, sliderHeadHitRadius, 0, Math.PI * 2);
@@ -1377,6 +2324,16 @@ export class PreviewRenderer {
         ctx.beginPath();
         ctx.arc(sliderHeadCanvasPoint.x, sliderHeadCanvasPoint.y, sliderHeadOutlineRadius, 0, Math.PI * 2);
         ctx.stroke();
+      }
+
+      for (const indicator of sliderReverseIndicators) {
+        drawReverseIndicator(
+          ctx,
+          indicator.position,
+          indicator.direction,
+          indicator.size,
+          indicator.alpha,
+        );
       }
 
       if ((object.kind === 'circle' || object.kind === 'slider') && Number.isFinite(object.comboNumber)) {

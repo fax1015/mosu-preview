@@ -1,16 +1,62 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>mosu! Preview Settings</title>
-    <link rel="stylesheet" href="options.css" />
-  </head>
-  <body>
-    <main class="settings-page">
-      <section class="settings-card">
-        <h1>mosu! Preview Settings</h1>
-        <p class="settings-subtitle">Audio provider selection for full track hot-swap.</p>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mosu! Preview Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+
+<body>
+  <main class="settings-page">
+    <section class="settings-card">
+      <h1>mosu! Preview Settings</h1>
+      <p class="settings-subtitle">Preview rendering and audio provider configuration.</p>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">standard preview</h2>
+        <label for="standardSnakingSliders" class="settings-toggle">
+          <input id="standardSnakingSliders" type="checkbox" />
+          <span>Enable snaking sliders</span>
+        </label>
+        <p class="settings-help">
+          Snakes slider bodies in during fade-in. Disabled by default.
+        </p>
+        <label for="standardSliderEndCircles" class="settings-toggle">
+          <input id="standardSliderEndCircles" type="checkbox" checked />
+          <span>Show slider end circles</span>
+        </label>
+        <p class="settings-help">
+          Shows a separate tail circle at the slider end point. Enabled by default.
+        </p>
+      </div>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">mania preview</h2>
+        <label for="maniaScrollSpeedRange" class="settings-label">
+          Scroll speed
+          <span id="maniaScrollSpeedValue" class="settings-inline-value">28</span>
+        </label>
+        <div class="settings-speed-row">
+          <input id="maniaScrollSpeedRange" class="settings-range" type="range" min="1" max="40" step="1" value="28" />
+          <input id="maniaScrollSpeedInput" class="settings-number" type="number" min="1" max="40" step="1"
+            value="28" />
+        </div>
+        <p class="settings-help">
+          Approximate fixed travel time: <span id="maniaScrollTimeValue">1429 ms</span>.
+        </p>
+        <label for="maniaScrollScaleWithBpm" class="settings-toggle">
+          <input id="maniaScrollScaleWithBpm" type="checkbox" />
+          <span>Scale scroll speed with BPM</span>
+        </label>
+        <p class="settings-help">
+          When enabled, faster timing sections shorten note travel time using the active BPM.
+        </p>
+      </div>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">audio</h2>
         <label for="providerOverride" class="settings-label">Provider override</label>
         <select id="providerOverride" class="settings-select">
           <option value="auto">Auto (recommended)</option>
@@ -22,9 +68,12 @@
         <p class="settings-help">
           Auto uses reliability ordering with temporary cooldown after provider failures.
         </p>
-        <p id="saveStatus" class="settings-status" aria-live="polite"></p>
-      </section>
-    </main>
-    <script type="module" src="src/options.js"></script>
-  </body>
+      </div>
+
+      <p id="saveStatus" class="settings-status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script type="module" src="src/options.js"></script>
+</body>
+
 </html>

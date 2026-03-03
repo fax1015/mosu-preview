@@ -22,6 +22,8 @@ const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
 const standardSliderEndCircles = document.querySelector('#standardSliderEndCircles');
 const saveStatus = document.querySelector('#saveStatus');
+let saveStatusHideTimeout = null;
+let saveStatusClearTimeout = null;
 
 const readSettings = () => new Promise((resolve) => {
   chrome.storage.sync.get([
@@ -66,8 +68,40 @@ const showStatus = (text, isError = false) => {
   if (!saveStatus) {
     return;
   }
+
+  if (saveStatusHideTimeout) {
+    window.clearTimeout(saveStatusHideTimeout);
+  }
+  if (saveStatusClearTimeout) {
+    window.clearTimeout(saveStatusClearTimeout);
+  }
+
   saveStatus.textContent = text;
-  saveStatus.style.color = isError ? 'rgb(255, 132, 132)' : 'rgb(134, 221, 170)';
+  saveStatus.classList.toggle('is-error', isError);
+  saveStatus.classList.add('is-visible');
+
+  saveStatusHideTimeout = window.setTimeout(() => {
+    saveStatus.classList.remove('is-visible');
+  }, 1400);
+
+  saveStatusClearTimeout = window.setTimeout(() => {
+    saveStatus.textContent = '';
+    saveStatus.classList.remove('is-error');
+  }, 1800);
+};
+
+const updateManiaScrollRangeProgress = (value) => {
+  if (!maniaScrollSpeedRange) {
+    return;
+  }
+
+  const numericValue = Number(value);
+  const boundedValue = Number.isFinite(numericValue)
+    ? Math.min(MAX_MANIA_SCROLL_SPEED, Math.max(MIN_MANIA_SCROLL_SPEED, numericValue))
+    : MIN_MANIA_SCROLL_SPEED;
+  const progress = ((boundedValue - MIN_MANIA_SCROLL_SPEED) / (MAX_MANIA_SCROLL_SPEED - MIN_MANIA_SCROLL_SPEED)) * 100;
+
+  maniaScrollSpeedRange.style.setProperty('--range-progress', `${progress}%`);
 };
 
 const renderManiaScrollSpeed = (value) => {
@@ -77,6 +111,7 @@ const renderManiaScrollSpeed = (value) => {
   if (maniaScrollSpeedRange) {
     maniaScrollSpeedRange.value = String(normalized);
   }
+  updateManiaScrollRangeProgress(normalized);
   if (maniaScrollSpeedInput) {
     maniaScrollSpeedInput.value = String(normalized);
   }
@@ -103,10 +138,10 @@ const getFormSettings = () => ({
 const persistFormSettings = async () => {
   const didSave = await writeSettings(getFormSettings());
   if (didSave) {
-    showStatus('Saved.');
+    showStatus('Saved');
     return true;
   }
-  showStatus('Could not save setting.', true);
+  showStatus('Failed to save', true);
   return false;
 };
 

@@ -6,7 +6,7 @@ import {
 
 const OSU_WIDTH = 512;
 const OSU_HEIGHT = 384;
-const STACK_OFFSET_OSU = 5.2;
+const STACK_OFFSET_OSU = 3.2;
 const DRAWN_CIRCLE_RADIUS_SCALE = 0.93;
 const CIRCLE_POST_HIT_FADE_MS = 120;
 const LONG_OBJECT_POST_HIT_FADE_MS = 140;
@@ -420,7 +420,7 @@ const getObjectStackOffset = (object) => {
   }
 
   const offset = stackIndex * STACK_OFFSET_OSU;
-  return { x: -offset, y: -offset };
+  return { x: offset, y: offset };
 };
 
 const getObjectStartPositionOsu = (object) => {

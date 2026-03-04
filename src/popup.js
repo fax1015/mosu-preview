@@ -59,7 +59,7 @@ const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
 const AUDIO_PREVIEW_BASE = 'https://b.ppy.sh/preview';
 const FULL_AUDIO_CACHE_NAME = 'mosuPreviewFullAudioV1';
 const FULL_AUDIO_CACHE_MAX_BYTES = 35 * 1024 * 1024;
-const FULL_AUDIO_CACHE_TOTAL_MAX_BYTES = 140 * 1024 * 1024;
+const FULL_AUDIO_CACHE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
 const FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const FULL_AUDIO_CACHE_PRUNE_INTERVAL_MS = 1000 * 60 * 30;
 const FULL_AUDIO_CACHE_LAST_PRUNE_KEY = 'fullAudioCacheLastPruneMs';
@@ -95,35 +95,44 @@ const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
 const ZIP_LOCAL_SIGNATURE = 0x04034b50;
 const ARCHIVE_DOWNLOAD_SOURCES = [
   {
-    id: 'osu_direct',
-    label: 'osu.direct',
+    id: 'mino',
+    label: 'Mino',
     rank: 0,
-    url: (setId) => `https://osu.direct/api/d/${setId}`,
-    credentials: 'omit',
-  },
-  {
-    id: 'catboy',
-    label: 'catboy',
-    rank: 1,
     url: (setId) => `https://catboy.best/d/${setId}`,
     credentials: 'omit',
   },
   {
-    id: 'osu',
-    label: 'osu!',
-    rank: 2,
-    url: (setId) => `https://osu.ppy.sh/beatmapsets/${setId}/download?noVideo=1`,
-    credentials: 'include',
+    id: 'nerinyan',
+    label: 'NeriNyan',
+    rank: 1,
+    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
+    credentials: 'omit',
   },
   {
-    id: 'chimu',
-    label: 'chimu',
+    id: 'osu_direct',
+    label: 'osu.direct',
+    rank: 2,
+    url: (setId) => `https://osu.direct/api/d/${setId}`,
+    credentials: 'omit',
+  },
+  {
+    id: 'sayobot',
+    label: 'Sayobot',
     rank: 3,
-    url: (setId) => `https://api.chimu.moe/v1/download/${setId}?n=1`,
+    url: (setId) => `https://txy1.sayobot.cn/beatmaps/download/novideo/${setId}?server=null`,
     credentials: 'omit',
   },
 ];
 const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', ...ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id)]);
+const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
+  catboy: 'mino',
+});
+
+const normalizeProviderOverride = (value) => {
+  const candidate = String(value || 'auto');
+  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
+  return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
+};
 
 const state = {
   metadata: null,
@@ -452,7 +461,18 @@ const getProviderDisplayName = (providerId) => {
 
 const ensureProviderStats = (providerId) => {
   if (!state.providerStats[providerId]) {
-    state.providerStats[providerId] = { successes: 0, failures: 0 };
+    state.providerStats[providerId] = {
+      successes: 0,
+      failures: 0,
+      timedSuccesses: 0,
+      totalSuccessMs: 0,
+    };
+  } else {
+    const stats = state.providerStats[providerId];
+    stats.successes = Number(stats.successes) || 0;
+    stats.failures = Number(stats.failures) || 0;
+    stats.timedSuccesses = Number(stats.timedSuccesses) || 0;
+    stats.totalSuccessMs = Number(stats.totalSuccessMs) || 0;
   }
   return state.providerStats[providerId];
 };
@@ -464,9 +484,13 @@ const getProviderCooldownRemainingMs = (providerId) => {
 
 const isProviderInCooldown = (providerId) => getProviderCooldownRemainingMs(providerId) > 0;
 
-const markProviderSuccess = (providerId) => {
+const markProviderSuccess = (providerId, durationMs = NaN) => {
   const stats = ensureProviderStats(providerId);
   stats.successes += 1;
+  if (Number.isFinite(durationMs) && durationMs >= 0) {
+    stats.timedSuccesses += 1;
+    stats.totalSuccessMs += durationMs;
+  }
   delete state.providerCooldowns[providerId];
 };
 
@@ -485,6 +509,14 @@ const getProviderReliabilityScore = (providerId) => {
   return stats.successes / attempts;
 };
 
+const getProviderAverageSuccessMs = (providerId) => {
+  const stats = ensureProviderStats(providerId);
+  if (stats.timedSuccesses <= 0 || stats.totalSuccessMs <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return stats.totalSuccessMs / stats.timedSuccesses;
+};
+
 const getAutoOrderedProviders = () => {
   const available = ARCHIVE_DOWNLOAD_SOURCES.filter((source) => !isProviderInCooldown(source.id));
   return available.sort((a, b) => {
@@ -492,6 +524,12 @@ const getAutoOrderedProviders = () => {
     const bScore = getProviderReliabilityScore(b.id);
     if (aScore !== bScore) {
       return bScore - aScore;
+    }
+
+    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
+    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
+    if (aAvgSuccessMs !== bAvgSuccessMs) {
+      return aAvgSuccessMs - bAvgSuccessMs;
     }
 
     const aStats = ensureProviderStats(a.id);
@@ -523,6 +561,11 @@ const getProviderSequenceForDownload = () => {
     if (aScore !== bScore) {
       return bScore - aScore;
     }
+    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
+    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
+    if (aAvgSuccessMs !== bAvgSuccessMs) {
+      return aAvgSuccessMs - bAvgSuccessMs;
+    }
     return a.rank - b.rank;
   });
 };
@@ -530,8 +573,7 @@ const getProviderSequenceForDownload = () => {
 const readProviderOverrideSetting = async () => {
   try {
     const items = await storageGet('sync', [PROVIDER_OVERRIDE_KEY]);
-    const candidate = String(items?.[PROVIDER_OVERRIDE_KEY] || 'auto');
-    return ALLOWED_PROVIDER_OVERRIDES.has(candidate) ? candidate : 'auto';
+    return normalizeProviderOverride(items?.[PROVIDER_OVERRIDE_KEY]);
   } catch {
     return 'auto';
   }
@@ -1322,6 +1364,7 @@ const downloadBeatmapArchive = async (setId) => {
       state.currentArchiveProviderLabel = source.label;
       setAudioBadgeWithProvider('loading', 'Loading full audio', source.label, `Downloading from ${source.label}`);
       const requestUrl = source.url(setId);
+      const requestStartMs = performance.now();
       addDebugLog(`audio: ${source.label} -> request start`);
 
       const { response, buffer } = await fetchArrayBufferWithTimeout(requestUrl, {
@@ -1350,7 +1393,7 @@ const downloadBeatmapArchive = async (setId) => {
         continue;
       }
 
-      markProviderSuccess(source.id);
+      markProviderSuccess(source.id, performance.now() - requestStartMs);
       addDebugLog(`audio: ${source.label} -> zip ok (${response.url})`);
       return { archiveBuffer, sourceLabel: source.label };
     } catch (error) {
@@ -1705,6 +1748,7 @@ const runAudioFetchProbe = async () => {
   }
 
   addDebugLog(`probe: running provider checks for set ${targetSetId} (${getProviderDisplayName(state.providerOverride)})`);
+  addDebugLog(`probe: provider order ${sources.map((source) => source.label).join(' -> ')}`);
   for (const source of sources) {
     const result = await probeArchiveSource(source, targetSetId);
     if (result.ok) {

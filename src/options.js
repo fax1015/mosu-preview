@@ -12,7 +12,16 @@ import {
 } from './settings.js';
 import { storageGet, storageSet } from './webextension.js';
 
-const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', 'osu_direct', 'catboy', 'osu', 'chimu']);
+const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', 'osu_direct', 'nerinyan', 'sayobot', 'mino']);
+const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
+  catboy: 'mino',
+});
+
+const normalizeProviderOverride = (value) => {
+  const candidate = String(value || 'auto');
+  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
+  return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
+};
 
 const providerSelect = document.querySelector('#providerOverride');
 const maniaScrollSpeedRange = document.querySelector('#maniaScrollSpeedRange');
@@ -36,9 +45,8 @@ const readSettings = async () => {
       STANDARD_SLIDER_END_CIRCLES_KEY,
     ]);
 
-    const candidate = String(items?.[PROVIDER_OVERRIDE_KEY] || 'auto');
     return {
-      providerOverride: ALLOWED_PROVIDER_OVERRIDES.has(candidate) ? candidate : 'auto',
+      providerOverride: normalizeProviderOverride(items?.[PROVIDER_OVERRIDE_KEY]),
       ...normalizePreviewSettings(items),
     };
   } catch {
@@ -50,9 +58,7 @@ const readSettings = async () => {
 };
 
 const writeSettings = async (settings) => {
-  const providerOverride = ALLOWED_PROVIDER_OVERRIDES.has(settings?.providerOverride)
-    ? settings.providerOverride
-    : 'auto';
+  const providerOverride = normalizeProviderOverride(settings?.providerOverride);
 
   try {
     await storageSet('sync', {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "mosu! preview",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
   "permissions": [
     "activeTab",
@@ -10,9 +10,11 @@
   "host_permissions": [
     "https://osu.ppy.sh/*",
     "https://b.ppy.sh/*",
+    "https://osu.direct/*",
+    "https://api.nerinyan.moe/*",
+    "https://txy1.sayobot.cn/*",
     "https://catboy.best/*",
-    "https://api.chimu.moe/*",
-    "https://osu.direct/*"
+    "https://osu.sayobot.cn/*"
   ],
   "icons": {
     "16": "assets/icons/icon16.png",

@@ -10,6 +10,19 @@ import {
   STANDARD_SLIDER_END_CIRCLES_KEY,
   normalizePreviewSettings,
 } from './settings.js';
+import {
+  addStorageChangedListener,
+  createTab,
+  hasStorageArea,
+  openOptionsPage,
+  queryTabs,
+  storageGet,
+  storageSet,
+} from './webextension.js';
+
+if (/firefox/i.test(globalThis.navigator?.userAgent || '')) {
+  document.body?.classList.add('is-firefox-popup');
+}
 
 const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
@@ -31,6 +44,14 @@ const debugStatus = document.querySelector('#mapPreviewDebugStatus');
 const debugLog = document.querySelector('#mapPreviewDebugLog');
 const debugRunButton = document.querySelector('#mapPreviewDebugRunBtn');
 const debugClearButton = document.querySelector('#mapPreviewDebugClearBtn');
+const debugCloseButton = document.querySelector('#mapPreviewDebugCloseBtn');
+const infoButton = document.querySelector('#mapPreviewInfoBtn');
+const infoModal = document.querySelector('#mapPreviewInfoModal');
+const infoBackdrop = document.querySelector('#mapPreviewInfoBackdrop');
+const infoCloseButton = document.querySelector('#mapPreviewInfoCloseBtn');
+const infoOptionsButton = document.querySelector('#mapPreviewInfoOptionsBtn');
+const infoIssueButton = document.querySelector('#mapPreviewInfoIssueBtn');
+const infoOsuButton = document.querySelector('#mapPreviewInfoOsuBtn');
 
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
 const CACHE_KEY = 'mosuPreviewCacheV1';
@@ -53,6 +74,12 @@ const DEBUG_LOG_LIMIT = 80;
 const PREVIEW_AUDIO_PROVIDER_LABEL = 'b.ppy.sh';
 const CACHE_AUDIO_PROVIDER_LABEL = 'cache';
 const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
+const AUDIO_VISUAL_SYNC_INTERVAL_MS = 240;
+const AUDIO_VISUAL_SYNC_THRESHOLD_MS = 90;
+const SUPPORT_LINKS = {
+  issue: 'https://github.com/fax1015/mosu--preview/issues/new',
+  osu: 'https://osu.ppy.sh/users/faxaxaxa',
+};
 const UNSUPPORTED_ASCII_TICK_MS = 140;
 const UNSUPPORTED_ASCII_CHAR_WIDTH_PX = 6.2;
 const UNSUPPORTED_ASCII_CHAR_HEIGHT_PX = 11.2;
@@ -123,6 +150,7 @@ const state = {
   fullAudioError: '',
   debugLogs: [],
   debugPanelOpen: false,
+  infoMenuOpen: false,
   activeSetId: null,
   providerOverride: 'auto',
   providerStats: {},
@@ -135,6 +163,7 @@ const state = {
   playbackSpeed: 1,
   unsupportedAsciiTimer: null,
   unsupportedAsciiField: null,
+  lastAudioVisualSyncPerfMs: 0,
   maniaScrollSpeed: normalizePreviewSettings().maniaScrollSpeed,
   maniaScaleScrollSpeedWithBpm: normalizePreviewSettings().maniaScaleScrollSpeedWithBpm,
   standardSnakingSliders: normalizePreviewSettings().standardSnakingSliders,
@@ -148,6 +177,21 @@ state.audio.addEventListener('canplay', () => {
 state.audio.addEventListener('error', () => {
   state.audioReady = false;
   state.audioSyncEnabled = false;
+});
+state.audio.addEventListener('playing', () => {
+  if (state.playbackMode === 'audio') {
+    resyncVisualPlaybackToAudio({ force: true });
+  }
+});
+state.audio.addEventListener('seeked', () => {
+  if (state.playbackMode === 'audio') {
+    resyncVisualPlaybackToAudio({ force: true });
+  }
+});
+state.audio.addEventListener('timeupdate', () => {
+  if (state.playbackMode === 'audio') {
+    resyncVisualPlaybackToAudio();
+  }
 });
 
 const formatDebugTime = (unixMs) => {
@@ -193,6 +237,43 @@ const addDebugLog = (message) => {
 const clearDebugLogs = () => {
   state.debugLogs = [];
   renderDebugPanel();
+};
+
+const renderInfoMenu = () => {
+  if (infoModal) {
+    infoModal.hidden = !state.infoMenuOpen;
+  }
+
+  if (infoButton) {
+    infoButton.setAttribute('aria-expanded', state.infoMenuOpen ? 'true' : 'false');
+  }
+};
+
+const setInfoMenuOpen = (isOpen) => {
+  state.infoMenuOpen = Boolean(isOpen);
+  renderInfoMenu();
+};
+
+const openSupportLink = async (url) => {
+  if (!url) {
+    return;
+  }
+
+  try {
+    await createTab({ url });
+  } catch {
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+  setInfoMenuOpen(false);
+};
+
+const openExtensionOptions = async () => {
+  try {
+    await openOptionsPage();
+  } catch {
+    await createTab({ url: 'options.html' });
+  }
+  setInfoMenuOpen(false);
 };
 
 const randomRange = (min, max) => min + (Math.random() * (max - min));
@@ -446,58 +527,51 @@ const getProviderSequenceForDownload = () => {
   });
 };
 
-const readProviderOverrideSetting = () => new Promise((resolve) => {
-  chrome.storage.sync.get([PROVIDER_OVERRIDE_KEY], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve('auto');
-      return;
-    }
-
+const readProviderOverrideSetting = async () => {
+  try {
+    const items = await storageGet('sync', [PROVIDER_OVERRIDE_KEY]);
     const candidate = String(items?.[PROVIDER_OVERRIDE_KEY] || 'auto');
-    resolve(ALLOWED_PROVIDER_OVERRIDES.has(candidate) ? candidate : 'auto');
-  });
-});
+    return ALLOWED_PROVIDER_OVERRIDES.has(candidate) ? candidate : 'auto';
+  } catch {
+    return 'auto';
+  }
+};
 
-const readAudioVolumeSetting = () => new Promise((resolve) => {
-  chrome.storage.sync.get([AUDIO_VOLUME_KEY], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve(DEFAULT_AUDIO_VOLUME);
-      return;
-    }
-
+const readAudioVolumeSetting = async () => {
+  try {
+    const items = await storageGet('sync', [AUDIO_VOLUME_KEY]);
     const candidate = Number(items?.[AUDIO_VOLUME_KEY]);
     if (!Number.isFinite(candidate)) {
-      resolve(DEFAULT_AUDIO_VOLUME);
-      return;
+      return DEFAULT_AUDIO_VOLUME;
     }
-    resolve(clamp(candidate, 0, 1));
-  });
-});
+    return clamp(candidate, 0, 1);
+  } catch {
+    return DEFAULT_AUDIO_VOLUME;
+  }
+};
 
-const readManiaPreviewSettings = () => new Promise((resolve) => {
-  chrome.storage.sync.get([
-    MANIA_SCROLL_SPEED_KEY,
-    MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-    STANDARD_SNAKING_SLIDERS_KEY,
-    STANDARD_SLIDER_END_CIRCLES_KEY,
-  ], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve(normalizePreviewSettings());
-      return;
-    }
-    resolve(normalizePreviewSettings(items));
-  });
-});
+const readManiaPreviewSettings = async () => {
+  try {
+    const items = await storageGet('sync', [
+      MANIA_SCROLL_SPEED_KEY,
+      MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+      STANDARD_SNAKING_SLIDERS_KEY,
+      STANDARD_SLIDER_END_CIRCLES_KEY,
+    ]);
+    return normalizePreviewSettings(items);
+  } catch {
+    return normalizePreviewSettings();
+  }
+};
 
-const writeAudioVolumeSetting = (volume) => new Promise((resolve) => {
-  chrome.storage.sync.set({ [AUDIO_VOLUME_KEY]: clamp(volume, 0, 1) }, () => {
-    const error = chrome.runtime.lastError;
-    resolve(!error);
-  });
-});
+const writeAudioVolumeSetting = async (volume) => {
+  try {
+    await storageSet('sync', { [AUDIO_VOLUME_KEY]: clamp(volume, 0, 1) });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const applyAudioVolume = (volume) => {
   const nextVolume = clamp(Number.isFinite(volume) ? volume : DEFAULT_AUDIO_VOLUME, 0, 1);
@@ -546,10 +620,44 @@ const getCurrentManualMapTime = (nowPerfMs) => (
   state.playStartMapMs + ((nowPerfMs - state.playStartPerfMs) * state.playbackSpeed)
 );
 
+const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs = performance.now()) => {
+  state.currentTimeMs = clamp(mapTimeMs, 0, state.durationMs || 1);
+  if (state.isPlaying) {
+    state.playStartMapMs = state.currentTimeMs;
+    state.playStartPerfMs = nowPerfMs;
+  }
+};
+
+const getAudioMappedTimeMs = () => (
+  state.audioAnchorMapMs + ((state.audio.currentTime || 0) * 1000)
+);
+
+const resyncVisualPlaybackToAudio = ({ force = false, nowPerfMs = performance.now() } = {}) => {
+  if (
+    !state.audioSyncEnabled
+    || !state.audio
+    || !state.audio.src
+    || state.audio.paused
+  ) {
+    return false;
+  }
+
+  const audioMappedTimeMs = clamp(getAudioMappedTimeMs(), 0, state.durationMs || 1);
+  const driftMs = Math.abs(audioMappedTimeMs - state.currentTimeMs);
+  state.lastAudioVisualSyncPerfMs = nowPerfMs;
+
+  if (force || driftMs >= AUDIO_VISUAL_SYNC_THRESHOLD_MS) {
+    syncVisualClockToMapTime(audioMappedTimeMs, nowPerfMs);
+    return true;
+  }
+
+  return false;
+};
+
 const applyPlaybackSpeed = (nextSpeed) => {
   const normalized = PLAYBACK_SPEED_CYCLE.find((value) => Math.abs(value - Number(nextSpeed)) < 0.0001) || 1;
 
-  if (state.isPlaying && state.playbackMode === 'manual') {
+  if (state.isPlaying) {
     const now = performance.now();
     state.currentTimeMs = clamp(getCurrentManualMapTime(now), 0, state.durationMs || 1);
     state.playStartMapMs = state.currentTimeMs;
@@ -643,34 +751,32 @@ const makeFullAudioCacheKey = (setId, audioFilename) => {
   return `https://osu.ppy.sh/beatmapsets/${safeSetId}/audio/${safeFile}`;
 };
 
-const readLastFullAudioPruneTime = () => new Promise((resolve) => {
-  if (!chrome.storage?.local?.get) {
-    resolve(0);
-    return;
+const readLastFullAudioPruneTime = async () => {
+  if (!hasStorageArea('local')) {
+    return 0;
   }
 
-  chrome.storage.local.get([FULL_AUDIO_CACHE_LAST_PRUNE_KEY], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve(0);
-      return;
-    }
+  try {
+    const items = await storageGet('local', [FULL_AUDIO_CACHE_LAST_PRUNE_KEY]);
     const value = Number(items?.[FULL_AUDIO_CACHE_LAST_PRUNE_KEY]);
-    resolve(Number.isFinite(value) && value > 0 ? value : 0);
-  });
-});
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch {
+    return 0;
+  }
+};
 
-const writeLastFullAudioPruneTime = (unixMs) => new Promise((resolve) => {
-  if (!chrome.storage?.local?.set) {
-    resolve(false);
-    return;
+const writeLastFullAudioPruneTime = async (unixMs) => {
+  if (!hasStorageArea('local')) {
+    return false;
   }
 
-  chrome.storage.local.set({ [FULL_AUDIO_CACHE_LAST_PRUNE_KEY]: Math.max(0, Math.floor(unixMs)) }, () => {
-    const error = chrome.runtime.lastError;
-    resolve(!error);
-  });
-});
+  try {
+    await storageSet('local', { [FULL_AUDIO_CACHE_LAST_PRUNE_KEY]: Math.max(0, Math.floor(unixMs)) });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const parseCachedAtMs = (response) => {
   const headerValue = response?.headers?.get('x-mosu-cached-at') || '';
@@ -840,6 +946,7 @@ const waitForAudioReady = () => new Promise((resolve) => {
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   state.audioSyncEnabled = Boolean(sourceUrl);
   state.audioReady = false;
+  state.lastAudioVisualSyncPerfMs = 0;
   state.audioAnchorMapMs = Math.max(0, Number.isFinite(anchorMapMs) ? anchorMapMs : 0);
   state.audio.playbackRate = state.playbackSpeed;
   if (!sourceUrl) {
@@ -1262,6 +1369,7 @@ const downloadBeatmapArchive = async (setId) => {
 const stopPlayback = () => {
   state.isPlaying = false;
   state.playbackMode = 'none';
+  state.lastAudioVisualSyncPerfMs = 0;
   if (state.rafId !== null) {
     cancelAnimationFrame(state.rafId);
     state.rafId = null;
@@ -1282,25 +1390,15 @@ const playbackTick = (now) => {
     return;
   }
 
-  if (
-    state.playbackMode === 'audio'
-    && state.audioSyncEnabled
-    && state.audio
-  ) {
+  state.currentTimeMs = getCurrentManualMapTime(now);
+
+  if (state.playbackMode === 'audio' && state.audioSyncEnabled && state.audio) {
     if (state.audio.paused) {
       state.playbackMode = 'manual';
-      state.playStartPerfMs = now;
-      state.playStartMapMs = state.currentTimeMs;
-      state.rafId = requestAnimationFrame(playbackTick);
-      return;
+      syncVisualClockToMapTime(state.currentTimeMs, now);
+    } else if ((now - state.lastAudioVisualSyncPerfMs) >= AUDIO_VISUAL_SYNC_INTERVAL_MS) {
+      resyncVisualPlaybackToAudio({ nowPerfMs: now });
     }
-    state.currentTimeMs = clamp(
-      state.audioAnchorMapMs + ((state.audio.currentTime || 0) * 1000),
-      0,
-      state.durationMs,
-    );
-  } else {
-    state.currentTimeMs = getCurrentManualMapTime(now);
   }
 
   if (state.currentTimeMs >= state.durationMs) {
@@ -1475,6 +1573,8 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
       await state.audio.play();
       state.playbackMode = 'audio';
       state.isPlaying = true;
+      syncVisualClockToMapTime(swapMapTimeMs);
+      resyncVisualPlaybackToAudio({ force: true });
       if (state.rafId === null) {
         state.rafId = requestAnimationFrame(playbackTick);
       }
@@ -1483,8 +1583,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     } catch {
       state.playbackMode = 'manual';
       state.isPlaying = true;
-      state.playStartPerfMs = performance.now();
-      state.playStartMapMs = state.currentTimeMs;
+      syncVisualClockToMapTime(state.currentTimeMs);
       if (state.rafId === null) {
         state.rafId = requestAnimationFrame(playbackTick);
       }
@@ -1679,17 +1778,10 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
   };
 };
 
-const queryActiveTab = () => new Promise((resolve, reject) => {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      reject(new Error(error.message || 'Failed to query active tab.'));
-      return;
-    }
-
-    resolve(Array.isArray(tabs) ? tabs[0] : null);
-  });
-});
+const queryActiveTab = async () => {
+  const tabs = await queryTabs({ active: true, currentWindow: true });
+  return Array.isArray(tabs) ? tabs[0] : null;
+};
 
 const fetchBeatmapFile = async (beatmapId) => {
   const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
@@ -1710,33 +1802,31 @@ const fetchBeatmapFile = async (beatmapId) => {
   return text;
 };
 
-const readCachedPreview = () => new Promise((resolve) => {
-  if (!chrome.storage?.session?.get) {
-    resolve(null);
-    return;
+const readCachedPreview = async () => {
+  if (!hasStorageArea('session', 'local')) {
+    return null;
   }
 
-  chrome.storage.session.get([CACHE_KEY], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve(null);
-      return;
-    }
-    resolve(items?.[CACHE_KEY] || null);
-  });
-});
+  try {
+    const items = await storageGet('session', [CACHE_KEY], { fallbackAreaName: 'local' });
+    return items?.[CACHE_KEY] || null;
+  } catch {
+    return null;
+  }
+};
 
-const writeCachedPreview = (value) => new Promise((resolve) => {
-  if (!chrome.storage?.session?.set) {
-    resolve(false);
-    return;
+const writeCachedPreview = async (value) => {
+  if (!hasStorageArea('session', 'local')) {
+    return false;
   }
 
-  chrome.storage.session.set({ [CACHE_KEY]: value }, () => {
-    const error = chrome.runtime.lastError;
-    resolve(!error);
-  });
-});
+  try {
+    await storageSet('session', { [CACHE_KEY]: value }, { fallbackAreaName: 'local' });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const initializePreviewForCurrentTab = async () => {
   stopPlayback();
@@ -1903,10 +1993,12 @@ const startAudioPlayback = async () => {
     if (!hasSeekTarget) {
       return false;
     }
+    syncVisualClockToMapTime(state.currentTimeMs);
     state.audio.playbackRate = state.playbackSpeed;
     await state.audio.play();
     state.playbackMode = 'audio';
     state.isPlaying = true;
+    resyncVisualPlaybackToAudio({ force: true });
     state.rafId = requestAnimationFrame(playbackTick);
     return true;
   } catch {
@@ -1941,12 +2033,7 @@ const seekFromTimelineEvent = (event) => {
   }
 
   const newTime = renderer.timeFromTimelineEvent(event);
-  state.currentTimeMs = clamp(newTime, 0, state.durationMs);
-
-  if (state.isPlaying && state.playbackMode === 'manual') {
-    state.playStartPerfMs = performance.now();
-    state.playStartMapMs = state.currentTimeMs;
-  }
+  syncVisualClockToMapTime(newTime);
 
   if (state.playbackMode === 'audio' && state.audioSyncEnabled) {
     try {
@@ -1954,8 +2041,8 @@ const seekFromTimelineEvent = (event) => {
       if (!hasTarget && state.isPlaying) {
         state.audio.pause();
         state.playbackMode = 'manual';
-        state.playStartPerfMs = performance.now();
-        state.playStartMapMs = state.currentTimeMs;
+      } else {
+        resyncVisualPlaybackToAudio({ force: true });
       }
     } catch {
       // Ignore seek errors; visual playback continues.
@@ -1998,6 +2085,30 @@ audioStatusBadge?.addEventListener('click', () => {
   renderDebugPanel();
 });
 
+infoButton?.addEventListener('click', () => {
+  setInfoMenuOpen(!state.infoMenuOpen);
+});
+
+infoBackdrop?.addEventListener('click', () => {
+  setInfoMenuOpen(false);
+});
+
+infoCloseButton?.addEventListener('click', () => {
+  setInfoMenuOpen(false);
+});
+
+infoOptionsButton?.addEventListener('click', async () => {
+  await openExtensionOptions();
+});
+
+infoIssueButton?.addEventListener('click', async () => {
+  await openSupportLink(SUPPORT_LINKS.issue);
+});
+
+infoOsuButton?.addEventListener('click', async () => {
+  await openSupportLink(SUPPORT_LINKS.osu);
+});
+
 debugRunButton?.addEventListener('click', async () => {
   debugRunButton.disabled = true;
   try {
@@ -2010,6 +2121,17 @@ debugRunButton?.addEventListener('click', async () => {
 debugClearButton?.addEventListener('click', () => {
   clearDebugLogs();
   addDebugLog('debug: logs cleared');
+});
+
+debugCloseButton?.addEventListener('click', () => {
+  state.debugPanelOpen = false;
+  renderDebugPanel();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.infoMenuOpen) {
+    setInfoMenuOpen(false);
+  }
 });
 
 volumeSlider?.addEventListener('input', () => {
@@ -2068,33 +2190,32 @@ applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
 applyManiaPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
+renderInfoMenu();
 initializePreviewForCurrentTab();
 
-if (chrome.storage?.onChanged?.addListener) {
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'sync') {
-      return;
-    }
+addStorageChangedListener((changes, areaName) => {
+  if (areaName !== 'sync') {
+    return;
+  }
 
-    if (
-      changes[MANIA_SCROLL_SPEED_KEY]
-      || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
-      || changes[STANDARD_SNAKING_SLIDERS_KEY]
-      || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
-    ) {
-      applyManiaPreviewSettings({
-        maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
-        maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
-          ?? state.maniaScaleScrollSpeedWithBpm,
-        standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
-          ?? state.standardSnakingSliders,
-        standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
-          ?? state.standardSliderEndCircles,
-      });
+  if (
+    changes[MANIA_SCROLL_SPEED_KEY]
+    || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
+    || changes[STANDARD_SNAKING_SLIDERS_KEY]
+    || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
+  ) {
+    applyManiaPreviewSettings({
+      maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
+      maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
+        ?? state.maniaScaleScrollSpeedWithBpm,
+      standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
+        ?? state.standardSnakingSliders,
+      standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
+        ?? state.standardSliderEndCircles,
+    });
 
-      if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {
-        renderFrame();
-      }
+    if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {
+      renderFrame();
     }
-  });
-}
+  }
+});

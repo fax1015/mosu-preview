@@ -21,13 +21,19 @@ the extension only works on valid osu beatmap URLs.
 
 ## install locally
 
+### chrome
+
 1. open chrome and go to `chrome://extensions`.
 2. enable **Developer mode**.
 3. click **Load unpacked**.
 4. select the `mosu-preview` folder.
 
+### firefox
+
+1. open firefox and go to `about:debugging#/runtime/this-firefox`.
+2. click **Load Temporary Add-on...**.
+3. select the project's `manifest.json` file.
+
 ## notes
 
-this extension is kinda like a "refreshed" version of [osu! preview](https://github.com/JerryZhu99/osu-preview), updated to fit chrome's manifest V3. credits to [JerryZhu99](https://github.com/JerryZhu99) for the original idea.
-
-firefox support may be coming in the future?
+this extension is kinda like a "refreshed" version of [osu! preview](https://github.com/JerryZhu99/osu-preview), updated to fit chrome's manifest V3 and Firefox's WebExtension APIs. credits to [JerryZhu99](https://github.com/JerryZhu99) for the original idea.

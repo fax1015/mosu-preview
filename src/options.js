@@ -10,6 +10,7 @@ import {
   toPreviewSettingsStorage,
   calculateManiaScrollTimeMs,
 } from './settings.js';
+import { storageGet, storageSet } from './webextension.js';
 
 const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', 'osu_direct', 'catboy', 'osu', 'chimu']);
 
@@ -25,44 +26,44 @@ const saveStatus = document.querySelector('#saveStatus');
 let saveStatusHideTimeout = null;
 let saveStatusClearTimeout = null;
 
-const readSettings = () => new Promise((resolve) => {
-  chrome.storage.sync.get([
-    PROVIDER_OVERRIDE_KEY,
-    MANIA_SCROLL_SPEED_KEY,
-    MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-    STANDARD_SNAKING_SLIDERS_KEY,
-    STANDARD_SLIDER_END_CIRCLES_KEY,
-  ], (items) => {
-    const error = chrome.runtime.lastError;
-    if (error) {
-      resolve({
-        providerOverride: 'auto',
-        ...normalizePreviewSettings(),
-      });
-      return;
-    }
+const readSettings = async () => {
+  try {
+    const items = await storageGet('sync', [
+      PROVIDER_OVERRIDE_KEY,
+      MANIA_SCROLL_SPEED_KEY,
+      MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+      STANDARD_SNAKING_SLIDERS_KEY,
+      STANDARD_SLIDER_END_CIRCLES_KEY,
+    ]);
 
     const candidate = String(items?.[PROVIDER_OVERRIDE_KEY] || 'auto');
-    resolve({
+    return {
       providerOverride: ALLOWED_PROVIDER_OVERRIDES.has(candidate) ? candidate : 'auto',
       ...normalizePreviewSettings(items),
-    });
-  });
-});
+    };
+  } catch {
+    return {
+      providerOverride: 'auto',
+      ...normalizePreviewSettings(),
+    };
+  }
+};
 
-const writeSettings = (settings) => new Promise((resolve) => {
+const writeSettings = async (settings) => {
   const providerOverride = ALLOWED_PROVIDER_OVERRIDES.has(settings?.providerOverride)
     ? settings.providerOverride
     : 'auto';
 
-  chrome.storage.sync.set({
-    [PROVIDER_OVERRIDE_KEY]: providerOverride,
-    ...toPreviewSettingsStorage(settings),
-  }, () => {
-    const error = chrome.runtime.lastError;
-    resolve(!error);
-  });
-});
+  try {
+    await storageSet('sync', {
+      [PROVIDER_OVERRIDE_KEY]: providerOverride,
+      ...toPreviewSettingsStorage(settings),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const showStatus = (text, isError = false) => {
   if (!saveStatus) {

@@ -2,7 +2,32 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>mosu! Beatmap Preview</title>
+    <style>
+      html {
+        margin: 0;
+        width: 446px;
+        min-width: 446px;
+        max-width: 446px;
+        background: rgb(24, 23, 28);
+        color: rgb(255, 255, 255);
+        font-family: sans-serif;
+        overflow: hidden;
+      }
+
+      body {
+        margin: 0;
+        width: 100%;
+        min-height: 0;
+        box-sizing: border-box;
+        padding: 8px;
+      }
+
+      #mapPreviewPopup {
+        width: 430px;
+      }
+    </style>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -14,6 +39,17 @@
               <span class="map-preview-version" id="mapPreviewVersion"></span>
             </div>
           </div>
+          <button
+            type="button"
+            class="map-preview-info-btn"
+            id="mapPreviewInfoBtn"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="mapPreviewInfoModal"
+            title="Report a problem"
+          >
+            !
+          </button>
         </div>
       <div class="map-preview-canvas-wrap">
         <canvas id="mapPreviewCanvas" class="map-preview-canvas" width="1024" height="768"></canvas>
@@ -55,10 +91,27 @@
           <div class="map-preview-debug-actions">
             <button type="button" class="map-preview-debug-btn" id="mapPreviewDebugRunBtn">Run test</button>
             <button type="button" class="map-preview-debug-btn" id="mapPreviewDebugClearBtn">Clear</button>
+            <button type="button" class="map-preview-debug-btn" id="mapPreviewDebugCloseBtn">Close</button>
           </div>
         </div>
         <p class="map-preview-debug-status" id="mapPreviewDebugStatus">No data yet.</p>
         <pre class="map-preview-debug-log" id="mapPreviewDebugLog">No logs yet.</pre>
+      </div>
+      <div class="map-preview-info-modal-shell" id="mapPreviewInfoModal" hidden>
+        <button type="button" class="map-preview-info-backdrop" id="mapPreviewInfoBackdrop" aria-label="Close report menu"></button>
+        <div class="map-preview-info-modal" role="dialog" aria-modal="true" aria-labelledby="mapPreviewInfoTitle">
+          <div class="map-preview-info-header">
+            <p class="map-preview-info-title" id="mapPreviewInfoTitle">Report a problem</p>
+            <button type="button" class="map-preview-info-close" id="mapPreviewInfoCloseBtn" aria-label="Close report menu">×</button>
+          </div>
+          <div class="map-preview-info-actions">
+            <button type="button" class="map-preview-info-link" id="mapPreviewInfoIssueBtn">Open an issue</button>
+            <button type="button" class="map-preview-info-link" id="mapPreviewInfoOsuBtn">DM me on osu!</button>
+          </div>
+          <div class="map-preview-info-footer">
+            <button type="button" class="map-preview-info-link map-preview-info-link--secondary" id="mapPreviewInfoOptionsBtn">Open settings</button>
+          </div>
+        </div>
       </div>
       <div class="map-preview-unsupported" id="mapPreviewUnsupported" aria-live="polite">
         <pre class="map-preview-unsupported-ascii" id="mapPreviewUnsupportedAscii" aria-hidden="true"></pre>

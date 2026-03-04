@@ -22,6 +22,10 @@ const STANDARD_FADE_IN_BASE_MS = 400;
 const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
 const MANIA_SCROLL_TRAVEL_HEIGHT_SCALE = 1.34;
+const IS_FIREFOX = /firefox/i.test(globalThis.navigator?.userAgent || '');
+const MAX_CANVAS_DPR = IS_FIREFOX ? 1 : 2;
+const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
+const canvasContextCache = new WeakMap();
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -587,7 +591,15 @@ const buildDensityBins = (objects, durationMs, bins = 150) => {
 };
 
 const getCanvasContext = (canvas) => {
-  const dpr = window.devicePixelRatio || 1;
+  let cached = canvasContextCache.get(canvas);
+  if (!cached) {
+    cached = {
+      ctx: canvas.getContext('2d', CANVAS_CONTEXT_OPTIONS) || canvas.getContext('2d'),
+    };
+    canvasContextCache.set(canvas, cached);
+  }
+
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
   const width = Math.max(1, canvas.clientWidth);
   const height = Math.max(1, canvas.clientHeight);
 
@@ -596,7 +608,7 @@ const getCanvasContext = (canvas) => {
     canvas.height = Math.floor(height * dpr);
   }
 
-  const ctx = canvas.getContext('2d');
+  const { ctx } = cached;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, width, height };
 };
@@ -1248,11 +1260,15 @@ export class PreviewRenderer {
     const noteTravelWidth = (playfieldWidth * 0.82) + laneRightOverflow;
     const rightFadeWidth = Math.max(12, noteTravelWidth * 0.07);
     const rightFadeStartX = (judgeX + noteTravelWidth) - rightFadeWidth;
+    const leftMeasureFadeWidth = Math.max(24, judgeX - playfieldX);
     const maxVisibleAheadMs = 8000;
-    const maxVisibleBehindMs = 400;
+    const maxVisibleBehindMs = 0;
     const spinnerFadeInMs = 1400;
     const visibleEnd = currentTime + maxVisibleAheadMs;
     const visibleStart = currentTime - maxVisibleBehindMs;
+    const currentTaikoSpeed = Math.max(this.getTaikoPixelsPerMs(currentTime, playfieldWidth), 0.001);
+    const measureLookBehindMs = Math.max(1000, (leftMeasureFadeWidth + 24) / currentTaikoSpeed);
+    const measureVisibleStart = currentTime - measureLookBehindMs;
     const donColor = { r: 242, g: 86, b: 86 };
     const katColor = { r: 92, g: 166, b: 255 };
     const rollColor = { r: 255, g: 196, b: 84 };
@@ -1295,7 +1311,7 @@ export class PreviewRenderer {
 
     const measureLineTop = laneY - (laneHeight * 0.72);
     const measureLineBottom = laneY + (laneHeight * 0.72);
-    for (const measureTime of this.getTaikoMeasureLines(visibleStart, visibleEnd)) {
+    for (const measureTime of this.getTaikoMeasureLines(measureVisibleStart, visibleEnd)) {
       const x = taikoPositionAt(measureTime, measureTime);
       if (x < (playfieldX - 12) || x > (laneRightEdge + 12)) {
         continue;
@@ -1305,7 +1321,7 @@ export class PreviewRenderer {
       const pastDistance = Math.max(0, judgeX - x);
       const alpha = measureTime >= currentTime
         ? (0.08 + (0.18 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1)))
-        : (0.22 * clamp(1 - (pastDistance / Math.max(receptorRadius * 2.8, 1)), 0, 1));
+        : (0.22 * clamp(1 - (pastDistance / Math.max(leftMeasureFadeWidth, 1)), 0, 1));
       const fadedAlpha = alpha * taikoFadeAlphaAtX(x);
       if (fadedAlpha <= 0.02) {
         continue;
@@ -1351,9 +1367,9 @@ export class PreviewRenderer {
       if (object.kind === 'slider' || object.kind === 'hold') {
         const headX = taikoPositionAt(object.time, object.time);
         const tailX = taikoPositionAt(object.endTime, object.time);
-        const leftX = Math.min(headX, tailX);
+        const leftX = Math.max(judgeX, Math.min(headX, tailX));
         const rightX = Math.max(headX, tailX);
-        if (rightX < (playfieldX - 24) || leftX > (laneRightEdge + 24)) {
+        if (rightX <= judgeX || leftX > (laneRightEdge + 24)) {
           continue;
         }
 
@@ -1364,8 +1380,6 @@ export class PreviewRenderer {
         } else if (currentTime > object.endTime) {
           alpha = 0.86 * clamp(1 - ((currentTime - object.endTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1);
         }
-        const rollFadeAlpha = taikoFadeAlphaAtX(rightX);
-        alpha *= rollFadeAlpha;
         if (alpha <= 0.02) {
           continue;
         }
@@ -1407,17 +1421,11 @@ export class PreviewRenderer {
       }
 
       const x = taikoPositionAt(object.time, object.time);
-      if (x < (playfieldX - 20) || x > (laneRightEdge + 20)) {
+      if (x <= judgeX || x > (laneRightEdge + 20)) {
         continue;
       }
-
-      let alpha = 0.88;
-      if (object.time > currentTime) {
-        const futureDistance = Math.max(0, x - judgeX);
-        alpha = 0.2 + (0.68 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1));
-      } else if (object.time < currentTime) {
-        alpha = 0.88 * clamp(1 - ((currentTime - object.time) / CIRCLE_POST_HIT_FADE_MS), 0, 1);
-      }
+      const futureDistance = Math.max(0, x - judgeX);
+      let alpha = 0.2 + (0.68 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1));
       alpha *= taikoFadeAlphaAtX(x);
       if (alpha <= 0.02) {
         continue;

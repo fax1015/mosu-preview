@@ -590,6 +590,8 @@ const buildDensityBins = (objects, durationMs, bins = 150) => {
   return counts.map((count) => count / max);
 };
 
+const easeOutCubic = (t) => 1 - ((1 - clamp(t, 0, 1)) ** 3);
+
 const getCanvasContext = (canvas) => {
   let cached = canvasContextCache.get(canvas);
   if (!cached) {
@@ -720,6 +722,8 @@ export class PreviewRenderer {
     this.durationMs = 0;
     this.currentTimeMs = 0;
     this.timelineDensity = [];
+    this.visualTimelineDurationMs = 1;
+    this.timelineDurationAnimation = null;
     this.comboColours = DEFAULT_COLOURS;
     this.catcherRenderX = Number.NaN;
     this.catcherRenderTime = Number.NaN;
@@ -738,6 +742,8 @@ export class PreviewRenderer {
     this.mapData = mapData;
     this.breaks = Array.isArray(breaks) ? breaks : [];
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
+    this.visualTimelineDurationMs = this.durationMs;
+    this.timelineDurationAnimation = null;
     this.timelineDensity = buildDensityBins(mapData?.objects || [], this.durationMs);
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours
@@ -757,6 +763,63 @@ export class PreviewRenderer {
         this.catchLastEffectTime = Number.NaN;
       }
     }
+  }
+
+  getVisualTimelineDuration(now = performance.now()) {
+    if (!this.timelineDurationAnimation) {
+      return this.visualTimelineDurationMs || this.durationMs || 1;
+    }
+
+    const progress = clamp(
+      (now - this.timelineDurationAnimation.startTime) / this.timelineDurationAnimation.durationMs,
+      0,
+      1,
+    );
+
+    if (progress >= 1) {
+      this.visualTimelineDurationMs = this.timelineDurationAnimation.to;
+      this.timelineDurationAnimation = null;
+      return this.visualTimelineDurationMs;
+    }
+
+    this.visualTimelineDurationMs = this.timelineDurationAnimation.from
+      + ((this.timelineDurationAnimation.to - this.timelineDurationAnimation.from) * easeOutCubic(progress));
+    return this.visualTimelineDurationMs;
+  }
+
+  isTimelineDurationAnimating() {
+    return Boolean(this.timelineDurationAnimation);
+  }
+
+  setDuration(durationMs, { animate = false } = {}) {
+    const nextDurationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
+    const currentVisualDurationMs = this.getVisualTimelineDuration();
+    const previousDurationMs = this.durationMs;
+    this.durationMs = nextDurationMs;
+    this.timelineDensity = buildDensityBins(this.mapData?.objects || [], this.durationMs);
+
+    if (animate && nextDurationMs > currentVisualDurationMs) {
+      this.visualTimelineDurationMs = currentVisualDurationMs;
+      this.timelineDurationAnimation = {
+        startTime: performance.now(),
+        durationMs: 340,
+        from: currentVisualDurationMs,
+        to: nextDurationMs,
+      };
+      return true;
+    }
+
+    if (
+      this.timelineDurationAnimation
+      && nextDurationMs === previousDurationMs
+      && this.timelineDurationAnimation.to === nextDurationMs
+    ) {
+      return true;
+    }
+
+    this.visualTimelineDurationMs = nextDurationMs;
+    this.timelineDurationAnimation = null;
+    return false;
   }
 
   setTime(ms) {
@@ -2376,18 +2439,23 @@ export class PreviewRenderer {
     ctx.fillStyle = 'rgba(36, 34, 42, 1)';
     ctx.fillRect(0, 0, width, height);
 
-    const density = this.timelineDensity || [];
+    const visualDurationMs = this.getVisualTimelineDuration();
+    const density = this.isTimelineDurationAnimating()
+      ? buildDensityBins(this.mapData?.objects || [], visualDurationMs)
+      : (this.timelineDensity || []);
     if (density.length > 0) {
       const barWidth = width / density.length;
+      const usableHeight = Math.max(4, height * 0.56);
+      const baselineY = Math.round((height + usableHeight) / 2);
       for (let i = 0; i < density.length; i += 1) {
         const v = density[i];
-        const h = Math.max(1, v * (height - 1));
+        const h = Math.max(1, v * usableHeight);
         ctx.fillStyle = 'rgb(63, 155, 106)';
-        ctx.fillRect(i * barWidth, height - h, Math.max(1, barWidth - 0.5), h);
+        ctx.fillRect(i * barWidth, baselineY - h, Math.max(1, barWidth - 0.5), h);
       }
     }
 
-    const progress = clamp((this.currentTimeMs / (this.durationMs || 1)), 0, 1);
+    const progress = clamp((this.currentTimeMs / (visualDurationMs || 1)), 0, 1);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
     ctx.shadowBlur = 4;
     ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';

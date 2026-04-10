@@ -8,6 +8,8 @@ import {
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
+  POPUP_SIZE_KEY,
+  POPUP_SIZE_PRESETS,
   normalizePreviewSettings,
 } from './settings.js';
 import {
@@ -138,6 +140,7 @@ const state = {
   metadata: null,
   mapData: null,
   breaks: [],
+  mappedDurationMs: 0,
   durationMs: 0,
   currentTimeMs: 0,
   isPlaying: false,
@@ -145,6 +148,7 @@ const state = {
   playStartPerfMs: 0,
   playStartMapMs: 0,
   rafId: null,
+  timelineAnimationRafId: null,
   indicatorTimer: null,
   audio: new Audio(),
   audioSyncEnabled: false,
@@ -170,6 +174,7 @@ const state = {
   volumePersistTimer: null,
   hasAutoStarted: false,
   playbackSpeed: 1,
+  popupSize: normalizePreviewSettings().popupSize,
   unsupportedAsciiTimer: null,
   unsupportedAsciiField: null,
   lastAudioVisualSyncPerfMs: 0,
@@ -180,13 +185,82 @@ const state = {
 };
 
 state.audio.preload = 'auto';
+const hasFullAudioSource = () => (
+  state.audioSyncEnabled
+  && Boolean(state.fullAudioObjectUrl)
+  && typeof state.audio?.src === 'string'
+  && state.audio.src === state.fullAudioObjectUrl
+);
+
+const getResolvedPlaybackDurationMs = () => {
+  const mappedDurationMs = Number.isFinite(state.mappedDurationMs) && state.mappedDurationMs > 0
+    ? state.mappedDurationMs
+    : 1;
+
+  if (!hasFullAudioSource()) {
+    return mappedDurationMs;
+  }
+
+  const audioDurationMs = Number.isFinite(state.audio?.duration) && state.audio.duration > 0
+    ? Math.round((state.audio.duration * 1000) + state.audioAnchorMapMs)
+    : 0;
+
+  return Math.max(mappedDurationMs, audioDurationMs, 1);
+};
+
+const syncPlaybackDuration = () => {
+  const previousDurationMs = state.durationMs;
+  const nextDurationMs = getResolvedPlaybackDurationMs();
+  state.durationMs = nextDurationMs;
+  state.currentTimeMs = clamp(state.currentTimeMs, 0, nextDurationMs);
+  const shouldAnimateTimeline = hasFullAudioSource() && nextDurationMs > previousDurationMs;
+  const isAnimatingTimeline = renderer.setDuration(nextDurationMs, { animate: shouldAnimateTimeline });
+  if (isAnimatingTimeline) {
+    ensureTimelineDurationAnimation();
+  }
+};
+
+const stopTimelineDurationAnimation = () => {
+  if (state.timelineAnimationRafId !== null) {
+    cancelAnimationFrame(state.timelineAnimationRafId);
+    state.timelineAnimationRafId = null;
+  }
+};
+
+const tickTimelineDurationAnimation = () => {
+  state.timelineAnimationRafId = null;
+
+  if (state.isPlaying) {
+    return;
+  }
+
+  renderFrame();
+
+  if (renderer.isTimelineDurationAnimating()) {
+    state.timelineAnimationRafId = requestAnimationFrame(tickTimelineDurationAnimation);
+  }
+};
+
+const ensureTimelineDurationAnimation = () => {
+  if (state.isPlaying || state.timelineAnimationRafId !== null || !renderer.isTimelineDurationAnimating()) {
+    return;
+  }
+
+  state.timelineAnimationRafId = requestAnimationFrame(tickTimelineDurationAnimation);
+};
+
 state.audio.addEventListener('canplay', () => {
   state.audioReady = true;
+  syncPlaybackDuration();
 });
 state.audio.addEventListener('error', () => {
   state.audioReady = false;
   state.audioSyncEnabled = false;
+  syncPlaybackDuration();
 });
+state.audio.addEventListener('loadedmetadata', syncPlaybackDuration);
+state.audio.addEventListener('durationchange', syncPlaybackDuration);
+state.audio.addEventListener('emptied', syncPlaybackDuration);
 state.audio.addEventListener('playing', () => {
   if (state.playbackMode === 'audio') {
     resyncVisualPlaybackToAudio({ force: true });
@@ -592,13 +666,14 @@ const readAudioVolumeSetting = async () => {
   }
 };
 
-const readManiaPreviewSettings = async () => {
+const readPreviewSettings = async () => {
   try {
     const items = await storageGet('sync', [
       MANIA_SCROLL_SPEED_KEY,
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
+      POPUP_SIZE_KEY,
     ]);
     return normalizePreviewSettings(items);
   } catch {
@@ -629,12 +704,24 @@ const applyAudioVolume = (volume) => {
   }
 };
 
-const applyManiaPreviewSettings = (settings = {}) => {
+const applyPopupSize = (popupSize) => {
+  const normalized = normalizePreviewSettings({ popupSize }).popupSize;
+  const preset = POPUP_SIZE_PRESETS[normalized] || POPUP_SIZE_PRESETS.default;
+
+  state.popupSize = normalized;
+  document.documentElement.style.setProperty('--popup-shell-width', `${preset.shellWidth}px`);
+  document.documentElement.style.setProperty('--popup-content-width', `${preset.contentWidth}px`);
+  document.documentElement.style.setProperty('--popup-shell-width-mobile', `${preset.mobileShellWidth}px`);
+  document.documentElement.style.setProperty('--popup-content-width-mobile', `${preset.mobileContentWidth}px`);
+};
+
+const applyPreviewSettings = (settings = {}) => {
   const normalized = normalizePreviewSettings(settings);
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
   state.maniaScaleScrollSpeedWithBpm = normalized.maniaScaleScrollSpeedWithBpm;
   state.standardSnakingSliders = normalized.standardSnakingSliders;
   state.standardSliderEndCircles = normalized.standardSliderEndCircles;
+  applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
 
@@ -994,6 +1081,7 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   if (!sourceUrl) {
     state.audio.removeAttribute('src');
     state.audio.load();
+    syncPlaybackDuration();
     return;
   }
 
@@ -1002,6 +1090,7 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
     state.audio.load();
   }
   state.audio.playbackRate = state.playbackSpeed;
+  syncPlaybackDuration();
 };
 
 const decodeZipName = (nameBytes, isUtf8) => {
@@ -1420,6 +1509,7 @@ const stopPlayback = () => {
   if (state.audio && !state.audio.paused) {
     state.audio.pause();
   }
+  ensureTimelineDurationAnimation();
 };
 
 const renderFrame = () => {
@@ -1598,6 +1688,8 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     return false;
   }
 
+  syncPlaybackDuration();
+
   let hasSyncedSeek = false;
   try {
     hasSyncedSeek = seekAudioToMapTime(swapMapTimeMs);
@@ -1729,6 +1821,7 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
   } finally {
     if (jobId === state.fullAudioJobId) {
       setFullAudioLoading(false);
+      syncPlaybackDuration();
       addDebugLog(`audio: full-load end (status=${state.fullAudioStatus})`);
     }
   }
@@ -1873,6 +1966,7 @@ const writeCachedPreview = async (value) => {
 };
 
 const initializePreviewForCurrentTab = async () => {
+  stopTimelineDurationAnimation();
   stopPlayback();
   togglePlaybackButton.disabled = true;
   popup?.classList.add('is-open');
@@ -1889,7 +1983,7 @@ const initializePreviewForCurrentTab = async () => {
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
   applyAudioVolume(await readAudioVolumeSetting());
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
-  applyManiaPreviewSettings(await readManiaPreviewSettings());
+  applyPreviewSettings(await readPreviewSettings());
   addDebugLog(
     `init: mania scroll speed ${state.maniaScrollSpeed}`
     + (state.maniaScaleScrollSpeedWithBpm ? ' (scaled with BPM)' : ' (fixed)'),
@@ -1972,20 +2066,17 @@ const initializePreviewForCurrentTab = async () => {
     state.metadata = metadata;
     state.mapData = mapData;
     state.breaks = breaks;
+    state.mappedDurationMs = durationMs;
     state.durationMs = durationMs;
     state.currentTimeMs = clamp(metadata.previewTime > 0 ? metadata.previewTime : 0, 0, durationMs);
     configureAudioPreview(resolvedSetId, metadata.previewTime);
 
     renderer.setBeatmap(mapData, breaks, durationMs);
+    syncPlaybackDuration();
     setMetadataText();
     renderFrame();
 
     togglePlaybackButton.disabled = false;
-
-    if (!state.hasAutoStarted) {
-      state.hasAutoStarted = true;
-      await togglePlayback();
-    }
 
     if (resolvedSetId && metadata.audio) {
       void upgradeToFullAudioIfPossible(resolvedSetId, metadata.audio);
@@ -1998,6 +2089,11 @@ const initializePreviewForCurrentTab = async () => {
       );
       addDebugLog('audio: metadata has no AudioFilename or set id');
     }
+
+    if (!state.hasAutoStarted) {
+      state.hasAutoStarted = true;
+      await togglePlayback();
+    }
   } catch (error) {
     setUnsupportedMode(false);
     addDebugLog(`init: failed -> ${error?.message || 'unknown error'}`);
@@ -2009,6 +2105,7 @@ const initializePreviewForCurrentTab = async () => {
     configureAudioPreview(null, 0);
     setStatus(error?.message || 'Failed to load beatmap preview.', true);
     renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
+    state.mappedDurationMs = 1;
     state.currentTimeMs = 0;
     state.durationMs = 1;
     renderFrame();
@@ -2232,7 +2329,7 @@ window.addEventListener('unload', () => {
 
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
-applyManiaPreviewSettings(normalizePreviewSettings());
+applyPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
 renderInfoMenu();
 initializePreviewForCurrentTab();
@@ -2247,8 +2344,9 @@ addStorageChangedListener((changes, areaName) => {
     || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
     || changes[STANDARD_SNAKING_SLIDERS_KEY]
     || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
+    || changes[POPUP_SIZE_KEY]
   ) {
-    applyManiaPreviewSettings({
+    applyPreviewSettings({
       maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
       maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
         ?? state.maniaScaleScrollSpeedWithBpm,
@@ -2256,6 +2354,7 @@ addStorageChangedListener((changes, areaName) => {
         ?? state.standardSnakingSliders,
       standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
         ?? state.standardSliderEndCircles,
+      popupSize: changes[POPUP_SIZE_KEY]?.newValue ?? state.popupSize,
     });
 
     if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {

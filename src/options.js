@@ -4,6 +4,7 @@ import {
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
+  POPUP_SIZE_KEY,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
   normalizePreviewSettings,
@@ -24,6 +25,7 @@ const normalizeProviderOverride = (value) => {
 };
 
 const providerSelect = document.querySelector('#providerOverride');
+const popupSizeSelect = document.querySelector('#popupSize');
 const maniaScrollSpeedRange = document.querySelector('#maniaScrollSpeedRange');
 const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
 const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
@@ -43,6 +45,7 @@ const readSettings = async () => {
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
+      POPUP_SIZE_KEY,
     ]);
 
     return {
@@ -135,6 +138,7 @@ const getFormSettings = () => ({
     ? providerSelect.value
     : 'auto',
   ...normalizePreviewSettings({
+    popupSize: popupSizeSelect?.value,
     maniaScrollSpeed: maniaScrollSpeedInput?.value ?? maniaScrollSpeedRange?.value,
     maniaScaleScrollSpeedWithBpm: maniaScaleScrollWithBpm?.checked,
     standardSnakingSliders: standardSnakingSliders?.checked,
@@ -155,6 +159,7 @@ const persistFormSettings = async () => {
 const initialize = async () => {
   if (
     !providerSelect
+    || !popupSizeSelect
     || !maniaScrollSpeedRange
     || !maniaScrollSpeedInput
     || !maniaScaleScrollWithBpm
@@ -171,12 +176,17 @@ const initialize = async () => {
 
   const settings = await readSettings();
   providerSelect.value = settings.providerOverride;
+  popupSizeSelect.value = settings.popupSize;
   renderManiaScrollSpeed(settings.maniaScrollSpeed);
   maniaScaleScrollWithBpm.checked = settings.maniaScaleScrollSpeedWithBpm;
   standardSnakingSliders.checked = settings.standardSnakingSliders;
   standardSliderEndCircles.checked = settings.standardSliderEndCircles;
 
   providerSelect.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  popupSizeSelect.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

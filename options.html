@@ -37,6 +37,22 @@
         <p class="settings-eyebrow">Extension settings</p>
         <h1>mosu! Preview</h1>
       </div>
+      
+      <div class="settings-group">
+        <h2 class="settings-section-title">popup</h2>
+        <label for="popupSize" class="settings-label">Popup size</label>
+        <div class="settings-select-wrap">
+          <select id="popupSize" class="settings-select">
+            <option value="compact">Compact</option>
+            <option value="default">Default (recommended)</option>
+            <option value="large">Large</option>
+          </select>
+        </div>
+        <p class="settings-help">
+          Changes the popup width on both desktop and mobile layouts.
+        </p>
+      </div>
+
       <div class="settings-group">
         <h2 class="settings-section-title">standard preview</h2>
         <label for="standardSnakingSliders" class="settings-toggle-card">
@@ -80,7 +96,7 @@
       <div class="settings-group">
         <h2 class="settings-section-title">audio</h2>
         <label for="providerOverride" class="settings-label">Provider override</label>
-        <div class="settings-select-wrap">
+        <div class="settings-select-wrap settings-select-wrap--drop-up">
           <select id="providerOverride" class="settings-select">
             <option value="auto">Auto (recommended)</option>
             <option value="osu_direct">osu.direct</option>

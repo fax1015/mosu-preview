@@ -4,6 +4,7 @@ export const MANIA_SCROLL_SPEED_KEY = 'maniaScrollSpeed';
 export const MANIA_SCROLL_SCALE_WITH_BPM_KEY = 'maniaScaleScrollSpeedWithBpm';
 export const STANDARD_SNAKING_SLIDERS_KEY = 'standardSnakingSliders';
 export const STANDARD_SLIDER_END_CIRCLES_KEY = 'standardSliderEndCircles';
+export const POPUP_SIZE_KEY = 'popupSize';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
 export const MIN_MANIA_SCROLL_SPEED = 1;
@@ -12,6 +13,28 @@ export const DEFAULT_MANIA_SCROLL_SPEED = 28;
 export const DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM = false;
 export const DEFAULT_STANDARD_SNAKING_SLIDERS = false;
 export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
+export const DEFAULT_POPUP_SIZE = 'default';
+
+export const POPUP_SIZE_PRESETS = Object.freeze({
+  compact: Object.freeze({
+    shellWidth: 414,
+    contentWidth: 398,
+    mobileShellWidth: 360,
+    mobileContentWidth: 344,
+  }),
+  default: Object.freeze({
+    shellWidth: 454,
+    contentWidth: 438,
+    mobileShellWidth: 398,
+    mobileContentWidth: 382,
+  }),
+  large: Object.freeze({
+    shellWidth: 510,
+    contentWidth: 494,
+    mobileShellWidth: 430,
+    mobileContentWidth: 414,
+  }),
+});
 
 export const clampSetting = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -46,6 +69,11 @@ export const normalizeStandardSliderEndCircles = (value) => (
   || value === null
 );
 
+export const normalizePopupSize = (value) => {
+  const candidate = String(value || DEFAULT_POPUP_SIZE);
+  return Object.hasOwn(POPUP_SIZE_PRESETS, candidate) ? candidate : DEFAULT_POPUP_SIZE;
+};
+
 export const normalizePreviewSettings = (items = {}) => ({
   maniaScrollSpeed: normalizeManiaScrollSpeed(items?.[MANIA_SCROLL_SPEED_KEY] ?? items?.maniaScrollSpeed),
   maniaScaleScrollSpeedWithBpm: normalizeManiaScrollScaleWithBpm(
@@ -57,6 +85,7 @@ export const normalizePreviewSettings = (items = {}) => ({
   standardSliderEndCircles: normalizeStandardSliderEndCircles(
     items?.[STANDARD_SLIDER_END_CIRCLES_KEY] ?? items?.standardSliderEndCircles,
   ),
+  popupSize: normalizePopupSize(items?.[POPUP_SIZE_KEY] ?? items?.popupSize),
 });
 
 export const toPreviewSettingsStorage = (settings = {}) => {
@@ -66,6 +95,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [MANIA_SCROLL_SCALE_WITH_BPM_KEY]: normalized.maniaScaleScrollSpeedWithBpm,
     [STANDARD_SNAKING_SLIDERS_KEY]: normalized.standardSnakingSliders,
     [STANDARD_SLIDER_END_CIRCLES_KEY]: normalized.standardSliderEndCircles,
+    [POPUP_SIZE_KEY]: normalized.popupSize,
   };
 };
 

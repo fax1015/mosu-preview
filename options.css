@@ -36,7 +36,7 @@
   --bg-tertiary: rgb(48, 46, 56);
   --bg-quaternary: rgb(60, 58, 70);
   --panel-primary: rgba(36, 34, 42, 0.96);
-  --panel-secondary: rgba(31, 30, 37, 0.96);
+  --panel-secondary: rgba(36, 34, 42, 0.96);
   --text-primary: rgb(255, 255, 255);
   --text-secondary: rgb(148, 143, 163);
   --text-tertiary: rgb(116, 111, 131);
@@ -92,7 +92,6 @@ body {
   border-radius: 1.35rem;
   padding: 1.35rem;
   box-shadow: var(--shadow);
-  backdrop-filter: blur(16px);
 }
 
 .settings-card::before {
@@ -101,7 +100,7 @@ body {
   inset: 0 auto auto 0;
   width: 100%;
   height: 1px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0));
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0));
   pointer-events: none;
 }
 
@@ -146,9 +145,9 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--border-radius);
   background:
-    linear-gradient(180deg, rgba(48, 46, 56, 0.64), rgba(31, 30, 37, 0.96)),
+    linear-gradient(180deg, rgba(48, 46, 56, 0.64), rgba(24, 23, 28, 0.1)),
     var(--panel-primary);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 2px 28px rgba(0, 0, 0, 0.14);
 }
 
 .settings-section-title {
@@ -191,9 +190,16 @@ body {
 }
 
 .settings-select-wrap {
+  --select-picker-offset-y: -1rem;
+  --select-picker-origin: bottom center;
   position: relative;
   width: 100%;
   max-width: 280px;
+}
+
+.settings-select-wrap--drop-up {
+  --select-picker-offset-y: 1rem;
+  --select-picker-origin: top center;
 }
 
 .settings-select-wrap::after {
@@ -222,13 +228,14 @@ body {
   appearance: none;
   -webkit-appearance: none;
   border-radius: var(--border-radius-small);
-  border: 2px solid var(--bg-quaternary);
+  border: 0;
+  outline: 2px solid var(--bg-quaternary);
   background: rgba(24, 23, 28, 0.9);
   color: var(--text-primary);
   padding: 0.72rem 1.08rem 0.72rem 0.88rem;
   font-family: inherit;
   font-size: 0.92rem;
-  transition: border-color var(--transition), box-shadow var(--transition), color var(--transition);
+  transition: outline-color var(--transition), box-shadow var(--transition), color var(--transition);
 }
 
 .settings-select::-ms-expand {
@@ -237,15 +244,18 @@ body {
 
 .settings-select:hover,
 .settings-select:focus-visible {
-  border-color: var(--accent-primary);
+  outline-color: var(--accent-primary);
   box-shadow: 0 0 0 4px rgba(140, 102, 255, 0.12);
-  outline: none;
 }
 
 @supports (appearance: base-select) and selector(.settings-select::picker(select)) {
   .settings-select,
   .settings-select::picker(select) {
     appearance: base-select;
+  }
+
+  .settings-select::picker(select) {
+    margin-bottom: 10px;  
   }
 
   .settings-select-wrap::after {
@@ -274,7 +284,8 @@ body {
   .settings-select::picker(select) {
     max-block-size: 18rem;
     overflow: auto;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 0;
+    outline: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 1rem;
     padding: 0.35rem;
     margin-top: 0.45rem;
@@ -283,8 +294,8 @@ body {
       var(--panel-primary);
     box-shadow: 0 20px 44px rgba(0, 0, 0, 0.42);
     opacity: 0;
-    transform: translateY(-0.45rem) scale(0.98);
-    transform-origin: top center;
+    transform: translateY(var(--select-picker-offset-y)) scale(0.94);
+    transform-origin: var(--select-picker-origin);
     text-align: left;
     transition:
       opacity 180ms ease,
@@ -301,7 +312,7 @@ body {
   @starting-style {
     .settings-select::picker(select):popover-open {
       opacity: 0;
-      transform: translateY(-0.45rem) scale(0.98);
+      transform: translateY(var(--select-picker-offset-y)) scale(0.94);
     }
   }
 
@@ -309,11 +320,12 @@ body {
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    gap: 0.75rem;
+    gap: 0.5rem;
     min-block-size: 0;
     margin: 0 0 8px;
     padding: 0.6rem 1rem;
-    border: 1px solid transparent;
+    border: 0;
+    outline: 1px solid transparent;
     border-radius: 0.8rem;
     background: transparent;
     color: var(--text-primary);
@@ -323,7 +335,7 @@ body {
     text-align: left;
     transition:
       background-color 160ms ease,
-      border-color 160ms ease,
+      outline-color 160ms ease,
       color 160ms ease,
       transform 160ms ease;
   }
@@ -334,13 +346,13 @@ body {
 
   .settings-select option:hover,
   .settings-select option:focus-visible {
-    border-color: rgba(140, 102, 255, 0.2);
+    outline-color: rgba(140, 102, 255, 0.2);
     background: rgba(140, 102, 255, 0.1);
     transform: translateX(2px);
   }
 
   .settings-select option:checked {
-    border-color: rgba(239, 196, 95, 0.18);
+    outline-color: rgba(239, 196, 95, 0.18);
     background: linear-gradient(180deg, rgba(239, 196, 95, 0.14), rgba(239, 196, 95, 0.08));
     color: rgb(255, 244, 221);
   }
@@ -349,7 +361,8 @@ body {
     inline-size: 1.15rem;
     block-size: 1.15rem;
     margin-left: auto;
-    border: 1px solid rgba(239, 196, 95, 0.18);
+    border: 0;
+    outline: 1px solid rgba(239, 196, 95, 0.18);
     border-radius: 999px;
     background:
       center / 0.62rem 0.62rem no-repeat
@@ -386,6 +399,7 @@ body {
   background: rgb(255, 222, 123);
   box-shadow: 0 0 0 4px rgba(255, 222, 123, 0.18), 0 2px 8px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition), background var(--transition);
 }
 
 .settings-range::-moz-range-thumb {
@@ -396,6 +410,31 @@ body {
   background: rgb(255, 222, 123);
   box-shadow: 0 0 0 4px rgba(255, 222, 123, 0.18), 0 2px 8px rgba(0, 0, 0, 0.35);
   cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.settings-range:hover::-webkit-slider-thumb {
+  background: rgb(255, 230, 152);
+  box-shadow: 0 0 0 6px rgba(255, 222, 123, 0.24), 0 4px 14px rgba(0, 0, 0, 0.38);
+  transform: scale(1.06);
+}
+
+.settings-range:focus-visible::-webkit-slider-thumb {
+  background: rgb(255, 230, 152);
+  box-shadow: 0 0 0 6px rgba(255, 222, 123, 0.24), 0 4px 14px rgba(0, 0, 0, 0.38);
+  transform: scale(1.06);
+}
+
+.settings-range:hover::-moz-range-thumb {
+  background: rgb(255, 230, 152);
+  box-shadow: 0 0 0 6px rgba(255, 222, 123, 0.24), 0 4px 14px rgba(0, 0, 0, 0.38);
+  transform: scale(1.06);
+}
+
+.settings-range:focus-visible::-moz-range-thumb {
+  background: rgb(255, 230, 152);
+  box-shadow: 0 0 0 6px rgba(255, 222, 123, 0.24), 0 4px 14px rgba(0, 0, 0, 0.38);
+  transform: scale(1.06);
 }
 
 .settings-range::-moz-range-track {
@@ -439,17 +478,17 @@ body {
   align-items: flex-start;
   margin-top: 0.7rem;
   padding: 0.92rem 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  outline: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--border-radius-small);
   background:
-    linear-gradient(180deg, rgba(48, 46, 56, 0.78), rgba(24, 23, 28, 0.94)),
+    linear-gradient(180deg, rgba(48, 46, 56, 0.78), rgba(24, 23, 28, 0.1)),
     var(--panel-secondary);
   cursor: pointer;
-  transition: border-color var(--transition), transform var(--transition), background var(--transition), box-shadow var(--transition);
+  transition: outline-color var(--transition), transform var(--transition), background var(--transition), box-shadow var(--transition);
 }
 
 .settings-toggle-card:hover {
-  border-color: rgba(140, 102, 255, 0.28);
+  outline-color: rgba(140, 102, 255, 0.28);
   transform: translateY(-1px);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
 }

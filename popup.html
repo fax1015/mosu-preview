@@ -5,11 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>mosu! Beatmap Preview</title>
     <style>
+      :root {
+        --popup-shell-width: 446px;
+        --popup-content-width: 430px;
+        --popup-shell-width-mobile: 392px;
+        --popup-content-width-mobile: 376px;
+      }
+
       html {
         margin: 0;
-        width: 446px;
-        min-width: 446px;
-        max-width: 446px;
+        width: var(--popup-shell-width);
+        min-width: var(--popup-shell-width);
+        max-width: var(--popup-shell-width);
         background: rgb(24, 23, 28);
         color: rgb(255, 255, 255);
         font-family: sans-serif;
@@ -25,7 +32,21 @@
       }
 
       #mapPreviewPopup {
-        width: 430px;
+        width: var(--popup-content-width);
+        max-width: var(--popup-content-width);
+      }
+
+      @media (max-width: 420px), (hover: none) and (pointer: coarse) {
+        html {
+          width: var(--popup-shell-width-mobile);
+          min-width: var(--popup-shell-width-mobile);
+          max-width: var(--popup-shell-width-mobile);
+        }
+
+        #mapPreviewPopup {
+          width: var(--popup-content-width-mobile);
+          max-width: var(--popup-content-width-mobile);
+        }
       }
     </style>
     <link rel="stylesheet" href="popup.css" />
@@ -99,6 +120,7 @@
       </div>
       <div class="map-preview-info-modal-shell" id="mapPreviewInfoModal" hidden>
         <button type="button" class="map-preview-info-backdrop" id="mapPreviewInfoBackdrop" aria-label="Close report menu"></button>
+        <div class="map-preview-info-banner" aria-hidden="true">like the extension? please share the word! <span class="map-preview-info-banner-heart">&lt;3</span></div>
         <div class="map-preview-info-modal" role="dialog" aria-modal="true" aria-labelledby="mapPreviewInfoTitle">
           <div class="map-preview-info-header">
             <p class="map-preview-info-title" id="mapPreviewInfoTitle">Report a problem</p>

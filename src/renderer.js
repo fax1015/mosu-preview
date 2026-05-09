@@ -1119,12 +1119,8 @@ export class PreviewRenderer {
       return ticks;
     }
 
-    // Compute velocity and tick distance per osu! spec (Slider.cs).
-    // velocity = pathLength / spanDuration (distance per ms for one span).
     const velocity = pathLength / Math.max(1, spanDuration);
     const beatLength = this.getStandardTimingState(object.time).beatLength;
-    // scoringDistance = velocity * beatLength (distance covered per beat).
-    // tickDistance = scoringDistance / tickRate.
     const scoringDistance = velocity * beatLength;
     const tickDistance = sliderTickRate > 0 ? (scoringDistance / sliderTickRate) : pathLength;
 
@@ -1135,11 +1131,8 @@ export class PreviewRenderer {
       return ticks;
     }
 
-    // Ticks must not appear within minDistanceFromEnd of the path end
-    // (prevents rendering over slider tail circles and reverse indicators).
     const minDistanceFromEnd = velocity * 10;
 
-    // Build the slider path and compute segment lengths for position lookup.
     const path = buildSliderPathPointsOsu(object);
     const segmentLengths = [];
     let totalPathLength = 0;
@@ -1155,7 +1148,6 @@ export class PreviewRenderer {
       return ticks;
     }
 
-    // Helper: get position at a 0–1 progress along the path.
     const positionAtProgress = (progress) => {
       let target = clamp(progress, 0, 1) * totalPathLength;
       for (let i = 0; i < segmentLengths.length; i += 1) {
@@ -1172,10 +1164,6 @@ export class PreviewRenderer {
       return path[path.length - 1];
     };
 
-    // Generate ticks per-span using distance along the path (osu! spec).
-    // Ticks start at tickDistance from the head, end before minDistanceFromEnd
-    // from the tail. Tick positions are always calculated from the start of the
-    // path, so reversed spans have the same positions, just in reverse time.
     for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
       const spanStart = object.time + (spanIndex * spanDuration);
       const reversed = (spanIndex % 2) === 1;

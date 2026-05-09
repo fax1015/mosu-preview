@@ -475,7 +475,7 @@ const drawReverseIndicator = (ctx, position, direction, size, alpha = 1) => {
   const wing = size * 0.48;
 
   ctx.strokeStyle = `rgba(255, 255, 255, ${clamp(alpha, 0, 1)})`;
-  ctx.lineWidth = Math.max(1.4, size * 0.16);
+  ctx.lineWidth = Math.max(2.5, size * 0.28);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.beginPath();
@@ -624,10 +624,13 @@ const drawFollowPoints = ({
   minVisibleTime,
   maxVisibleTime,
   circleRadius,
+  scale,
 }) => {
   if (!Array.isArray(objects) || objects.length < 2) {
     return;
   }
+
+  const timeFadeInMs = getStandardFadeInMs(preemptMs);
 
   for (let i = 0; i < objects.length - 1; i += 1) {
     const current = objects[i];
@@ -637,74 +640,66 @@ const drawFollowPoints = ({
     if (current.kind === 'spinner' || next.kind === 'spinner') continue;
     if (next.time > maxVisibleTime || next.endTime < minVisibleTime) continue;
 
+    const shootDuration = Math.min(250, timeFadeInMs);
     const fadeInStart = next.time - preemptMs;
-    const fadeInPeak = next.time - (preemptMs * 0.35);
-    const fadeOutStart = next.time - FOLLOW_POINT_FADE_LEAD_MS;
-    const fadeOutEnd = fadeOutStart + FOLLOW_POINT_FADE_OUT_MS;
-    if (currentTime < fadeInStart || currentTime > fadeOutEnd) continue;
+    const fadeInEnd = fadeInStart + shootDuration;
+    const fadeOutEnd = next.time;
+    // Quick opacity fade right before the hit, without any retract animation
+    const fadeOutStart = Math.max(fadeInEnd, next.time - 120);
 
-    let alpha = 1;
-    let fadeOutProgress = 0;
-    let fadeOutTrimProgress = 0;
-    if (currentTime < fadeInPeak) {
-      alpha = clamp((currentTime - fadeInStart) / Math.max(1, fadeInPeak - fadeInStart), 0, 1);
-    } else if (currentTime >= fadeOutStart) {
-      fadeOutProgress = clamp((currentTime - fadeOutStart) / FOLLOW_POINT_FADE_OUT_MS, 0, 1);
-      fadeOutTrimProgress = 1 - Math.pow(1 - fadeOutProgress, 2.2);
-      alpha = 1 - fadeOutTrimProgress;
-    }
-    if (alpha <= 0.003) continue;
+    if (currentTime < fadeInStart || currentTime > fadeOutEnd) continue;
 
     const start = getObjectEndPositionOsu(current);
     const end = getObjectStartPositionOsu(next);
+
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const distance = Math.hypot(dx, dy);
-    const minGapDistance = (circleRadius * 2) + 2;
-    if (!Number.isFinite(distance) || distance <= minGapDistance) continue;
 
-    const trim = (circleRadius * 1.02) + 1;
+    // Do not draw if the gap is too small to fit between the hitcircles
+    if (!Number.isFinite(distance) || distance <= 100) continue;
+
+    // Progress of the line shooting out towards the next object
+    let headProgress = 1;
+    if (currentTime < fadeInEnd) {
+      const p = clamp((currentTime - fadeInStart) / shootDuration, 0, 1);
+      headProgress = 1 - Math.pow(1 - p, 4); // Extremely aggressive ease-out
+    }
+
+    let alpha = 0.45;
+    if (currentTime > fadeOutStart) {
+      const alphaProgress = clamp((currentTime - fadeOutStart) / (fadeOutEnd - fadeOutStart), 0, 1);
+      alpha = 0.45 * (1 - alphaProgress); // Quick linear fade out
+    }
+
+    if (alpha <= 0.001) continue;
+
     const startCanvas = toCanvas(start.x, start.y);
     const endCanvas = toCanvas(end.x, end.y);
-    const nx = dx / distance;
-    const ny = dy / distance;
+
+    const canvasDx = endCanvas.x - startCanvas.x;
+    const canvasDy = endCanvas.y - startCanvas.y;
+    const canvasDistance = Math.hypot(canvasDx, canvasDy);
+    if (canvasDistance < 0.001) continue;
+
+    const nx = canvasDx / canvasDistance;
+    const ny = canvasDy / canvasDistance;
+
+    // Trim the start and end by the radius so the line connects cleanly edge-to-edge
+    const trim = circleRadius * 1.05;
     const fromX = startCanvas.x + (nx * trim);
     const fromY = startCanvas.y + (ny * trim);
     const toX = endCanvas.x - (nx * trim);
     const toY = endCanvas.y - (ny * trim);
 
-    let drawFromX = fromX;
-    let drawFromY = fromY;
-    let drawToX = toX;
-    let drawToY = toY;
+    const drawFromX = fromX;
+    const drawFromY = fromY;
+    const drawToX = fromX + ((toX - fromX) * headProgress);
+    const drawToY = fromY + ((toY - fromY) * headProgress);
 
-    if (fadeOutTrimProgress > 0) {
-      const lineDx = toX - fromX;
-      const lineDy = toY - fromY;
-      const lineLength = Math.hypot(lineDx, lineDy);
-      if (lineLength <= 0.001) {
-        continue;
-      }
-
-      const ux = lineDx / lineLength;
-      const uy = lineDy / lineLength;
-      const totalTrim = lineLength * (0.98 * fadeOutTrimProgress);
-      const startTrim = totalTrim * 0.68;
-      const endTrim = totalTrim - startTrim;
-      drawFromX = fromX + (ux * startTrim);
-      drawFromY = fromY + (uy * startTrim);
-      drawToX = toX - (ux * endTrim);
-      drawToY = toY - (uy * endTrim);
-
-      if (Math.hypot(drawToX - drawFromX, drawToY - drawFromY) <= 0.4) {
-        continue;
-      }
-    }
-
-    ctx.strokeStyle = `rgba(255, 255, 255, ${clamp(alpha * 0.2, 0, 1)})`;
-    const baseLineWidth = Math.max(0.9, circleRadius * 0.08);
-    const widthScale = 1 - (fadeOutTrimProgress * 0.65);
-    ctx.lineWidth = Math.max(0.35, baseLineWidth * widthScale);
+    ctx.strokeStyle = `rgba(255, 255, 255, ${clamp(alpha, 0, 1)})`;
+    // Thinner continuous line, decoupled from circle radius
+    ctx.lineWidth = Math.max(1.0, 2.5 * scale);
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(drawFromX, drawFromY);
@@ -1114,24 +1109,89 @@ export class PreviewRenderer {
     const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
     const slides = Math.max(1, object.slides || 1);
     const spanDuration = totalDuration / slides;
-    const beatLength = this.getStandardTimingState(object.time).beatLength;
-    const tickInterval = sliderTickRate > 0 ? (beatLength / sliderTickRate) : spanDuration;
+    const pathLength = Number.isFinite(object.length) && object.length > 0 ? object.length : 0;
     const ticks = [];
 
-    if (!(Number.isFinite(tickInterval) && tickInterval > 0)) {
+    if (pathLength <= 0) {
       object._cachedStandardSliderTicks = ticks;
       object._cachedStandardSliderTickRate = sliderTickRate;
       object._cachedStandardSliderStackIndex = stackIndex;
       return ticks;
     }
 
+    // Compute velocity and tick distance per osu! spec (Slider.cs).
+    // velocity = pathLength / spanDuration (distance per ms for one span).
+    const velocity = pathLength / Math.max(1, spanDuration);
+    const beatLength = this.getStandardTimingState(object.time).beatLength;
+    // scoringDistance = velocity * beatLength (distance covered per beat).
+    // tickDistance = scoringDistance / tickRate.
+    const scoringDistance = velocity * beatLength;
+    const tickDistance = sliderTickRate > 0 ? (scoringDistance / sliderTickRate) : pathLength;
+
+    if (!(Number.isFinite(tickDistance) && tickDistance > 0)) {
+      object._cachedStandardSliderTicks = ticks;
+      object._cachedStandardSliderTickRate = sliderTickRate;
+      object._cachedStandardSliderStackIndex = stackIndex;
+      return ticks;
+    }
+
+    // Ticks must not appear within minDistanceFromEnd of the path end
+    // (prevents rendering over slider tail circles and reverse indicators).
+    const minDistanceFromEnd = velocity * 10;
+
+    // Build the slider path and compute segment lengths for position lookup.
+    const path = buildSliderPathPointsOsu(object);
+    const segmentLengths = [];
+    let totalPathLength = 0;
+    for (let i = 1; i < path.length; i += 1) {
+      const segLen = pointDistance(path[i - 1], path[i]);
+      segmentLengths.push(segLen);
+      totalPathLength += segLen;
+    }
+    if (totalPathLength <= 0 || path.length < 2) {
+      object._cachedStandardSliderTicks = ticks;
+      object._cachedStandardSliderTickRate = sliderTickRate;
+      object._cachedStandardSliderStackIndex = stackIndex;
+      return ticks;
+    }
+
+    // Helper: get position at a 0–1 progress along the path.
+    const positionAtProgress = (progress) => {
+      let target = clamp(progress, 0, 1) * totalPathLength;
+      for (let i = 0; i < segmentLengths.length; i += 1) {
+        const segLen = segmentLengths[i];
+        if (target <= segLen || i === segmentLengths.length - 1) {
+          const t = segLen <= 0 ? 0 : clamp(target / segLen, 0, 1);
+          return {
+            x: path[i].x + ((path[i + 1].x - path[i].x) * t),
+            y: path[i].y + ((path[i + 1].y - path[i].y) * t),
+          };
+        }
+        target -= segLen;
+      }
+      return path[path.length - 1];
+    };
+
+    // Generate ticks per-span using distance along the path (osu! spec).
+    // Ticks start at tickDistance from the head, end before minDistanceFromEnd
+    // from the tail. Tick positions are always calculated from the start of the
+    // path, so reversed spans have the same positions, just in reverse time.
     for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
       const spanStart = object.time + (spanIndex * spanDuration);
-      const spanEnd = Math.min(object.endTime, spanStart + spanDuration);
-      for (let tickTime = spanStart + tickInterval; tickTime < (spanEnd - 0.001); tickTime += tickInterval) {
+      const reversed = (spanIndex % 2) === 1;
+
+      for (let d = tickDistance; d <= pathLength; d += tickDistance) {
+        if (d >= pathLength - minDistanceFromEnd) {
+          break;
+        }
+
+        const pathProgress = d / pathLength;
+        const timeProgress = reversed ? (1 - pathProgress) : pathProgress;
+        const tickTime = spanStart + (timeProgress * spanDuration);
+
         ticks.push({
           time: tickTime,
-          position: getSliderBallPositionOsu(object, tickTime),
+          position: positionAtProgress(pathProgress),
         });
       }
     }
@@ -2080,6 +2140,7 @@ export class PreviewRenderer {
       minVisibleTime,
       maxVisibleTime,
       circleRadius: drawnCircleRadius,
+      scale,
     });
 
     const visibleObjects = [];
@@ -2199,7 +2260,7 @@ export class PreviewRenderer {
           ctx.stroke();
 
           const sliderTicks = this.buildStandardSliderTicks(object);
-          const tickRadius = Math.max(1.6, drawnCircleRadius * 0.14);
+          const baseTickRadius = Math.max(1.6, drawnCircleRadius * 0.14);
           for (const tick of sliderTicks) {
             if (!tick?.position) {
               continue;
@@ -2207,8 +2268,14 @@ export class PreviewRenderer {
 
             const tickElapsed = this.currentTimeMs - tick.time;
             let tickAlpha = objectRenderAlpha * 0.72;
+            let tickRadius = baseTickRadius;
+
             if (tickElapsed > 0) {
-              tickAlpha *= clamp(1 - (tickElapsed / SLIDER_HEAD_HIT_FADE_MS), 0, 1);
+              const tickFadeProgress = clamp(tickElapsed / SLIDER_HEAD_HIT_FADE_MS, 0, 1);
+              const tickEaseOut = 1 - ((1 - tickFadeProgress) * (1 - tickFadeProgress));
+              tickAlpha *= (1 - tickFadeProgress);
+              // Scale expansion: grow by 80% as it fades out to make it punchier.
+              tickRadius = baseTickRadius * (1 + (0.8 * tickEaseOut));
             }
             if (tickAlpha <= 0.001) {
               continue;
@@ -2233,19 +2300,70 @@ export class PreviewRenderer {
               y: pathPoints[Math.max(0, pathPoints.length - 2)].y - endPoint.y,
             };
             const indicatorSize = Math.max(5, drawnCircleRadius * 0.45);
+            const slides = object.slides || 1;
+            const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
+            const spanDuration = totalDuration / slides;
+            // Generate a reverse indicator for each span boundary.
+            // Reverse at end of span i occurs at object.time + (i+1) * spanDuration.
+            // Even span index → reverse at path end; odd → at path start.
+            for (let spanIndex = 0; spanIndex < slides - 1; spanIndex += 1) {
+              const reverseTime = object.time + ((spanIndex + 1) * spanDuration);
+              const isAtEnd = (spanIndex % 2) === 0;
+              const elapsed = this.currentTimeMs - reverseTime;
+              const timeUntil = -elapsed;
 
-            sliderReverseIndicators.push({
-              position: endPoint,
-              direction: endDir,
-              size: indicatorSize,
-              alpha: baseAlpha * 0.95,
-            });
-            if ((object.slides || 1) >= 3) {
+              if (timeUntil > preemptMs) {
+                // Not yet visible according to Approach Rate
+                continue;
+              }
+
+              let reverseAlpha = 0;
+              let reverseSize = indicatorSize;
+
+              if (elapsed >= 0) {
+                // Hit Animation: expand and fade out (lazer uses Math.min(300, spanDuration))
+                const animDuration = Math.min(300, spanDuration);
+                if (elapsed >= animDuration) {
+                  continue; // Fully faded out
+                }
+                const hitProgress = clamp(elapsed / animDuration, 0, 1);
+                const hitEaseOut = 1 - ((1 - hitProgress) * (1 - hitProgress));
+
+                reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * (1 - hitEaseOut);
+                reverseSize = indicatorSize * (1.0 + (0.5 * hitEaseOut)); // Expands 1.0 -> 1.5
+              } else {
+                // Fade in based on standard AR fade-in time
+                const fadeInElapsedMs = preemptMs - timeUntil;
+                const fadeInProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+                reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * fadeInProgress;
+
+                // Continuous Heartbeat Pulse Animation
+                // 300ms loop: 0-35ms snaps out to 1.3x, 35-285ms smoothly shrinks back to 1.0x
+                const loopCurrentTime = this.currentTimeMs % 300;
+                let scaleAmount = 1.0;
+
+                if (loopCurrentTime < 35) {
+                  const t = loopCurrentTime / 35;
+                  const easeOut = 1 - ((1 - t) * (1 - t));
+                  scaleAmount = 1.0 + (0.3 * easeOut); // 1.0 -> 1.3
+                } else if (loopCurrentTime < 285) {
+                  const t = (loopCurrentTime - 35) / 250;
+                  const easeOut = 1 - ((1 - t) * (1 - t));
+                  scaleAmount = 1.3 - (0.3 * easeOut); // 1.3 -> 1.0
+                }
+
+                reverseSize = indicatorSize * scaleAmount;
+              }
+
+              if (reverseAlpha <= 0.001) {
+                continue;
+              }
+
               sliderReverseIndicators.push({
-                position: startPoint,
-                direction: startDir,
-                size: indicatorSize,
-                alpha: baseAlpha * 0.95,
+                position: isAtEnd ? endPoint : startPoint,
+                direction: isAtEnd ? endDir : startDir,
+                size: reverseSize,
+                alpha: reverseAlpha,
               });
             }
           }
@@ -2328,6 +2446,16 @@ export class PreviewRenderer {
         ctx.stroke();
       }
 
+      for (const indicator of sliderReverseIndicators) {
+        drawReverseIndicator(
+          ctx,
+          indicator.position,
+          indicator.direction,
+          indicator.size,
+          indicator.alpha,
+        );
+      }
+
       if (renderPrimaryCircle) {
         if (sliderBallVisible) {
           const sliderBallRadius = objectRenderRadius * 0.92;
@@ -2395,16 +2523,6 @@ export class PreviewRenderer {
         ctx.beginPath();
         ctx.arc(sliderHeadCanvasPoint.x, sliderHeadCanvasPoint.y, sliderHeadOutlineRadius, 0, Math.PI * 2);
         ctx.stroke();
-      }
-
-      for (const indicator of sliderReverseIndicators) {
-        drawReverseIndicator(
-          ctx,
-          indicator.position,
-          indicator.direction,
-          indicator.size,
-          indicator.alpha,
-        );
       }
 
       if ((object.kind === 'circle' || object.kind === 'slider') && Number.isFinite(object.comboNumber)) {

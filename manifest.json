@@ -32,6 +32,10 @@
       "128": "assets/icons/icon128.png"
     }
   },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true
@@ -46,6 +50,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src https://osu.ppy.sh https://b.ppy.sh https://osu.direct https://api.nerinyan.moe https://txy1.sayobot.cn https://catboy.best https://osu.sayobot.cn; font-src 'self';"
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: https://b.ppy.sh; connect-src https://osu.ppy.sh https://b.ppy.sh https://osu.direct https://api.nerinyan.moe https://txy1.sayobot.cn https://catboy.best https://osu.sayobot.cn; font-src 'self';"
   }
 }

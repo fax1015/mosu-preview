@@ -1,0 +1,418 @@
+import {
+  ARCHIVE_DOWNLOAD_SOURCES,
+  normalizeProviderOverride,
+} from '../settings.js';
+import {
+  readResponseArrayBufferLimited,
+  readResponseArrayBufferLimitedWithInitialZipProbe,
+  responseLooksLikeBeatmapArchiveDownload,
+} from './zip.js';
+
+const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
+const FETCH_TIMEOUT_MS = 18000;
+/** Service-worker fetches plus slow mirrors often exceed 8s; match single-provider ceiling (see de6c36f "better download"). */
+const FETCH_TIMEOUT_FAILOVER_MS = 20000;
+const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
+const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
+
+const mergeArchiveFetchOptions = (options = {}) => {
+  const mergedHeaders = {
+    Accept: '*/*',
+    Referer: 'https://osu.ppy.sh/',
+    ...(options.headers && typeof options.headers === 'object' ? options.headers : {}),
+  };
+  return {
+    cache: 'no-store',
+    redirect: 'follow',
+    ...options,
+    headers: mergedHeaders,
+  };
+};
+
+const providerStats = {};
+const providerCooldowns = {};
+
+const getProviderById = (providerId) => ARCHIVE_DOWNLOAD_SOURCES.find((source) => source.id === providerId) || null;
+
+const getProviderDisplayName = (providerId) => {
+  if (providerId === 'auto') {
+    return 'auto';
+  }
+  return getProviderById(providerId)?.label || providerId;
+};
+
+const ensureProviderStats = (providerId) => {
+  if (!providerStats[providerId]) {
+    providerStats[providerId] = {
+      successes: 0,
+      failures: 0,
+      timedSuccesses: 0,
+      totalSuccessMs: 0,
+    };
+  } else {
+    const stats = providerStats[providerId];
+    stats.successes = Number(stats.successes) || 0;
+    stats.failures = Number(stats.failures) || 0;
+    stats.timedSuccesses = Number(stats.timedSuccesses) || 0;
+    stats.totalSuccessMs = Number(stats.totalSuccessMs) || 0;
+  }
+  return providerStats[providerId];
+};
+
+const getProviderCooldownRemainingMs = (providerId) => {
+  const cooldownUntil = Number(providerCooldowns[providerId] || 0);
+  return Math.max(0, cooldownUntil - Date.now());
+};
+
+const isProviderInCooldown = (providerId) => getProviderCooldownRemainingMs(providerId) > 0;
+
+const markProviderSuccess = (providerId, durationMs = NaN) => {
+  const stats = ensureProviderStats(providerId);
+  stats.successes += 1;
+  if (Number.isFinite(durationMs) && durationMs >= 0) {
+    stats.timedSuccesses += 1;
+    stats.totalSuccessMs += durationMs;
+  }
+  delete providerCooldowns[providerId];
+};
+
+const markProviderFailure = (providerId) => {
+  const stats = ensureProviderStats(providerId);
+  stats.failures += 1;
+  providerCooldowns[providerId] = Date.now() + PROVIDER_FAILURE_COOLDOWN_MS;
+};
+
+const getProviderReliabilityScore = (providerId) => {
+  const stats = ensureProviderStats(providerId);
+  const attempts = stats.successes + stats.failures;
+  if (attempts <= 0) {
+    return 0.5;
+  }
+  return stats.successes / attempts;
+};
+
+const getProviderAverageSuccessMs = (providerId) => {
+  const stats = ensureProviderStats(providerId);
+  if (stats.timedSuccesses <= 0 || stats.totalSuccessMs <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return stats.totalSuccessMs / stats.timedSuccesses;
+};
+
+const getAutoOrderedProviders = () => {
+  const available = ARCHIVE_DOWNLOAD_SOURCES.filter((source) => !isProviderInCooldown(source.id));
+  return available.sort((a, b) => {
+    const aScore = getProviderReliabilityScore(a.id);
+    const bScore = getProviderReliabilityScore(b.id);
+    if (aScore !== bScore) {
+      return bScore - aScore;
+    }
+
+    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
+    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
+    if (aAvgSuccessMs !== bAvgSuccessMs) {
+      return aAvgSuccessMs - bAvgSuccessMs;
+    }
+
+    const aStats = ensureProviderStats(a.id);
+    const bStats = ensureProviderStats(b.id);
+    const aAttempts = aStats.successes + aStats.failures;
+    const bAttempts = bStats.successes + bStats.failures;
+    if (aAttempts !== bAttempts) {
+      return bAttempts - aAttempts;
+    }
+    return a.rank - b.rank;
+  });
+};
+
+const createThrottledArchiveProgressReporter = (downstream, providerLabel, {
+  throttleMs = 220,
+  minByteDelta = 128 * 1024,
+} = {}) => {
+  if (typeof downstream !== 'function') {
+    return null;
+  }
+  let lastEmit = 0;
+  let lastLoaded = -1;
+
+  const flush = ({ loaded, total }) => {
+    lastEmit = Date.now();
+    lastLoaded = loaded;
+    downstream({
+      loaded,
+      total: typeof total === 'number' ? total : null,
+      providerLabel,
+    });
+  };
+
+  return ({ loaded, total }) => {
+    if (!(typeof loaded === 'number' && loaded >= 0)) {
+      return;
+    }
+    const totalNum = typeof total === 'number' && total > 0 ? total : null;
+    const done = totalNum !== null && loaded >= totalNum;
+    const now = Date.now();
+    const firstPulse = lastLoaded < 0;
+    const timed = now - lastEmit >= throttleMs;
+    const bigStep = loaded - Math.max(lastLoaded, 0) >= minByteDelta;
+    if (done || firstPulse || timed || bigStep) {
+      flush({
+        loaded,
+        total: totalNum ?? null,
+      });
+    }
+  };
+};
+
+const getProviderSequenceForDownload = (providerOverride = 'auto') => {
+  const normalizedOverride = normalizeProviderOverride(providerOverride);
+  if (normalizedOverride !== 'auto') {
+    const forced = getProviderById(normalizedOverride);
+    return forced ? [forced] : [];
+  }
+
+  const autoOrdered = getAutoOrderedProviders();
+  if (autoOrdered.length > 0) {
+    return autoOrdered;
+  }
+
+  return [...ARCHIVE_DOWNLOAD_SOURCES].sort((a, b) => {
+    const aScore = getProviderReliabilityScore(a.id);
+    const bScore = getProviderReliabilityScore(b.id);
+    if (aScore !== bScore) {
+      return bScore - aScore;
+    }
+    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
+    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
+    if (aAvgSuccessMs !== bAvgSuccessMs) {
+      return aAvgSuccessMs - bAvgSuccessMs;
+    }
+    return a.rank - b.rank;
+  });
+};
+
+const fetchArrayBufferWithTimeout = async (
+  url,
+  options = {},
+  timeoutMs = FETCH_TIMEOUT_MS,
+  maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
+  onBodyProgress,
+) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, mergeArchiveFetchOptions({
+      ...options,
+      signal: controller.signal,
+    }));
+    const buffer = await readResponseArrayBufferLimited(response, maxBytes, undefined, onBodyProgress);
+    return { response, buffer };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const fetchBeatmapArchiveAdaptive = async (
+  url,
+  options,
+  headerTimeoutMs,
+  bodyProbeDeadlineMs,
+  maxBytes,
+  onBodyProgress,
+) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
+  let response;
+  try {
+    response = await fetch(url, mergeArchiveFetchOptions({
+      ...options,
+      signal: controller.signal,
+    }));
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // ignore cancel errors from hosts that omit a body stream
+    }
+    return { response, buffer: new ArrayBuffer(0) };
+  }
+
+  if (responseLooksLikeBeatmapArchiveDownload(response)) {
+    const buffer = await readResponseArrayBufferLimited(
+      response,
+      maxBytes,
+      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+      onBodyProgress,
+    );
+    return { response, buffer };
+  }
+
+  const buffer = await readResponseArrayBufferLimitedWithInitialZipProbe(
+    response,
+    maxBytes,
+    bodyProbeDeadlineMs,
+    FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+    onBodyProgress,
+  );
+  return { response, buffer };
+};
+
+const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIMEOUT_MS, 12000)) => {
+  const url = source.url(setId);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, mergeArchiveFetchOptions({
+      method: 'GET',
+      credentials: source.credentials || 'omit',
+      signal: controller.signal,
+    }));
+
+    let firstBytes = '';
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunk = await reader.read();
+      if (!chunk.done && chunk.value instanceof Uint8Array) {
+        firstBytes = Array.from(chunk.value.slice(0, 4))
+          .map((value) => value.toString(16).padStart(2, '0'))
+          .join(' ');
+      }
+      await reader.cancel();
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      redirected: response.redirected,
+      finalUrl: response.url,
+      firstBytes,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      redirected: false,
+      finalUrl: url,
+      firstBytes: '',
+      error: error?.name === 'AbortError' ? 'timeout' : (error?.message || 'network error'),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = {}) => {
+  const { onTryingSource, onDownloadProgress } = hooks;
+  const failures = [];
+  const sources = getProviderSequenceForDownload(providerOverride);
+  const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
+
+  if (!sources.length) {
+    throw new Error('no providers available');
+  }
+
+  for (const source of sources) {
+    if (providerOverride === 'auto' && isProviderInCooldown(source.id)) {
+      continue;
+    }
+
+    onTryingSource?.(source.label);
+
+    const reportProgress = createThrottledArchiveProgressReporter(
+      onDownloadProgress,
+      source.label,
+    );
+
+    const requestUrl = source.url(setId);
+    const attemptTimeouts = sources.length > 1
+      ? [fetchTimeoutMs, Math.min(45000, FETCH_TIMEOUT_ARCHIVE_BODY_MS)]
+      : [fetchTimeoutMs, Math.min(fetchTimeoutMs * 2, 90000)];
+
+    let sourceSucceeded = false;
+
+    for (let attemptIndex = 0; attemptIndex < attemptTimeouts.length && !sourceSucceeded; attemptIndex += 1) {
+      const attemptTimeoutMs = attemptTimeouts[attemptIndex];
+
+      try {
+        const requestStartMs = performance.now();
+        const fetchOpts = mergeArchiveFetchOptions({
+          method: 'GET',
+          credentials: source.credentials || 'omit',
+        });
+        const { response, buffer } = sources.length > 1
+          ? await fetchBeatmapArchiveAdaptive(
+            requestUrl,
+            fetchOpts,
+            attemptTimeoutMs,
+            attemptTimeoutMs,
+            MAX_ARCHIVE_DOWNLOAD_BYTES,
+            reportProgress ?? undefined,
+          )
+          : await fetchArrayBufferWithTimeout(
+            requestUrl,
+            fetchOpts,
+            attemptTimeoutMs,
+            MAX_ARCHIVE_DOWNLOAD_BYTES,
+            reportProgress ?? undefined,
+          );
+
+        if (!response.ok) {
+          failures.push(`${source.label}:${response.status}${attemptIndex > 0 ? '(retry)' : ''}`);
+          if (attemptIndex === attemptTimeouts.length - 1) {
+            markProviderFailure(source.id);
+          }
+          continue;
+        }
+
+        const archiveBuffer = buffer;
+        const header = new Uint8Array(archiveBuffer.slice(0, 4));
+        const isZip = header.length === 4 && header[0] === 0x50 && header[1] === 0x4b;
+        if (!isZip) {
+          failures.push(`${source.label}:non-zip${attemptIndex > 0 ? '(retry)' : ''}`);
+          if (attemptIndex === attemptTimeouts.length - 1) {
+            markProviderFailure(source.id);
+          }
+          continue;
+        }
+
+        markProviderSuccess(source.id, performance.now() - requestStartMs);
+        return { archiveBuffer, sourceLabel: source.label };
+      } catch (error) {
+        const isTimeout = error?.name === 'AbortError';
+        failures.push(`${source.label}:${isTimeout ? 'timeout' : (error?.message || 'network error')}${attemptIndex > 0 ? '(retry)' : ''}`);
+        if (attemptIndex === attemptTimeouts.length - 1) {
+          markProviderFailure(source.id);
+        }
+      }
+    }
+  }
+
+  throw new Error(`archive download failed (${failures.join(', ')})`);
+};
+
+export {
+  FETCH_TIMEOUT_MS,
+  FETCH_TIMEOUT_FAILOVER_MS,
+  getProviderById,
+  getProviderDisplayName,
+  ensureProviderStats,
+  getProviderCooldownRemainingMs,
+  isProviderInCooldown,
+  markProviderSuccess,
+  markProviderFailure,
+  getProviderReliabilityScore,
+  getProviderAverageSuccessMs,
+  getAutoOrderedProviders,
+  getProviderSequenceForDownload,
+  downloadBeatmapArchive,
+  fetchArrayBufferWithTimeout,
+  fetchBeatmapArchiveAdaptive,
+  probeArchiveSource,
+  providerStats,
+  providerCooldowns,
+};

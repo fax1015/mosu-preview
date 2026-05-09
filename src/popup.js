@@ -10,21 +10,51 @@ import {
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
   POPUP_SIZE_PRESETS,
-  ARCHIVE_DOWNLOAD_SOURCES,
-  ALLOWED_PROVIDER_OVERRIDES,
-  LEGACY_PROVIDER_OVERRIDE_ALIASES,
   normalizeProviderOverride,
   normalizePreviewSettings,
 } from './settings.js';
 import {
+  addRuntimeMessageListener,
   addStorageChangedListener,
   createTab,
   hasStorageArea,
   openOptionsPage,
   queryTabs,
+  sendRuntimeMessage,
   storageGet,
   storageSet,
 } from './webextension.js';
+import { registry } from './core/cleanup.js';
+import {
+  state,
+  resetState,
+  setPlaybackState,
+  setTimelineState,
+  setUiState,
+  setProviderState,
+  setFullAudioState,
+} from './core/state.js';
+import { createTimingController } from './core/timing.js';
+import { base64ToUint8Array } from './core/base64Payload.js';
+import {
+  getAudioMimeType,
+  normalizePath,
+  pruneFullAudioCache,
+  readCachedFullAudioBlob,
+  writeCachedFullAudioBlob,
+} from './audio/cache.js';
+import { extractFullBeatmapAudioToPayload } from './audio/fullAudioExtractionCore.js';
+import {
+  getProviderDisplayName,
+  getProviderSequenceForDownload,
+  probeArchiveSource,
+  FETCH_TIMEOUT_MS,
+  FETCH_TIMEOUT_FAILOVER_MS,
+} from './audio/provider.js';
+import { createPlaybackController } from './audio/playback.js';
+import { createDebugPanelController } from './ui/debugPanel.js';
+import { bindPopupUiEvents } from './ui/popupUI.js';
+import { createUnsupportedViewController } from './ui/unsupportedView.js';
 
 if (/firefox/i.test(globalThis.navigator?.userAgent || '')) {
   document.body?.classList.add('is-firefox-popup');
@@ -68,23 +98,7 @@ const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
 const CACHE_KEY = 'mosuPreviewCacheV1';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
 const AUDIO_PREVIEW_BASE = 'https://b.ppy.sh/preview';
-const FULL_AUDIO_CACHE_NAME = 'mosuPreviewFullAudioV1';
-const FULL_AUDIO_CACHE_MAX_BYTES = 35 * 1024 * 1024;
-const FULL_AUDIO_CACHE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
-const FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
-const FULL_AUDIO_CACHE_PRUNE_INTERVAL_MS = 1000 * 60 * 30;
-const FULL_AUDIO_CACHE_LAST_PRUNE_KEY = 'fullAudioCacheLastPruneMs';
-const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
-const MAX_ZIP_AUDIO_ENTRY_BYTES = 48 * 1024 * 1024;
-const MAX_ZIP_ENTRY_INFLATE_RATIO = 80;
-const MAX_ZIP_ENTRIES = 6000;
-const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
 const AUDIO_BADGE_AUTO_HIDE_DELAY_MS = 3500;
-const FETCH_TIMEOUT_MS = 18000;
-/** When another mirror can be tried, fail the fetch quickly instead of waiting on a dead host. */
-const FETCH_TIMEOUT_FAILOVER_MS = 8000;
-/** Max time to read a confirmed beatmap archive body (connect is covered separately). */
-const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
 const DEBUG_LOG_LIMIT = 80;
 const PREVIEW_AUDIO_PROVIDER_LABEL = 'b.ppy.sh';
 const CACHE_AUDIO_PROVIDER_LABEL = 'cache';
@@ -105,59 +119,6 @@ const UNSUPPORTED_ASCII_BUBBLE_DENSITY = 0.065;
 const UNSUPPORTED_ASCII_BUBBLE_MIN_RADIUS = 2;
 const UNSUPPORTED_ASCII_BUBBLE_MAX_RADIUS = 5;
 const UNSUPPORTED_ASCII_XY_RATIO = UNSUPPORTED_ASCII_CHAR_WIDTH_PX / UNSUPPORTED_ASCII_CHAR_HEIGHT_PX;
-const ZIP_EOCD_SIGNATURE = 0x06054b50;
-const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
-const ZIP_LOCAL_SIGNATURE = 0x04034b50;
-const state = {
-  metadata: null,
-  mapData: null,
-  breaks: [],
-  mappedDurationMs: 0,
-  durationMs: 0,
-  currentTimeMs: 0,
-  isPlaying: false,
-  playbackMode: 'none',
-  playStartPerfMs: 0,
-  playStartMapMs: 0,
-  rafId: null,
-  timelineAnimationRafId: null,
-  indicatorTimer: null,
-  audio: new Audio(),
-  audioSyncEnabled: false,
-  audioReady: false,
-  audioAnchorMapMs: 0,
-  previewSetId: null,
-  fullAudioSetId: null,
-  fullAudioStatus: 'idle',
-  fullAudioCacheKey: '',
-  fullAudioJobId: 0,
-  fullAudioObjectUrl: null,
-  fullAudioError: '',
-  debugLogs: [],
-  debugPanelOpen: false,
-  infoMenuOpen: false,
-  activeSetId: null,
-  providerOverride: 'auto',
-  providerStats: {},
-  providerCooldowns: {},
-  currentArchiveProviderLabel: '',
-  audioBadgeHideTimer: null,
-  toastHideTimer: null,
-  volume: DEFAULT_AUDIO_VOLUME,
-  volumePersistTimer: null,
-  hasAutoStarted: false,
-  playbackSpeed: 1,
-  popupSize: normalizePreviewSettings().popupSize,
-  unsupportedAsciiTimer: null,
-  unsupportedAsciiField: null,
-  lastAudioVisualSyncPerfMs: 0,
-  maniaScrollSpeed: normalizePreviewSettings().maniaScrollSpeed,
-  maniaScaleScrollSpeedWithBpm: normalizePreviewSettings().maniaScaleScrollSpeedWithBpm,
-  standardSnakingSliders: normalizePreviewSettings().standardSnakingSliders,
-  standardSliderEndCircles: normalizePreviewSettings().standardSliderEndCircles,
-};
-
-state.audio.preload = 'auto';
 
 const setFullAudioObjectUrl = (newUrl) => {
   if (state.fullAudioObjectUrl) {
@@ -205,8 +166,10 @@ const getResolvedPlaybackDurationMs = () => {
 const syncPlaybackDuration = () => {
   const previousDurationMs = state.durationMs;
   const nextDurationMs = getResolvedPlaybackDurationMs();
-  state.durationMs = nextDurationMs;
-  state.currentTimeMs = clamp(state.currentTimeMs, 0, nextDurationMs);
+  setTimelineState({
+    durationMs: nextDurationMs,
+    currentTimeMs: clamp(state.currentTimeMs, 0, nextDurationMs),
+  });
   const shouldAnimateTimeline = hasFullAudioSource() && nextDurationMs > previousDurationMs;
   const isAnimatingTimeline = renderer.setDuration(nextDurationMs, { animate: shouldAnimateTimeline });
   if (isAnimatingTimeline) {
@@ -291,50 +254,46 @@ state.audio.addEventListener('ended', () => {
   stopPlayback();
 });
 
-const formatDebugTime = (unixMs) => {
-  const date = new Date(unixMs);
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${hours}:${minutes}:${seconds}`;
-};
+const debugPanelController = createDebugPanelController({
+  state,
+  debugPanel,
+  debugStatus,
+  debugLog,
+  debugLogLimit: DEBUG_LOG_LIMIT,
+  getProviderDisplayName,
+});
+const {
+  render: renderDebugPanel,
+  addLog: addDebugLog,
+  clearLogs: clearDebugLogs,
+  setOpen: setDebugPanelOpen,
+  toggleOpen: toggleDebugPanelOpen,
+} = debugPanelController;
 
-const renderDebugPanel = () => {
-  if (debugPanel) {
-    debugPanel.hidden = !state.debugPanelOpen;
-  }
-
-  if (debugStatus) {
-    const status = state.fullAudioStatus || 'idle';
-    const setLabel = state.activeSetId ? `set ${state.activeSetId}` : 'no set';
-    const overrideLabel = `provider ${getProviderDisplayName(state.providerOverride)}`;
-    const errorLabel = state.fullAudioError ? ` | error: ${state.fullAudioError}` : '';
-    debugStatus.textContent = `status: ${status} | ${setLabel} | ${overrideLabel}${errorLabel}`;
-  }
-
-  if (debugLog) {
-    if (!Array.isArray(state.debugLogs) || state.debugLogs.length === 0) {
-      debugLog.textContent = 'No logs yet.';
-    } else {
-      debugLog.textContent = state.debugLogs
-        .map((entry) => `[${formatDebugTime(entry.time)}] ${entry.message}`)
-        .join('\n');
-    }
-  }
-};
-
-const addDebugLog = (message) => {
-  state.debugLogs.push({ time: Date.now(), message: String(message) });
-  if (state.debugLogs.length > DEBUG_LOG_LIMIT) {
-    state.debugLogs.splice(0, state.debugLogs.length - DEBUG_LOG_LIMIT);
-  }
-  renderDebugPanel();
-};
-
-const clearDebugLogs = () => {
-  state.debugLogs = [];
-  renderDebugPanel();
-};
+const unsupportedViewController = createUnsupportedViewController({
+  popup,
+  unsupportedPanel,
+  unsupportedAscii,
+  state,
+  registry,
+  clamp,
+  config: {
+    tickMs: UNSUPPORTED_ASCII_TICK_MS,
+    charWidthPx: UNSUPPORTED_ASCII_CHAR_WIDTH_PX,
+    charHeightPx: UNSUPPORTED_ASCII_CHAR_HEIGHT_PX,
+    glyphs: UNSUPPORTED_ASCII_GLYPHS,
+    bubbleMinMs: UNSUPPORTED_ASCII_BUBBLE_MIN_MS,
+    bubbleMaxMs: UNSUPPORTED_ASCII_BUBBLE_MAX_MS,
+    bubbleDensity: UNSUPPORTED_ASCII_BUBBLE_DENSITY,
+    bubbleMinRadius: UNSUPPORTED_ASCII_BUBBLE_MIN_RADIUS,
+    bubbleMaxRadius: UNSUPPORTED_ASCII_BUBBLE_MAX_RADIUS,
+    xyRatio: UNSUPPORTED_ASCII_XY_RATIO,
+  },
+});
+const {
+  setUnsupportedMode,
+  stopUnsupportedAsciiAnimation,
+} = unsupportedViewController;
 
 const renderInfoMenu = () => {
   if (infoModal) {
@@ -347,7 +306,7 @@ const renderInfoMenu = () => {
 };
 
 const setInfoMenuOpen = (isOpen) => {
-  state.infoMenuOpen = Boolean(isOpen);
+  setUiState({ infoMenuOpen: isOpen });
   renderInfoMenu();
 };
 
@@ -388,296 +347,12 @@ const showPopupToast = (message, hideDelayMs = 3500) => {
 
   popupToast.textContent = message;
   popupToast.classList.add('is-visible');
-  state.toastHideTimer = setTimeout(() => {
+  state.toastHideTimer = registry.addTimeout(setTimeout(() => {
     popupToast.classList.remove('is-visible');
     state.toastHideTimer = null;
-  }, hideDelayMs);
+  }, hideDelayMs));
 };
 
-const randomRange = (min, max) => min + (Math.random() * (max - min));
-const randomInt = (min, max) => Math.floor(randomRange(min, max + 1));
-
-const getUnsupportedAsciiGridSize = () => {
-  const width = Math.max(140, unsupportedPanel?.clientWidth || 0);
-  const height = Math.max(120, unsupportedPanel?.clientHeight || 0);
-  const cols = Math.max(26, Math.min(120, Math.ceil(width / UNSUPPORTED_ASCII_CHAR_WIDTH_PX) + 1));
-  const rows = Math.max(12, Math.min(40, Math.ceil(height / UNSUPPORTED_ASCII_CHAR_HEIGHT_PX) + 1));
-  return { cols, rows };
-};
-
-const createUnsupportedBubble = (cols, rows) => ({
-  col: randomInt(0, Math.max(0, cols - 1)),
-  row: randomInt(0, Math.max(0, rows - 1)),
-  maxRadius: randomInt(UNSUPPORTED_ASCII_BUBBLE_MIN_RADIUS, UNSUPPORTED_ASCII_BUBBLE_MAX_RADIUS),
-  ageMs: -randomRange(0, 680),
-  durationMs: randomRange(UNSUPPORTED_ASCII_BUBBLE_MIN_MS, UNSUPPORTED_ASCII_BUBBLE_MAX_MS),
-});
-
-const createUnsupportedAsciiField = () => {
-  const { cols, rows } = getUnsupportedAsciiGridSize();
-  const bubbleCount = Math.max(30, Math.min(180, Math.round(cols * rows * UNSUPPORTED_ASCII_BUBBLE_DENSITY)));
-  return {
-    cols,
-    rows,
-    bubbles: Array.from({ length: bubbleCount }, () => createUnsupportedBubble(cols, rows)),
-    lastTickMs: performance.now(),
-  };
-};
-
-const bubbleSizeForProgress = (maxRadius, progress) => {
-  if (progress <= 0 || progress >= 1) {
-    return 0;
-  }
-  if (progress < 0.24) {
-    const growRatio = progress / 0.24;
-    return Math.max(1, Math.round(maxRadius * growRatio));
-  }
-  if (progress > 0.74) {
-    const shrinkRatio = (1 - progress) / 0.26;
-    return Math.max(1, Math.round(maxRadius * shrinkRatio));
-  }
-  return maxRadius;
-};
-
-const renderUnsupportedAsciiFrame = (field, nowMs) => {
-  if (!field || !unsupportedAscii) {
-    return;
-  }
-
-  const deltaMs = Math.max(8, Math.min(280, nowMs - field.lastTickMs));
-  field.lastTickMs = nowMs;
-
-  const { cols, rows } = field;
-  const cellCount = cols * rows;
-  const chars = new Array(cellCount).fill(' ');
-  const weights = new Array(cellCount).fill(0);
-
-  for (let i = 0; i < field.bubbles.length; i += 1) {
-    const bubble = field.bubbles[i];
-    bubble.ageMs += deltaMs;
-
-    if (bubble.ageMs >= bubble.durationMs) {
-      field.bubbles[i] = createUnsupportedBubble(cols, rows);
-      continue;
-    }
-
-    if (bubble.ageMs < 0) {
-      continue;
-    }
-
-    const progress = clamp(bubble.ageMs / bubble.durationMs, 0, 1);
-    const radius = bubbleSizeForProgress(bubble.maxRadius, progress);
-    if (radius <= 0) {
-      continue;
-    }
-
-    const glyph = UNSUPPORTED_ASCII_GLYPHS[Math.min(UNSUPPORTED_ASCII_GLYPHS.length - 1, Math.max(1, radius - 1))] || 'O';
-    const maxDx = Math.ceil(radius / Math.max(0.2, UNSUPPORTED_ASCII_XY_RATIO));
-    for (let dy = -radius; dy <= radius; dy += 1) {
-      for (let dx = -maxDx; dx <= maxDx; dx += 1) {
-        const col = bubble.col + dx;
-        const row = bubble.row + dy;
-        if (col < 0 || col >= cols || row < 0 || row >= rows) {
-          continue;
-        }
-
-        const dist = Math.hypot(dx * UNSUPPORTED_ASCII_XY_RATIO, dy);
-        const ringEdge = radius - 0.9;
-        if (dist > radius + 0.2 || dist < ringEdge) {
-          continue;
-        }
-
-        const idx = (row * cols) + col;
-        const drawWeight = radius + (1 - Math.abs(dist - radius));
-        if (drawWeight < weights[idx]) {
-          continue;
-        }
-
-        weights[idx] = drawWeight;
-        chars[idx] = glyph;
-      }
-    }
-  }
-
-  const lines = [];
-  for (let row = 0; row < rows; row += 1) {
-    const start = row * cols;
-    lines.push(chars.slice(start, start + cols).join(''));
-  }
-  unsupportedAscii.textContent = lines.join('\n');
-};
-
-const stopUnsupportedAsciiAnimation = () => {
-  if (state.unsupportedAsciiTimer) {
-    clearInterval(state.unsupportedAsciiTimer);
-    state.unsupportedAsciiTimer = null;
-  }
-  state.unsupportedAsciiField = null;
-};
-
-const startUnsupportedAsciiAnimation = () => {
-  if (!unsupportedPanel || !unsupportedAscii) {
-    return;
-  }
-
-  stopUnsupportedAsciiAnimation();
-  state.unsupportedAsciiField = createUnsupportedAsciiField();
-  renderUnsupportedAsciiFrame(state.unsupportedAsciiField, performance.now());
-
-  state.unsupportedAsciiTimer = setInterval(() => {
-    if (!state.unsupportedAsciiField) {
-      return;
-    }
-
-    const { cols, rows } = getUnsupportedAsciiGridSize();
-    if (cols !== state.unsupportedAsciiField.cols || rows !== state.unsupportedAsciiField.rows) {
-      state.unsupportedAsciiField = createUnsupportedAsciiField();
-    }
-
-    renderUnsupportedAsciiFrame(state.unsupportedAsciiField, performance.now());
-  }, UNSUPPORTED_ASCII_TICK_MS);
-};
-
-const setUnsupportedMode = (enabled) => {
-  if (!popup) {
-    return;
-  }
-
-  popup.classList.toggle('is-unsupported', Boolean(enabled));
-  if (!unsupportedPanel || !unsupportedAscii) {
-    return;
-  }
-
-  if (!enabled) {
-    unsupportedPanel.hidden = true;
-    stopUnsupportedAsciiAnimation();
-    unsupportedAscii.textContent = '';
-    return;
-  }
-
-  unsupportedPanel.hidden = false;
-  startUnsupportedAsciiAnimation();
-};
-
-const getProviderById = (providerId) => ARCHIVE_DOWNLOAD_SOURCES.find((source) => source.id === providerId) || null;
-
-const getProviderDisplayName = (providerId) => {
-  if (providerId === 'auto') {
-    return 'auto';
-  }
-  return getProviderById(providerId)?.label || providerId;
-};
-
-const ensureProviderStats = (providerId) => {
-  if (!state.providerStats[providerId]) {
-    state.providerStats[providerId] = {
-      successes: 0,
-      failures: 0,
-      timedSuccesses: 0,
-      totalSuccessMs: 0,
-    };
-  } else {
-    const stats = state.providerStats[providerId];
-    stats.successes = Number(stats.successes) || 0;
-    stats.failures = Number(stats.failures) || 0;
-    stats.timedSuccesses = Number(stats.timedSuccesses) || 0;
-    stats.totalSuccessMs = Number(stats.totalSuccessMs) || 0;
-  }
-  return state.providerStats[providerId];
-};
-
-const getProviderCooldownRemainingMs = (providerId) => {
-  const cooldownUntil = Number(state.providerCooldowns[providerId] || 0);
-  return Math.max(0, cooldownUntil - Date.now());
-};
-
-const isProviderInCooldown = (providerId) => getProviderCooldownRemainingMs(providerId) > 0;
-
-const markProviderSuccess = (providerId, durationMs = NaN) => {
-  const stats = ensureProviderStats(providerId);
-  stats.successes += 1;
-  if (Number.isFinite(durationMs) && durationMs >= 0) {
-    stats.timedSuccesses += 1;
-    stats.totalSuccessMs += durationMs;
-  }
-  delete state.providerCooldowns[providerId];
-};
-
-const markProviderFailure = (providerId) => {
-  const stats = ensureProviderStats(providerId);
-  stats.failures += 1;
-  state.providerCooldowns[providerId] = Date.now() + PROVIDER_FAILURE_COOLDOWN_MS;
-};
-
-const getProviderReliabilityScore = (providerId) => {
-  const stats = ensureProviderStats(providerId);
-  const attempts = stats.successes + stats.failures;
-  if (attempts <= 0) {
-    return 0.5;
-  }
-  return stats.successes / attempts;
-};
-
-const getProviderAverageSuccessMs = (providerId) => {
-  const stats = ensureProviderStats(providerId);
-  if (stats.timedSuccesses <= 0 || stats.totalSuccessMs <= 0) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return stats.totalSuccessMs / stats.timedSuccesses;
-};
-
-const getAutoOrderedProviders = () => {
-  const available = ARCHIVE_DOWNLOAD_SOURCES.filter((source) => !isProviderInCooldown(source.id));
-  return available.sort((a, b) => {
-    const aScore = getProviderReliabilityScore(a.id);
-    const bScore = getProviderReliabilityScore(b.id);
-    if (aScore !== bScore) {
-      return bScore - aScore;
-    }
-
-    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
-    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
-    if (aAvgSuccessMs !== bAvgSuccessMs) {
-      return aAvgSuccessMs - bAvgSuccessMs;
-    }
-
-    const aStats = ensureProviderStats(a.id);
-    const bStats = ensureProviderStats(b.id);
-    const aAttempts = aStats.successes + aStats.failures;
-    const bAttempts = bStats.successes + bStats.failures;
-    if (aAttempts !== bAttempts) {
-      return bAttempts - aAttempts;
-    }
-    return a.rank - b.rank;
-  });
-};
-
-const getProviderSequenceForDownload = () => {
-  if (state.providerOverride !== 'auto') {
-    const forced = getProviderById(state.providerOverride);
-    return forced ? [forced] : [];
-  }
-
-  const autoOrdered = getAutoOrderedProviders();
-  if (autoOrdered.length > 0) {
-    return autoOrdered;
-  }
-
-  // If every provider is cooling down, use reliability order anyway as a last resort.
-  return [...ARCHIVE_DOWNLOAD_SOURCES].sort((a, b) => {
-    const aScore = getProviderReliabilityScore(a.id);
-    const bScore = getProviderReliabilityScore(b.id);
-    if (aScore !== bScore) {
-      return bScore - aScore;
-    }
-    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
-    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
-    if (aAvgSuccessMs !== bAvgSuccessMs) {
-      return aAvgSuccessMs - bAvgSuccessMs;
-    }
-    return a.rank - b.rank;
-  });
-};
 
 const readProviderOverrideSetting = async () => {
   try {
@@ -743,7 +418,7 @@ const applyPopupSize = (popupSize) => {
   const normalized = normalizePreviewSettings({ popupSize }).popupSize;
   const preset = POPUP_SIZE_PRESETS[normalized] || POPUP_SIZE_PRESETS.default;
 
-  state.popupSize = normalized;
+  setUiState({ popupSize: normalized });
   document.documentElement.style.setProperty('--popup-shell-width', `${preset.shellWidth}px`);
   document.documentElement.style.setProperty('--popup-content-width', `${preset.contentWidth}px`);
   document.documentElement.style.setProperty('--popup-shell-width-mobile', `${preset.mobileShellWidth}px`);
@@ -780,43 +455,17 @@ const setPlaybackSpeedButtonLabel = () => {
   togglePlaybackButton.title = `Playback speed (${label})`;
 };
 
-const getCurrentManualMapTime = (nowPerfMs) => (
-  state.playStartMapMs + ((nowPerfMs - state.playStartPerfMs) * state.playbackSpeed)
-);
-
-const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs = performance.now()) => {
-  state.currentTimeMs = clamp(mapTimeMs, 0, state.durationMs || 1);
-  if (state.isPlaying) {
-    state.playStartMapMs = state.currentTimeMs;
-    state.playStartPerfMs = nowPerfMs;
-  }
-};
-
-const getAudioMappedTimeMs = () => (
-  state.audioAnchorMapMs + ((state.audio.currentTime || 0) * 1000)
-);
-
-const resyncVisualPlaybackToAudio = ({ force = false, nowPerfMs = performance.now() } = {}) => {
-  if (
-    !state.audioSyncEnabled
-    || !state.audio
-    || !state.audio.src
-    || state.audio.paused
-  ) {
-    return false;
-  }
-
-  const audioMappedTimeMs = clamp(getAudioMappedTimeMs(), 0, state.durationMs || 1);
-  const driftMs = Math.abs(audioMappedTimeMs - state.currentTimeMs);
-  state.lastAudioVisualSyncPerfMs = nowPerfMs;
-
-  if (force || driftMs >= AUDIO_VISUAL_SYNC_THRESHOLD_MS) {
-    syncVisualClockToMapTime(audioMappedTimeMs, nowPerfMs);
-    return true;
-  }
-
-  return false;
-};
+const timingController = createTimingController({
+  state,
+  clamp,
+  thresholdMs: AUDIO_VISUAL_SYNC_THRESHOLD_MS,
+});
+const {
+  getCurrentManualMapTime,
+  syncVisualClockToMapTime,
+  getAudioMappedTimeMs,
+  resyncVisualPlaybackToAudio,
+} = timingController;
 
 const applyPlaybackSpeed = (nextSpeed) => {
   const normalized = PLAYBACK_SPEED_CYCLE.find((value) => Math.abs(value - Number(nextSpeed)) < 0.0001) || 1;
@@ -867,10 +516,10 @@ const setAudioBadge = (stateName, label, tooltip = '') => {
   audioStatusBadge.title = tooltip || label;
 
   if (stateName === 'ready') {
-    state.audioBadgeHideTimer = setTimeout(() => {
+    state.audioBadgeHideTimer = registry.addTimeout(setTimeout(() => {
       audioStatusBadge.classList.add('is-hidden');
       state.audioBadgeHideTimer = null;
-    }, AUDIO_BADGE_AUTO_HIDE_DELAY_MS);
+    }, AUDIO_BADGE_AUTO_HIDE_DELAY_MS));
   }
 
   renderDebugPanel();
@@ -889,208 +538,51 @@ const setAudioBadgeWithProvider = (stateName, label, providerLabel, tooltip = ''
   setAudioBadge(stateName, finalLabel, finalTooltip);
 };
 
-const getAudioMimeType = (filename) => {
-  if (!filename || typeof filename !== 'string') {
-    return 'audio/mpeg';
+const formatArchiveDownloadSize = (bytes) => {
+  if (!(typeof bytes === 'number') || bytes < 0) {
+    return '';
   }
-  const lower = filename.trim().toLowerCase();
-  if (lower.endsWith('.ogg') || lower.endsWith('.oga')) return 'audio/ogg';
-  if (lower.endsWith('.wav')) return 'audio/wav';
-  if (lower.endsWith('.flac')) return 'audio/flac';
-  if (lower.endsWith('.opus')) return 'audio/ogg';
-  return 'audio/mpeg';
+  if (bytes >= 1024 * 1024) {
+    const mb = bytes / (1024 * 1024);
+    return mb >= 10 ? `${mb.toFixed(1)} MB` : `${mb.toFixed(2)} MB`;
+  }
+  return `${Math.round(bytes / 1024)} KB`;
 };
 
-const normalizePath = (path) => String(path || '').replace(/\\/g, '/').replace(/^\/+/, '');
-
-const getPathBaseName = (path) => {
-  const normalized = normalizePath(path);
-  const pieces = normalized.split('/');
-  return (pieces[pieces.length - 1] || '').toLowerCase();
+const buildArchiveProviderProgressParts = (progress) => {
+  if (!progress || typeof progress.loaded !== 'number' || progress.loaded < 0) {
+    return { providerSuffix: '', tooltipDownload: '' };
+  }
+  const { loaded } = progress;
+  const total = typeof progress.total === 'number' && progress.total > 0 ? progress.total : null;
+  if (total !== null) {
+    const pct = Math.min(100, Math.round((100 * loaded) / total));
+    return {
+      providerSuffix: ` · ${pct}%`,
+      tooltipDownload: `${formatArchiveDownloadSize(loaded)} / ${formatArchiveDownloadSize(total)}`,
+    };
+  }
+  return {
+    providerSuffix: ` · ${formatArchiveDownloadSize(loaded)}`,
+    tooltipDownload: `${formatArchiveDownloadSize(loaded)} received`,
+  };
 };
 
-const makeFullAudioCacheKey = (setId, audioFilename) => {
-  const safeSetId = encodeURIComponent(String(setId || '').trim());
-  const safeFile = encodeURIComponent(normalizePath(audioFilename).toLowerCase());
-  return `https://osu.ppy.sh/beatmapsets/${safeSetId}/audio/${safeFile}`;
-};
-
-const getFullAudioCacheKeyCandidates = (setId, audioFilename) => {
-  const normalizedSetId = String(setId || '').trim();
-  const normalizedPath = normalizePath(audioFilename).toLowerCase();
-  if (!normalizedSetId || !normalizedPath) {
-    return [];
-  }
-
-  const names = [normalizedPath];
-  const baseName = getPathBaseName(normalizedPath);
-  if (baseName && baseName !== normalizedPath) {
-    names.push(baseName);
-  }
-
-  return [...new Set(names)].map((name) => makeFullAudioCacheKey(normalizedSetId, name));
-};
-
-const readLastFullAudioPruneTime = async () => {
-  if (!hasStorageArea('local')) {
-    return 0;
-  }
-
-  try {
-    const items = await storageGet('local', [FULL_AUDIO_CACHE_LAST_PRUNE_KEY]);
-    const value = Number(items?.[FULL_AUDIO_CACHE_LAST_PRUNE_KEY]);
-    return Number.isFinite(value) && value > 0 ? value : 0;
-  } catch {
-    return 0;
-  }
-};
-
-const writeLastFullAudioPruneTime = async (unixMs) => {
-  if (!hasStorageArea('local')) {
-    return false;
-  }
-
-  try {
-    await storageSet('local', { [FULL_AUDIO_CACHE_LAST_PRUNE_KEY]: Math.max(0, Math.floor(unixMs)) });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const parseCachedAtMs = (response) => {
-  const headerValue = response?.headers?.get('x-mosu-cached-at') || '';
-  const numeric = Number.parseInt(headerValue, 10);
-  if (Number.isFinite(numeric) && numeric > 0) {
-    return numeric;
-  }
-  return 0;
-};
-
-const pruneFullAudioCache = async ({ force = false } = {}) => {
-  if (!('caches' in window)) {
-    return;
-  }
-
-  const now = Date.now();
-  if (!force) {
-    const lastPruneAt = await readLastFullAudioPruneTime();
-    if (lastPruneAt > 0 && (now - lastPruneAt) < FULL_AUDIO_CACHE_PRUNE_INTERVAL_MS) {
-      return;
-    }
-  }
-
-  try {
-    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    const requests = await cache.keys();
-    if (!Array.isArray(requests) || requests.length === 0) {
-      await writeLastFullAudioPruneTime(now);
-      return;
-    }
-
-    const entries = [];
-    for (const request of requests) {
-      try {
-        const response = await cache.match(request);
-        if (!response) {
-          continue;
-        }
-
-        const blob = await response.blob();
-        const size = Number.isFinite(blob.size) ? blob.size : 0;
-        const cachedAtMs = parseCachedAtMs(response);
-        entries.push({ request, size: Math.max(0, size), cachedAtMs });
-      } catch {
-        // Ignore unreadable entries and keep pruning others.
-      }
-    }
-
-    let totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
-
-    const deletedRequests = new Set();
-    for (const entry of entries) {
-      const isExpired = entry.cachedAtMs > 0 && (now - entry.cachedAtMs) > FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS;
-      if (!isExpired) {
-        continue;
-      }
-
-      if (await cache.delete(entry.request)) {
-        totalBytes -= entry.size;
-        deletedRequests.add(entry.request.url);
-      }
-    }
-
-    if (totalBytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES) {
-      const candidates = entries
-        .filter((entry) => !deletedRequests.has(entry.request.url))
-        .sort((a, b) => (a.cachedAtMs || 0) - (b.cachedAtMs || 0));
-
-      for (const entry of candidates) {
-        if (totalBytes <= FULL_AUDIO_CACHE_TOTAL_MAX_BYTES) {
-          break;
-        }
-        if (await cache.delete(entry.request)) {
-          totalBytes -= entry.size;
-        }
-      }
-    }
-  } catch {
-    // Cache cleanup should never block preview loading.
-  } finally {
-    await writeLastFullAudioPruneTime(now);
-  }
-};
-
-const readCachedFullAudioBlob = async (setId, audioFilename) => {
-  if (!setId || !audioFilename || !('caches' in window)) {
-    return null;
-  }
-  try {
-    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    for (const key of getFullAudioCacheKeyCandidates(setId, audioFilename)) {
-      const response = await cache.match(key);
-      if (response?.ok) {
-        return await response.blob();
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-};
-
-const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
-  if (
-    !setId
-    || !audioFilename
-    || !blob
-    || !('caches' in window)
-    || !Number.isFinite(blob.size)
-    || blob.size <= 0
-    || blob.size > FULL_AUDIO_CACHE_MAX_BYTES
-  ) {
-    return false;
-  }
-
-  try {
-    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    const keys = getFullAudioCacheKeyCandidates(setId, audioFilename);
-    for (const key of keys) {
-      await cache.put(
-        key,
-        new Response(blob, {
-          headers: {
-            'content-type': blob.type || getAudioMimeType(audioFilename),
-            'x-mosu-cached-at': String(Date.now()),
-          },
-        }),
-      );
-    }
-    void pruneFullAudioCache();
-    return true;
-  } catch {
-    return false;
-  }
+const showTryingArchiveProviderBadge = (providerLabel, progress) => {
+  const label = String(providerLabel || '').trim()
+    || getProviderDisplayName(state.providerOverride);
+  setProviderState({ currentArchiveProviderLabel: label });
+  const { providerSuffix, tooltipDownload } = buildArchiveProviderProgressParts(progress);
+  const providerLine = `${label}${providerSuffix}`;
+  const title = tooltipDownload
+    ? `Fetching beatmap archive from ${label} — ${tooltipDownload}`
+    : `Fetching beatmap archive from ${label}`;
+  setAudioBadgeWithProvider(
+    'loading',
+    'Loading full audio',
+    providerLine,
+    title,
+  );
 };
 
 const waitForAudioReady = ({ requireFreshEvent = false } = {}) => new Promise((resolve) => {
@@ -1121,7 +613,7 @@ const waitForAudioReady = ({ requireFreshEvent = false } = {}) => new Promise((r
     state.audio.removeEventListener('error', onError);
   };
 
-  const timer = setTimeout(onTimeout, 10000);
+  const timer = registry.addTimeout(setTimeout(onTimeout, 10000));
   state.audio.addEventListener('canplay', onReady);
   state.audio.addEventListener('loadeddata', onReady);
   state.audio.addEventListener('error', onError);
@@ -1154,7 +646,7 @@ const waitForAudioSeek = () => new Promise((resolve) => {
     state.audio.removeEventListener('error', onError);
   };
 
-  const timer = setTimeout(onTimeout, 2500);
+  const timer = registry.addTimeout(setTimeout(onTimeout, 2500));
   state.audio.addEventListener('seeked', onSeeked, { once: true });
   state.audio.addEventListener('error', onError, { once: true });
 });
@@ -1179,646 +671,7 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
     syncPlaybackDuration();
     return true;
   }
-  state.audio.playbackRate = state.playbackSpeed;
-  syncPlaybackDuration();
   return false;
-};
-
-const decodeZipName = (nameBytes, isUtf8) => {
-  if (!(nameBytes instanceof Uint8Array)) {
-    return '';
-  }
-
-  try {
-    const decoder = new TextDecoder(isUtf8 ? 'utf-8' : 'utf-8', { fatal: false });
-    return decoder.decode(nameBytes);
-  } catch {
-    return String.fromCharCode(...nameBytes);
-  }
-};
-
-const findZipEocdOffset = (bytes) => {
-  const minimumLength = 22;
-  if (!bytes || bytes.length < minimumLength) {
-    return -1;
-  }
-
-  const scanStart = Math.max(0, bytes.length - (0xFFFF + minimumLength));
-  for (let offset = bytes.length - minimumLength; offset >= scanStart; offset -= 1) {
-    if (
-      bytes[offset] === 0x50
-      && bytes[offset + 1] === 0x4b
-      && bytes[offset + 2] === 0x05
-      && bytes[offset + 3] === 0x06
-    ) {
-      return offset;
-    }
-  }
-
-  return -1;
-};
-
-const parseZipEntries = (archiveBytes) => {
-  if (!(archiveBytes instanceof Uint8Array)) {
-    throw new Error('Invalid beatmap archive payload.');
-  }
-
-  const view = new DataView(archiveBytes.buffer, archiveBytes.byteOffset, archiveBytes.byteLength);
-  const eocdOffset = findZipEocdOffset(archiveBytes);
-  if (eocdOffset < 0) {
-    throw new Error('Beatmap archive is not a readable ZIP file.');
-  }
-
-  if (view.getUint32(eocdOffset, true) !== ZIP_EOCD_SIGNATURE) {
-    throw new Error('ZIP footer signature mismatch.');
-  }
-
-  const centralDirectorySize = view.getUint32(eocdOffset + 12, true);
-  const centralDirectoryOffset = view.getUint32(eocdOffset + 16, true);
-  const centralDirectoryEnd = centralDirectoryOffset + centralDirectorySize;
-  if (
-    centralDirectoryOffset < 0
-    || centralDirectoryOffset >= archiveBytes.length
-    || centralDirectoryEnd > archiveBytes.length
-  ) {
-    throw new Error('ZIP central directory is out of bounds.');
-  }
-
-  const entries = [];
-  let cursor = centralDirectoryOffset;
-
-  while (cursor < centralDirectoryEnd) {
-    if (entries.length >= MAX_ZIP_ENTRIES) {
-      throw new Error('ZIP contains too many entries.');
-    }
-    if (cursor + 46 > centralDirectoryEnd) {
-      throw new Error('ZIP central directory entry is truncated.');
-    }
-    if (view.getUint32(cursor, true) !== ZIP_CENTRAL_SIGNATURE) {
-      break;
-    }
-
-    const flags = view.getUint16(cursor + 8, true);
-    const compressionMethod = view.getUint16(cursor + 10, true);
-    const compressedSize = view.getUint32(cursor + 20, true);
-    const uncompressedSize = view.getUint32(cursor + 24, true);
-    const fileNameLength = view.getUint16(cursor + 28, true);
-    const extraLength = view.getUint16(cursor + 30, true);
-    const commentLength = view.getUint16(cursor + 32, true);
-    const localHeaderOffset = view.getUint32(cursor + 42, true);
-
-    const nameStart = cursor + 46;
-    const nameEnd = nameStart + fileNameLength;
-    if (nameEnd > archiveBytes.length) {
-      break;
-    }
-
-    const nameBytes = archiveBytes.subarray(nameStart, nameEnd);
-    const name = decodeZipName(nameBytes, (flags & 0x0800) !== 0);
-
-    entries.push({
-      name,
-      compressionMethod,
-      compressedSize,
-      uncompressedSize,
-      localHeaderOffset,
-    });
-
-    const nextCursor = cursor + 46 + fileNameLength + extraLength + commentLength;
-    if (nextCursor <= cursor || nextCursor > centralDirectoryEnd) {
-      throw new Error('ZIP central directory entry bounds are invalid.');
-    }
-    cursor = nextCursor;
-  }
-
-  return entries;
-};
-
-const inflateWithFormat = async (compressedBytes, format) => {
-  if (!('DecompressionStream' in window)) {
-    throw new Error('Browser does not support ZIP inflation for full audio.');
-  }
-  const stream = new Blob([compressedBytes]).stream().pipeThrough(new DecompressionStream(format));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-};
-
-const inflateDeflateRaw = async (compressedBytes) => {
-  try {
-    return await inflateWithFormat(compressedBytes, 'deflate-raw');
-  } catch {
-    return inflateWithFormat(compressedBytes, 'deflate');
-  }
-};
-
-const mergeUint8Chunks = (chunks, totalBytes) => {
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return merged.buffer;
-};
-
-const readStreamChunkWithDeadline = async (reader, remainingMs) => {
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
-    await reader.cancel();
-    const err = new Error('timeout');
-    err.name = 'AbortError';
-    throw err;
-  }
-  let timeoutId;
-  try {
-    return await Promise.race([
-      reader.read(),
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, remainingMs);
-      }),
-    ]);
-  } catch (err) {
-    if (err?.name === 'AbortError') {
-      await reader.cancel();
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-};
-
-const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs) => {
-  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
-  const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
-  if (Number.isFinite(contentLength) && contentLength > cap) {
-    throw new Error(`archive too large (${contentLength} bytes)`);
-  }
-
-  const bodyDeadline = Number.isFinite(bodyBudgetMs) && bodyBudgetMs > 0
-    ? performance.now() + bodyBudgetMs
-    : null;
-
-  if (!response.body) {
-    if (bodyDeadline === null) {
-      const fallbackBuffer = await response.arrayBuffer();
-      if (fallbackBuffer.byteLength > cap) {
-        throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
-      }
-      return fallbackBuffer;
-    }
-    const fallbackBuffer = await Promise.race([
-      response.arrayBuffer(),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, bodyBudgetMs);
-      }),
-    ]);
-    if (fallbackBuffer.byteLength > cap) {
-      throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
-    }
-    return fallbackBuffer;
-  }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-
-  try {
-    // Stream the response with a hard cap to avoid memory exhaustion.
-    while (true) {
-      const chunkResult = bodyDeadline === null
-        ? await reader.read()
-        : await readStreamChunkWithDeadline(reader, bodyDeadline - performance.now());
-      const { done, value } = chunkResult;
-      if (done) {
-        break;
-      }
-      if (!(value instanceof Uint8Array) || value.byteLength <= 0) {
-        continue;
-      }
-
-      totalBytes += value.byteLength;
-      if (totalBytes > cap) {
-        await reader.cancel();
-        throw new Error(`archive exceeds limit (${totalBytes} bytes)`);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  return mergeUint8Chunks(chunks, totalBytes);
-};
-
-const responseLooksLikeBeatmapArchiveDownload = (response) => {
-  const disposition = (response.headers.get('content-disposition') || '').toLowerCase();
-  if (disposition.includes('.osz')) {
-    return true;
-  }
-  const rawType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-  return rawType === 'application/zip' || rawType === 'application/x-zip-compressed';
-};
-
-/**
- * Before we know the body is a ZIP, enforce `initialReadDeadlineMs` from first body read.
- * Once `PK` is seen (or sooner if headers matched elsewhere), reads still respect `archiveBodyBudgetMs`.
- */
-const readResponseArrayBufferLimitedWithInitialZipProbe = async (
-  response,
-  maxBytes,
-  initialReadDeadlineMs,
-  archiveBodyBudgetMs,
-) => {
-  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
-  const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
-  if (Number.isFinite(contentLength) && contentLength > cap) {
-    throw new Error(`archive too large (${contentLength} bytes)`);
-  }
-
-  if (!response.body) {
-    const fallbackBuffer = await Promise.race([
-      response.arrayBuffer(),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, archiveBodyBudgetMs);
-      }),
-    ]);
-    if (fallbackBuffer.byteLength > cap) {
-      throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
-    }
-    return fallbackBuffer;
-  }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-  const bodyReadStart = performance.now();
-  const bodyDeadline = performance.now() + archiveBodyBudgetMs;
-  let zipConfirmed = false;
-
-  try {
-    while (true) {
-      const now = performance.now();
-      const remainingBudget = bodyDeadline - now;
-      if (remainingBudget <= 0) {
-        await reader.cancel();
-        const err = new Error('timeout');
-        err.name = 'AbortError';
-        throw err;
-      }
-
-      let remainingForRace;
-      if (zipConfirmed) {
-        remainingForRace = remainingBudget;
-      } else {
-        const elapsed = now - bodyReadStart;
-        const remainingProbe = initialReadDeadlineMs - elapsed;
-        remainingForRace = Math.min(remainingBudget, remainingProbe);
-      }
-
-      const chunkResult = await readStreamChunkWithDeadline(reader, remainingForRace);
-      const { done, value } = chunkResult;
-      if (done) {
-        break;
-      }
-      if (!(value instanceof Uint8Array) || value.byteLength <= 0) {
-        continue;
-      }
-
-      totalBytes += value.byteLength;
-      if (totalBytes > cap) {
-        await reader.cancel();
-        throw new Error(`archive exceeds limit (${totalBytes} bytes)`);
-      }
-      chunks.push(value);
-
-      if (!zipConfirmed && totalBytes >= 2) {
-        const head = new Uint8Array(2);
-        let o = 0;
-        for (const ch of chunks) {
-          for (let i = 0; i < ch.byteLength && o < 2; i += 1) {
-            head[o] = ch[i];
-            o += 1;
-          }
-          if (o >= 2) {
-            break;
-          }
-        }
-        if (head[0] === 0x50 && head[1] === 0x4b) {
-          zipConfirmed = true;
-        } else {
-          await reader.cancel();
-          break;
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  return mergeUint8Chunks(chunks, totalBytes);
-};
-
-const fetchBeatmapArchiveAdaptive = async (
-  url,
-  options,
-  headerTimeoutMs,
-  bodyProbeDeadlineMs,
-  maxBytes,
-) => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
-  let response;
-  try {
-    response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-
-  if (!response.ok) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // ignore cancel errors from hosts that omit a body stream
-    }
-    return { response, buffer: new ArrayBuffer(0) };
-  }
-
-  if (responseLooksLikeBeatmapArchiveDownload(response)) {
-    const buffer = await readResponseArrayBufferLimited(
-      response,
-      maxBytes,
-      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
-    );
-    return { response, buffer };
-  }
-
-  const buffer = await readResponseArrayBufferLimitedWithInitialZipProbe(
-    response,
-    maxBytes,
-    bodyProbeDeadlineMs,
-    FETCH_TIMEOUT_ARCHIVE_BODY_MS,
-  );
-  return { response, buffer };
-};
-
-const extractZipEntry = async (archiveBytes, entry) => {
-  const view = new DataView(archiveBytes.buffer, archiveBytes.byteOffset, archiveBytes.byteLength);
-  const localOffset = entry.localHeaderOffset;
-  const compressedSize = Number(entry.compressedSize);
-  const uncompressedSize = Number(entry.uncompressedSize);
-
-  if (
-    !Number.isFinite(compressedSize)
-    || !Number.isFinite(uncompressedSize)
-    || compressedSize <= 0
-    || uncompressedSize <= 0
-    || compressedSize > MAX_ARCHIVE_DOWNLOAD_BYTES
-    || uncompressedSize > MAX_ZIP_AUDIO_ENTRY_BYTES
-  ) {
-    throw new Error('ZIP entry size is invalid or exceeds security limits.');
-  }
-
-  if (
-    compressedSize > 0
-    && uncompressedSize > (compressedSize * MAX_ZIP_ENTRY_INFLATE_RATIO)
-  ) {
-    throw new Error('ZIP entry inflate ratio is suspiciously high.');
-  }
-
-  if (
-    !Number.isFinite(localOffset)
-    || localOffset < 0
-    || localOffset + 30 > archiveBytes.length
-    || view.getUint32(localOffset, true) !== ZIP_LOCAL_SIGNATURE
-  ) {
-    throw new Error('ZIP local file header is invalid.');
-  }
-
-  const localFileNameLength = view.getUint16(localOffset + 26, true);
-  const localExtraLength = view.getUint16(localOffset + 28, true);
-  const dataStart = localOffset + 30 + localFileNameLength + localExtraLength;
-  const dataEnd = dataStart + compressedSize;
-
-  if (dataStart < 0 || dataEnd > archiveBytes.length || dataEnd <= dataStart) {
-    throw new Error('ZIP entry data is out of bounds.');
-  }
-
-  const compressed = archiveBytes.subarray(dataStart, dataEnd);
-  if (entry.compressionMethod === 0) {
-    if (compressed.byteLength !== uncompressedSize) {
-      throw new Error('Stored ZIP entry size mismatch.');
-    }
-    return new Uint8Array(compressed);
-  }
-  if (entry.compressionMethod === 8) {
-    const inflated = await inflateDeflateRaw(compressed);
-    if (inflated.byteLength !== uncompressedSize) {
-      throw new Error('Inflated ZIP entry size mismatch.');
-    }
-    if (inflated.byteLength > MAX_ZIP_AUDIO_ENTRY_BYTES) {
-      throw new Error('Inflated ZIP entry exceeds maximum allowed size.');
-    }
-    return inflated;
-  }
-
-  throw new Error(`ZIP compression method ${entry.compressionMethod} is unsupported.`);
-};
-
-const pickAudioEntryFromZip = (entries, requestedAudioFilename) => {
-  const targetBaseName = getPathBaseName(requestedAudioFilename);
-  const audioExtensions = ['.mp3', '.ogg', '.wav', '.flac', '.opus'];
-  const isAudioName = (value) => audioExtensions.some((ext) => value.toLowerCase().endsWith(ext));
-  const safeEntries = entries.filter((entry) => (
-    isAudioName(entry.name)
-    && Number.isFinite(entry.uncompressedSize)
-    && entry.uncompressedSize > 0
-    && entry.uncompressedSize <= MAX_ZIP_AUDIO_ENTRY_BYTES
-  ));
-
-  if (targetBaseName) {
-    const exactBaseMatch = safeEntries.find((entry) => getPathBaseName(entry.name) === targetBaseName);
-    if (exactBaseMatch) {
-      return exactBaseMatch;
-    }
-  }
-
-  const requestedPath = normalizePath(requestedAudioFilename).toLowerCase();
-  if (requestedPath) {
-    const exactPathMatch = safeEntries.find((entry) => normalizePath(entry.name).toLowerCase() === requestedPath);
-    if (exactPathMatch) {
-      return exactPathMatch;
-    }
-  }
-
-  return safeEntries[0] || null;
-};
-
-const fetchArrayBufferWithTimeout = async (
-  url,
-  options = {},
-  timeoutMs = FETCH_TIMEOUT_MS,
-  maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
-) => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-    const buffer = await readResponseArrayBufferLimited(response, maxBytes);
-    return { response, buffer };
-  } finally {
-    clearTimeout(timer);
-  }
-};
-
-const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIMEOUT_MS, 12000)) => {
-  const url = source.url(setId);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      credentials: source.credentials || 'omit',
-      cache: 'no-store',
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-
-    let firstBytes = '';
-    if (response.body) {
-      const reader = response.body.getReader();
-      const chunk = await reader.read();
-      if (!chunk.done && chunk.value instanceof Uint8Array) {
-        firstBytes = Array.from(chunk.value.slice(0, 4))
-          .map((value) => value.toString(16).padStart(2, '0'))
-          .join(' ');
-      }
-      await reader.cancel();
-    }
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      redirected: response.redirected,
-      finalUrl: response.url,
-      firstBytes,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      status: 0,
-      redirected: false,
-      finalUrl: url,
-      firstBytes: '',
-      error: error?.name === 'AbortError' ? 'timeout' : (error?.message || 'network error'),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-};
-
-const downloadBeatmapArchive = async (setId) => {
-  const failures = [];
-  const sources = getProviderSequenceForDownload();
-  const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
-  const modeLabel = state.providerOverride === 'auto'
-    ? 'auto'
-    : `forced:${getProviderDisplayName(state.providerOverride)}`;
-  const autoHasAvailableProviders = state.providerOverride === 'auto' && getAutoOrderedProviders().length > 0;
-
-  if (!sources.length) {
-    throw new Error('no providers available');
-  }
-
-  addDebugLog(`audio: trying providers for set ${setId} (${modeLabel})`);
-
-  for (const source of sources) {
-    try {
-      const cooldownRemainingMs = getProviderCooldownRemainingMs(source.id);
-      if (autoHasAvailableProviders && cooldownRemainingMs > 0) {
-        addDebugLog(`audio: ${source.label} skipped (cooldown ${Math.ceil(cooldownRemainingMs / 1000)}s)`);
-        continue;
-      }
-
-      state.currentArchiveProviderLabel = source.label;
-      setAudioBadgeWithProvider('loading', 'Loading full audio', source.label, `Downloading from ${source.label}`);
-
-      const requestUrl = source.url(setId);
-      const requestStartMs = performance.now();
-      addDebugLog(`audio: ${source.label} -> request start`);
-      const fetchOpts = {
-        method: 'GET',
-        credentials: source.credentials || 'omit',
-        cache: 'no-store',
-        redirect: 'follow',
-      };
-      const { response, buffer } = sources.length > 1
-        ? await fetchBeatmapArchiveAdaptive(
-          requestUrl,
-          fetchOpts,
-          fetchTimeoutMs,
-          fetchTimeoutMs,
-          MAX_ARCHIVE_DOWNLOAD_BYTES,
-        )
-        : await fetchArrayBufferWithTimeout(requestUrl, fetchOpts, fetchTimeoutMs);
-
-      if (!response.ok) {
-        failures.push(`${source.label}:${response.status}`);
-        addDebugLog(`audio: ${source.label} -> http ${response.status}`);
-        markProviderFailure(source.id);
-        addDebugLog(`audio: ${source.label} cooldown ${Math.ceil(PROVIDER_FAILURE_COOLDOWN_MS / 1000)}s`);
-        continue;
-      }
-
-      const archiveBuffer = buffer;
-      const header = new Uint8Array(archiveBuffer.slice(0, 4));
-      const isZip = header.length === 4 && header[0] === 0x50 && header[1] === 0x4b;
-      if (!isZip) {
-        failures.push(`${source.label}:non-zip`);
-        addDebugLog(`audio: ${source.label} -> non-zip response (${response.url})`);
-        markProviderFailure(source.id);
-        addDebugLog(`audio: ${source.label} cooldown ${Math.ceil(PROVIDER_FAILURE_COOLDOWN_MS / 1000)}s`);
-        continue;
-      }
-
-      markProviderSuccess(source.id, performance.now() - requestStartMs);
-      addDebugLog(`audio: ${source.label} -> zip ok (${response.url})`);
-      return { archiveBuffer, sourceLabel: source.label };
-    } catch (error) {
-      const isTimeout = error?.name === 'AbortError';
-      failures.push(`${source.label}:${isTimeout ? 'timeout' : (error?.message || 'network error')}`);
-      addDebugLog(`audio: ${source.label} -> ${isTimeout ? 'timeout' : (error?.message || 'network error')}`);
-      markProviderFailure(source.id);
-      addDebugLog(`audio: ${source.label} cooldown ${Math.ceil(PROVIDER_FAILURE_COOLDOWN_MS / 1000)}s`);
-    }
-  }
-
-  addDebugLog(`audio: all providers failed (${failures.join(', ')})`);
-  throw new Error(`archive download failed (${failures.join(', ')})`);
-};
-
-const stopPlayback = () => {
-  state.isPlaying = false;
-  state.playbackMode = 'none';
-  state.lastAudioVisualSyncPerfMs = 0;
-  if (state.rafId !== null) {
-    cancelAnimationFrame(state.rafId);
-    state.rafId = null;
-  }
-  if (state.audio && !state.audio.paused) {
-    state.audio.pause();
-  }
-  ensureTimelineDurationAnimation();
 };
 
 const renderFrame = () => {
@@ -1827,43 +680,31 @@ const renderFrame = () => {
   timeLabel.textContent = `${renderer.getCurrentLabel()} / ${renderer.getDurationLabel()}`;
 };
 
-const playbackTick = (now) => {
-  if (!state.isPlaying) {
-    return;
-  }
-
-  state.currentTimeMs = getCurrentManualMapTime(now);
-
-  if (state.playbackMode === 'audio' && state.audioSyncEnabled && state.audio) {
-    if (state.audio.paused) {
-      state.playbackMode = 'manual';
-      if (
-        state.isPlaying
-        && shouldContinueTimelineWhileFetchingFullAudio()
-        && state.audio.ended
-      ) {
-        syncVisualClockToMapTime(
-          clamp(getAudioMappedTimeMs(), 0, state.durationMs || 1),
-          now,
-        );
-      } else {
-        syncVisualClockToMapTime(state.currentTimeMs, now);
-      }
-    } else if ((now - state.lastAudioVisualSyncPerfMs) >= AUDIO_VISUAL_SYNC_INTERVAL_MS) {
-      resyncVisualPlaybackToAudio({ nowPerfMs: now });
-    }
-  }
-
-  if (state.currentTimeMs >= state.durationMs) {
-    state.currentTimeMs = state.durationMs;
-    renderFrame();
-    stopPlayback();
-    return;
-  }
-
-  renderFrame();
-  state.rafId = requestAnimationFrame(playbackTick);
-};
+const playbackController = createPlaybackController({
+  state,
+  renderer,
+  config: {
+    audioVisualSyncIntervalMs: AUDIO_VISUAL_SYNC_INTERVAL_MS,
+  },
+  helpers: {
+    ensureTimelineDurationAnimation,
+    getCurrentManualMapTime,
+    shouldContinueTimelineWhileFetchingFullAudio,
+    syncVisualClockToMapTime,
+    getAudioMappedTimeMs,
+    resyncVisualPlaybackToAudio,
+    clearCurrentRaf,
+    seekAudioToMapTime: (...args) => seekAudioToMapTime(...args),
+    renderFrame,
+    clamp,
+  },
+});
+const {
+  stopPlayback,
+  playbackTick,
+  togglePlayback,
+  seekFromTimelineEvent,
+} = playbackController;
 
 const showCanvasToggleFeedback = (action) => {
   if (!toggleIndicator) {
@@ -1880,10 +721,10 @@ const showCanvasToggleFeedback = (action) => {
   toggleIndicator.classList.add(action === 'pause' ? 'is-pause' : 'is-play');
   toggleIndicator.classList.add('is-visible');
 
-  state.indicatorTimer = setTimeout(() => {
+  state.indicatorTimer = registry.addTimeout(setTimeout(() => {
     toggleIndicator.classList.remove('is-visible', 'is-play', 'is-pause');
     state.indicatorTimer = null;
-  }, 400);
+  }, 400));
 };
 
 const setStatus = (text, isError = false) => {
@@ -1930,13 +771,15 @@ const extractSetIdFromMetadata = (beatmapSetID) => {
 };
 
 const configureAudioPreview = (setId, previewTimeMs) => {
-  state.previewSetId = null;
-  state.activeSetId = null;
-  state.fullAudioSetId = null;
-  state.fullAudioStatus = 'idle';
-  state.fullAudioCacheKey = '';
-  state.fullAudioError = '';
-  state.currentArchiveProviderLabel = '';
+  setFullAudioState({
+    previewSetId: null,
+    activeSetId: null,
+    fullAudioSetId: null,
+    fullAudioStatus: 'idle',
+    fullAudioCacheKey: '',
+    fullAudioError: '',
+  });
+  setProviderState({ currentArchiveProviderLabel: '' });
   setFullAudioLoading(false);
   setAudioBadgeWithProvider('preview', 'Preview audio', PREVIEW_AUDIO_PROVIDER_LABEL);
 
@@ -1949,8 +792,10 @@ const configureAudioPreview = (setId, previewTimeMs) => {
 
   const normalizedSetId = String(setId);
   const nextSrc = `${AUDIO_PREVIEW_BASE}/${normalizedSetId}.mp3`;
-  state.previewSetId = normalizedSetId;
-  state.activeSetId = normalizedSetId;
+  setFullAudioState({
+    previewSetId: normalizedSetId,
+    activeSetId: normalizedSetId,
+  });
   setAudioElementSource(nextSrc, Math.max(0, Number.isFinite(previewTimeMs) && previewTimeMs > 0 ? previewTimeMs : 0));
 };
 
@@ -1984,10 +829,12 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
 
   const fullAudioUrl = URL.createObjectURL(audioBlob);
   setFullAudioObjectUrl(fullAudioUrl);
-  state.fullAudioSetId = String(setId);
-  state.fullAudioStatus = 'ready';
-  state.fullAudioCacheKey = `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`;
-  state.fullAudioError = '';
+  setFullAudioState({
+    fullAudioSetId: String(setId),
+    fullAudioStatus: 'ready',
+    fullAudioCacheKey: `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`,
+    fullAudioError: '',
+  });
   setAudioBadgeWithProvider(
     'ready',
     'Full audio ready',
@@ -2028,8 +875,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     try {
       state.audio.playbackRate = state.playbackSpeed;
       await state.audio.play();
-      state.playbackMode = 'audio';
-      state.isPlaying = true;
+      setPlaybackState({ playbackMode: 'audio', isPlaying: true });
       syncVisualClockToMapTime(getAudioMappedTimeMs());
       resyncVisualPlaybackToAudio({ force: true });
       if (state.rafId === null) {
@@ -2038,8 +884,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
       addDebugLog('audio: hotswap success, playback resumed');
       return true;
     } catch {
-      state.playbackMode = 'manual';
-      state.isPlaying = true;
+      setPlaybackState({ playbackMode: 'manual', isPlaying: true });
       syncVisualClockToMapTime(state.currentTimeMs);
       if (state.rafId === null) {
         state.rafId = requestAnimationFrame(playbackTick);
@@ -2082,17 +927,22 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
 
   state.fullAudioJobId += 1;
   const jobId = state.fullAudioJobId;
-  state.fullAudioStatus = 'loading';
-  state.fullAudioCacheKey = cacheKey;
-  state.fullAudioError = '';
+  setFullAudioState({
+    fullAudioStatus: 'loading',
+    fullAudioCacheKey: cacheKey,
+    fullAudioError: '',
+  });
   setFullAudioLoading(true);
-  setAudioBadgeWithProvider('loading', 'Loading full audio', state.currentArchiveProviderLabel);
+  const firstTrySequence = getProviderSequenceForDownload(state.providerOverride);
+  showTryingArchiveProviderBadge(
+    firstTrySequence[0]?.label ?? getProviderDisplayName(state.providerOverride),
+  );
   addDebugLog(`audio: full-load start set=${setId} file=${audioFileName}`);
 
   try {
     const cachedBlob = await readCachedFullAudioBlob(setId, audioFileName);
     if (cachedBlob && jobId === state.fullAudioJobId) {
-      state.currentArchiveProviderLabel = CACHE_AUDIO_PROVIDER_LABEL;
+      setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
       setAudioBadgeWithProvider('loading', 'Loading full audio', CACHE_AUDIO_PROVIDER_LABEL, 'Using cached full audio');
       addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB)`);
       await hotswapToFullAudio(cachedBlob, setId, audioFileName, jobId, CACHE_AUDIO_PROVIDER_LABEL);
@@ -2100,41 +950,84 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
     }
     addDebugLog('audio: cache miss');
 
-    const { archiveBuffer, sourceLabel } = await downloadBeatmapArchive(setId);
+    let extractionResult;
+    try {
+      extractionResult = await sendRuntimeMessage({
+        type: 'extractFullAudio',
+        setId,
+        audioFilename: audioFileName,
+        providerOverride: state.providerOverride,
+        jobId,
+      });
+    } catch (swMessageError) {
+      addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
+      extractionResult = { ok: false, error: swMessageError?.message || 'runtime message failed' };
+    }
+
+    if (!extractionResult?.ok) {
+      addDebugLog(`audio: worker path failed (${extractionResult?.error || 'unknown'}); retry download in popup`);
+      extractionResult = await extractFullBeatmapAudioToPayload({
+        setId,
+        audioFilename: audioFileName,
+        providerOverride: state.providerOverride,
+        onTryingSource: showTryingArchiveProviderBadge,
+        onDownloadProgress: (evt) => {
+          if (jobId !== state.fullAudioJobId) {
+            return;
+          }
+          showTryingArchiveProviderBadge(evt.providerLabel, {
+            loaded: evt.loaded,
+            total: evt.total,
+          });
+        },
+      });
+    }
+    if (!extractionResult?.ok) {
+      throw new Error(extractionResult?.error || 'background extraction failed');
+    }
+
     if (jobId !== state.fullAudioJobId) {
       return;
     }
-    state.currentArchiveProviderLabel = sourceLabel;
+    const {
+      sourceLabel,
+      pickedAudioFilename,
+      normalizedPickedAudioFilename,
+      normalizedRequestedAudioFilename,
+      mime,
+    } = extractionResult;
+
+    setProviderState({ currentArchiveProviderLabel: sourceLabel });
     setAudioBadgeWithProvider('loading', 'Loading full audio', sourceLabel, `Downloading from ${sourceLabel}`);
-    addDebugLog(`audio: archive downloaded from ${sourceLabel} (${Math.round(archiveBuffer.byteLength / 1024)} KB)`);
 
-    const archiveBytes = new Uint8Array(archiveBuffer);
-    const entries = parseZipEntries(archiveBytes);
-    addDebugLog(`audio: zip entries parsed (${entries.length})`);
-    const pickedEntry = pickAudioEntryFromZip(entries, audioFileName);
-    if (!pickedEntry) {
-      throw new Error('Could not find an audio track in beatmap archive.');
+    const audioBytesFromPayload = extractionResult.audioBase64
+      ? base64ToUint8Array(extractionResult.audioBase64)
+      : (
+        extractionResult.audioBuffer instanceof ArrayBuffer
+          ? new Uint8Array(extractionResult.audioBuffer)
+          : new Uint8Array(0)
+      );
+    const byteLength = audioBytesFromPayload.byteLength;
+    addDebugLog(`audio: archive extracted in worker from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
+
+    if (byteLength <= 0) {
+      throw new Error('Background extraction returned empty audio payload.');
     }
-    addDebugLog(`audio: selected entry ${pickedEntry.name}`);
+    addDebugLog(`audio: selected entry ${pickedAudioFilename}`);
 
-    const audioBytes = await extractZipEntry(archiveBytes, pickedEntry);
-    if (jobId !== state.fullAudioJobId) {
-      return;
-    }
-    addDebugLog(`audio: extracted entry (${Math.round(audioBytes.byteLength / 1024)} KB)`);
-
-    const mime = getAudioMimeType(pickedEntry.name);
-    const audioBlob = new Blob([audioBytes], { type: mime });
+    const audioBlob = new Blob([audioBytesFromPayload], { type: mime || getAudioMimeType(pickedAudioFilename) });
     await writeCachedFullAudioBlob(setId, audioFileName, audioBlob);
-    if (normalizePath(pickedEntry.name).toLowerCase() !== normalizePath(audioFileName).toLowerCase()) {
-      await writeCachedFullAudioBlob(setId, pickedEntry.name, audioBlob);
+    if (normalizedPickedAudioFilename !== normalizedRequestedAudioFilename) {
+      await writeCachedFullAudioBlob(setId, pickedAudioFilename, audioBlob);
     }
     addDebugLog('audio: cache write attempted');
-    await hotswapToFullAudio(audioBlob, setId, pickedEntry.name, jobId, sourceLabel);
+    await hotswapToFullAudio(audioBlob, setId, pickedAudioFilename, jobId, sourceLabel);
   } catch (error) {
     if (jobId === state.fullAudioJobId) {
-      state.fullAudioStatus = 'failed';
-      state.fullAudioError = error?.message || 'unknown error';
+      setFullAudioState({
+        fullAudioStatus: 'failed',
+        fullAudioError: error?.message || 'unknown error',
+      });
       setAudioBadgeWithProvider(
         'failed',
         'Full audio failed',
@@ -2159,7 +1052,7 @@ const runAudioFetchProbe = async () => {
     return;
   }
 
-  const sources = getProviderSequenceForDownload();
+  const sources = getProviderSequenceForDownload(state.providerOverride);
   if (!sources.length) {
     addDebugLog('probe: no providers available');
     return;
@@ -2247,11 +1140,18 @@ const queryActiveTab = async () => {
 };
 
 const fetchBeatmapFile = async (beatmapId) => {
-  const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
-    method: 'GET',
-    credentials: 'omit',
-    cache: 'no-store',
-  });
+  const controller = registry.createAbortController();
+  let response;
+  try {
+    response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
+      method: 'GET',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } finally {
+    registry.releaseAbortController(controller);
+  }
 
   if (!response.ok) {
     throw new Error(`Beatmap request failed (${response.status}).`);
@@ -2305,7 +1205,7 @@ const initializePreviewForCurrentTab = async () => {
   setAudioBadgeWithProvider('preview', 'Preview audio', PREVIEW_AUDIO_PROVIDER_LABEL);
   addDebugLog('init: popup opened');
 
-  state.providerOverride = await readProviderOverrideSetting();
+  setProviderState({ providerOverride: await readProviderOverrideSetting() });
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
   applyAudioVolume(await readAudioVolumeSetting());
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
@@ -2339,8 +1239,7 @@ const initializePreviewForCurrentTab = async () => {
         setStatus(info.reason, true);
       }
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
-      state.currentTimeMs = 0;
-      state.durationMs = 1;
+      setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();
       return;
     }
@@ -2393,8 +1292,10 @@ const initializePreviewForCurrentTab = async () => {
     state.mapData = mapData;
     state.breaks = breaks;
     state.mappedDurationMs = durationMs;
-    state.durationMs = durationMs;
-    state.currentTimeMs = clamp(metadata.previewTime > 0 ? metadata.previewTime : 0, 0, durationMs);
+    setTimelineState({
+      durationMs,
+      currentTimeMs: clamp(metadata.previewTime > 0 ? metadata.previewTime : 0, 0, durationMs),
+    });
     configureAudioPreview(resolvedSetId, metadata.previewTime);
 
     renderer.setBeatmap(mapData, breaks, durationMs);
@@ -2432,204 +1333,47 @@ const initializePreviewForCurrentTab = async () => {
     setStatus(error?.message || 'Failed to load beatmap preview.', true);
     renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
     state.mappedDurationMs = 1;
-    state.currentTimeMs = 0;
-    state.durationMs = 1;
+    setTimelineState({ currentTimeMs: 0, durationMs: 1 });
     renderFrame();
   }
 };
 
-const startManualPlayback = () => {
-  clearCurrentRaf();
-  if (state.currentTimeMs >= state.durationMs) {
-    state.currentTimeMs = 0;
-  }
-  state.playbackMode = 'manual';
-  state.isPlaying = true;
-  state.playStartPerfMs = performance.now();
-  state.playStartMapMs = state.currentTimeMs;
-  state.rafId = requestAnimationFrame(playbackTick);
-  return true;
-};
-
-const startAudioPlayback = async () => {
-  clearCurrentRaf();
-  if (!state.audioSyncEnabled || !state.audio?.src) {
-    return false;
-  }
-
-  try {
-    const hasSeekTarget = seekAudioToMapTime(state.currentTimeMs);
-    if (!hasSeekTarget) {
-      return false;
-    }
-    syncVisualClockToMapTime(state.currentTimeMs);
-    state.audio.playbackRate = state.playbackSpeed;
-    await state.audio.play();
-    state.playbackMode = 'audio';
-    state.isPlaying = true;
-    resyncVisualPlaybackToAudio({ force: true });
-    state.rafId = requestAnimationFrame(playbackTick);
-    return true;
-  } catch {
-    return false;
-  }
-};
-
-const togglePlayback = async () => {
-  if (!state.mapData || state.durationMs <= 0) {
-    return false;
-  }
-
-  if (state.isPlaying) {
-    stopPlayback();
-    return false;
-  }
-
-  if (state.currentTimeMs >= state.durationMs) {
-    state.currentTimeMs = 0;
-  }
-
-  const startedAudio = await startAudioPlayback();
-  if (startedAudio) {
-    return true;
-  }
-  return startManualPlayback();
-};
-
-const seekFromTimelineEvent = (event) => {
-  if (!state.mapData || state.durationMs <= 0) {
-    return;
-  }
-
-  const newTime = renderer.timeFromTimelineEvent(event);
-  syncVisualClockToMapTime(newTime);
-
-  if (state.audioSyncEnabled && state.audio?.src) {
-    try {
-      const hasTarget = seekAudioToMapTime(state.currentTimeMs);
-      if (!hasTarget && state.isPlaying && state.playbackMode === 'audio') {
-        state.audio.pause();
-        state.playbackMode = 'manual';
-      } else if (state.playbackMode === 'audio') {
-        resyncVisualPlaybackToAudio({ force: true });
-      }
-    } catch {
-      // Ignore seek errors; visual playback continues.
-    }
-  }
-
-  renderFrame();
-};
-
-togglePlaybackButton.addEventListener('click', () => {
-  cyclePlaybackSpeed();
-});
-
-playfieldCanvas.addEventListener('click', async () => {
-  const wasPlaying = state.isPlaying;
-  const isPlayingNow = await togglePlayback();
-  if (isPlayingNow || wasPlaying) {
-    showCanvasToggleFeedback(wasPlaying ? 'pause' : 'play');
-  }
-});
-
-timelineCanvas.addEventListener('mousedown', (event) => {
-  seekFromTimelineEvent(event);
-
-  const onMove = (moveEvent) => {
-    seekFromTimelineEvent(moveEvent);
-  };
-
-  const onUp = () => {
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
-  };
-
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
-});
-
-audioStatusBadge?.addEventListener('click', () => {
-  state.debugPanelOpen = !state.debugPanelOpen;
-  renderDebugPanel();
-});
-
-infoButton?.addEventListener('click', () => {
-  setInfoMenuOpen(!state.infoMenuOpen);
-});
-
-infoBackdrop?.addEventListener('click', () => {
-  setInfoMenuOpen(false);
-});
-
-infoCloseButton?.addEventListener('click', () => {
-  setInfoMenuOpen(false);
-});
-
-infoOptionsButton?.addEventListener('click', async () => {
-  await openExtensionOptions();
-});
-
-infoIssueButton?.addEventListener('click', async () => {
-  await openSupportLink(SUPPORT_LINKS.issue);
-});
-
-infoOsuButton?.addEventListener('click', async () => {
-  await openSupportLink(SUPPORT_LINKS.osu);
-});
-
-debugRunButton?.addEventListener('click', async () => {
-  debugRunButton.disabled = true;
-  try {
-    await runAudioFetchProbe();
-  } finally {
-    debugRunButton.disabled = false;
-  }
-});
-
-debugClearButton?.addEventListener('click', () => {
-  clearDebugLogs();
-  addDebugLog('debug: logs cleared');
-});
-
-debugCloseButton?.addEventListener('click', () => {
-  state.debugPanelOpen = false;
-  renderDebugPanel();
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.infoMenuOpen) {
-    setInfoMenuOpen(false);
-  }
-});
-
-volumeSlider?.addEventListener('input', () => {
-  const next = Number(volumeSlider.value) / 100;
-  applyAudioVolume(next);
-
-  if (state.volumePersistTimer) {
-    clearTimeout(state.volumePersistTimer);
-  }
-  state.volumePersistTimer = setTimeout(async () => {
-    state.volumePersistTimer = null;
-    await writeAudioVolumeSetting(state.volume);
-  }, 220);
-});
-
-volumeSlider?.addEventListener('change', async () => {
-  const next = Number(volumeSlider.value) / 100;
-  applyAudioVolume(next);
-  if (state.volumePersistTimer) {
-    clearTimeout(state.volumePersistTimer);
-    state.volumePersistTimer = null;
-  }
-  await writeAudioVolumeSetting(state.volume);
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
-    window.close();
-  }
+bindPopupUiEvents({
+  elements: {
+    togglePlaybackButton,
+    playfieldCanvas,
+    timelineCanvas,
+    audioStatusBadge,
+    infoButton,
+    infoBackdrop,
+    infoCloseButton,
+    infoOptionsButton,
+    infoIssueButton,
+    infoOsuButton,
+    debugRunButton,
+    debugClearButton,
+    debugCloseButton,
+    volumeSlider,
+  },
+  state,
+  registry,
+  supportLinks: SUPPORT_LINKS,
+  actions: {
+    cyclePlaybackSpeed,
+    togglePlayback,
+    showCanvasToggleFeedback,
+    seekFromTimelineEvent,
+    toggleDebugPanelOpen,
+    setInfoMenuOpen,
+    openExtensionOptions,
+    openSupportLink,
+    runAudioFetchProbe,
+    clearDebugLogs,
+    addDebugLog,
+    setDebugPanelOpen,
+    applyAudioVolume,
+    writeAudioVolumeSetting,
+  },
 });
 
 window.addEventListener('unload', () => {
@@ -2654,6 +1398,26 @@ window.addEventListener('unload', () => {
   }
   setFullAudioObjectUrl(null);
   stopUnsupportedAsciiAnimation();
+  resetState();
+});
+
+addRuntimeMessageListener((message) => {
+  if (message?.type === 'fullAudioTryingSource') {
+    if (message.jobId !== state.fullAudioJobId) {
+      return;
+    }
+    showTryingArchiveProviderBadge(message.providerLabel);
+    return;
+  }
+  if (message?.type === 'fullAudioDownloadProgress') {
+    if (message.jobId !== state.fullAudioJobId) {
+      return;
+    }
+    showTryingArchiveProviderBadge(message.providerLabel, {
+      loaded: message.loaded,
+      total: message.total,
+    });
+  }
 });
 
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);

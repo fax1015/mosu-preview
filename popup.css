@@ -690,7 +690,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     width: 24px;
     height: 24px;
     padding: 0;
-    padding-bottom: 2px;
+    padding-bottom: 3.5px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.06);

@@ -131,3 +131,28 @@ export const openOptionsPage = async () => {
 export const addStorageChangedListener = (listener) => {
   extensionApi?.storage?.onChanged?.addListener?.(listener);
 };
+
+export const addRuntimeMessageListener = (listener) => {
+  extensionApi?.runtime?.onMessage?.addListener(listener);
+};
+
+export const sendRuntimeMessage = async (message) => {
+  if (!extensionApi?.runtime?.sendMessage) {
+    throw new Error('Runtime messaging API is unavailable.');
+  }
+
+  if (usesPromiseApi) {
+    return extensionApi.runtime.sendMessage(message);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.runtime.sendMessage(message, (response) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to send runtime message.'));
+        return;
+      }
+      resolve(response);
+    });
+  });
+};

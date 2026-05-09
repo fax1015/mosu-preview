@@ -470,6 +470,11 @@ body {
   outline: none;
 }
 
+.settings-number.input-error {
+  border-color: var(--error);
+  box-shadow: 0 0 0 4px rgba(214, 64, 64, 0.18);
+}
+
 .settings-toggle-card {
   position: relative;
   display: grid;

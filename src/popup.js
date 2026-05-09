@@ -10,6 +10,10 @@ import {
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
   POPUP_SIZE_PRESETS,
+  ARCHIVE_DOWNLOAD_SOURCES,
+  ALLOWED_PROVIDER_OVERRIDES,
+  LEGACY_PROVIDER_OVERRIDE_ALIASES,
+  normalizeProviderOverride,
   normalizePreviewSettings,
 } from './settings.js';
 import {
@@ -88,7 +92,7 @@ const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
 const AUDIO_VISUAL_SYNC_INTERVAL_MS = 240;
 const AUDIO_VISUAL_SYNC_THRESHOLD_MS = 90;
 const SUPPORT_LINKS = {
-  issue: 'https://github.com/fax1015/mosu--preview/issues/new',
+  issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
 };
 const UNSUPPORTED_ASCII_TICK_MS = 140;
@@ -104,47 +108,6 @@ const UNSUPPORTED_ASCII_XY_RATIO = UNSUPPORTED_ASCII_CHAR_WIDTH_PX / UNSUPPORTED
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
 const ZIP_LOCAL_SIGNATURE = 0x04034b50;
-const ARCHIVE_DOWNLOAD_SOURCES = [
-  {
-    id: 'mino',
-    label: 'Mino',
-    rank: 0,
-    url: (setId) => `https://catboy.best/d/${setId}n`,
-    credentials: 'omit',
-  },
-  {
-    id: 'osu_direct',
-    label: 'osu.direct',
-    rank: 1,
-    url: (setId) => `https://osu.direct/api/d/${setId}`,
-    credentials: 'omit',
-  },
-  {
-    id: 'nerinyan',
-    label: 'NeriNyan',
-    rank: 2,
-    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
-    credentials: 'omit',
-  },
-  {
-    id: 'sayobot',
-    label: 'Sayobot',
-    rank: 3,
-    url: (setId) => `https://txy1.sayobot.cn/beatmaps/download/novideo/${setId}?server=null`,
-    credentials: 'omit',
-  },
-];
-const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', ...ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id)]);
-const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
-  catboy: 'mino',
-});
-
-const normalizeProviderOverride = (value) => {
-  const candidate = String(value || 'auto');
-  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
-  return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
-};
-
 const state = {
   metadata: null,
   mapData: null,
@@ -195,6 +158,21 @@ const state = {
 };
 
 state.audio.preload = 'auto';
+
+const setFullAudioObjectUrl = (newUrl) => {
+  if (state.fullAudioObjectUrl) {
+    URL.revokeObjectURL(state.fullAudioObjectUrl);
+  }
+  state.fullAudioObjectUrl = newUrl || null;
+};
+
+const clearCurrentRaf = () => {
+  if (state.rafId !== null) {
+    cancelAnimationFrame(state.rafId);
+    state.rafId = null;
+  }
+};
+
 const hasFullAudioSource = () => (
   state.audioSyncEnabled
   && Boolean(state.fullAudioObjectUrl)
@@ -305,9 +283,8 @@ state.audio.addEventListener('ended', () => {
     state.playStartMapMs = state.currentTimeMs;
     state.playStartPerfMs = nowPerf;
     state.lastAudioVisualSyncPerfMs = 0;
-    if (state.rafId === null) {
-      state.rafId = requestAnimationFrame(playbackTick);
-    }
+    clearCurrentRaf();
+    state.rafId = requestAnimationFrame(playbackTick);
     return;
   }
 
@@ -1963,10 +1940,7 @@ const configureAudioPreview = (setId, previewTimeMs) => {
   setFullAudioLoading(false);
   setAudioBadgeWithProvider('preview', 'Preview audio', PREVIEW_AUDIO_PROVIDER_LABEL);
 
-  if (state.fullAudioObjectUrl) {
-    URL.revokeObjectURL(state.fullAudioObjectUrl);
-    state.fullAudioObjectUrl = null;
-  }
+  setFullAudioObjectUrl(null);
 
   if (!setId || !/^\d+$/.test(String(setId))) {
     setAudioElementSource('', 0);
@@ -2006,13 +1980,10 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     state.audio.pause();
   }
 
-  if (state.fullAudioObjectUrl) {
-    URL.revokeObjectURL(state.fullAudioObjectUrl);
-    state.fullAudioObjectUrl = null;
-  }
+  setFullAudioObjectUrl(null);
 
   const fullAudioUrl = URL.createObjectURL(audioBlob);
-  state.fullAudioObjectUrl = fullAudioUrl;
+  setFullAudioObjectUrl(fullAudioUrl);
   state.fullAudioSetId = String(setId);
   state.fullAudioStatus = 'ready';
   state.fullAudioCacheKey = `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`;
@@ -2052,6 +2023,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
   }
 
   const shouldResumePlayback = wasPlaying || state.isPlaying;
+  clearCurrentRaf();
   if (shouldResumePlayback) {
     try {
       state.audio.playbackRate = state.playbackSpeed;
@@ -2467,6 +2439,7 @@ const initializePreviewForCurrentTab = async () => {
 };
 
 const startManualPlayback = () => {
+  clearCurrentRaf();
   if (state.currentTimeMs >= state.durationMs) {
     state.currentTimeMs = 0;
   }
@@ -2479,6 +2452,7 @@ const startManualPlayback = () => {
 };
 
 const startAudioPlayback = async () => {
+  clearCurrentRaf();
   if (!state.audioSyncEnabled || !state.audio?.src) {
     return false;
   }
@@ -2678,10 +2652,7 @@ window.addEventListener('unload', () => {
     clearTimeout(state.indicatorTimer);
     state.indicatorTimer = null;
   }
-  if (state.fullAudioObjectUrl) {
-    URL.revokeObjectURL(state.fullAudioObjectUrl);
-    state.fullAudioObjectUrl = null;
-  }
+  setFullAudioObjectUrl(null);
   stopUnsupportedAsciiAnimation();
 });
 

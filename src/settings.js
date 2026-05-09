@@ -15,6 +15,51 @@ export const DEFAULT_STANDARD_SNAKING_SLIDERS = false;
 export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
 export const DEFAULT_POPUP_SIZE = 'default';
 
+export const ARCHIVE_DOWNLOAD_SOURCES = Object.freeze([
+  Object.freeze({
+    id: 'mino',
+    label: 'Mino',
+    rank: 0,
+    url: (setId) => `https://catboy.best/d/${setId}n`,
+    credentials: 'omit',
+  }),
+  Object.freeze({
+    id: 'osu_direct',
+    label: 'osu.direct',
+    rank: 1,
+    url: (setId) => `https://osu.direct/api/d/${setId}`,
+    credentials: 'omit',
+  }),
+  Object.freeze({
+    id: 'nerinyan',
+    label: 'NeriNyan',
+    rank: 2,
+    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
+    credentials: 'omit',
+  }),
+  Object.freeze({
+    id: 'sayobot',
+    label: 'Sayobot',
+    rank: 3,
+    url: (setId) => `https://txy1.sayobot.cn/beatmaps/download/novideo/${setId}?server=null`,
+    credentials: 'omit',
+  }),
+]);
+
+export const ALLOWED_PROVIDER_OVERRIDES = Object.freeze(
+  new Set(['auto', ...ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id)]),
+);
+
+export const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
+  catboy: 'mino',
+});
+
+export const normalizeProviderOverride = (value) => {
+  const candidate = String(value || 'auto');
+  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
+  return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
+};
+
 export const POPUP_SIZE_PRESETS = Object.freeze({
   compact: Object.freeze({
     shellWidth: 414,

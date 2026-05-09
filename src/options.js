@@ -7,22 +7,14 @@ import {
   POPUP_SIZE_KEY,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
+  ALLOWED_PROVIDER_OVERRIDES,
+  LEGACY_PROVIDER_OVERRIDE_ALIASES,
+  normalizeProviderOverride,
   normalizePreviewSettings,
   toPreviewSettingsStorage,
   calculateManiaScrollTimeMs,
 } from './settings.js';
 import { storageGet, storageSet } from './webextension.js';
-
-const ALLOWED_PROVIDER_OVERRIDES = new Set(['auto', 'osu_direct', 'nerinyan', 'sayobot', 'mino']);
-const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
-  catboy: 'mino',
-});
-
-const normalizeProviderOverride = (value) => {
-  const candidate = String(value || 'auto');
-  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
-  return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
-};
 
 const providerSelect = document.querySelector('#providerOverride');
 const popupSizeSelect = document.querySelector('#popupSize');
@@ -208,7 +200,13 @@ const initialize = async () => {
   });
 
   maniaScrollSpeedInput.addEventListener('change', async () => {
-    renderManiaScrollSpeed(maniaScrollSpeedInput.value);
+    const raw = maniaScrollSpeedInput.value;
+    const normalized = normalizePreviewSettings({ maniaScrollSpeed: raw }).maniaScrollSpeed;
+    if (String(raw) !== String(normalized)) {
+      maniaScrollSpeedInput.classList.add('input-error');
+      setTimeout(() => maniaScrollSpeedInput.classList.remove('input-error'), 600);
+    }
+    renderManiaScrollSpeed(normalized);
     await persistFormSettings();
   });
 

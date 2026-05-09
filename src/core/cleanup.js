@@ -44,7 +44,7 @@ class CleanupRegistry {
 const registry = new CleanupRegistry();
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('unload', () => registry.cleanup());
+  window.addEventListener('pagehide', () => registry.cleanup());
 }
 
 export { CleanupRegistry, registry };

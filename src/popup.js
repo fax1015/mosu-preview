@@ -26,6 +26,10 @@ if (/firefox/i.test(globalThis.navigator?.userAgent || '')) {
   document.body?.classList.add('is-firefox-popup');
 }
 
+const IS_FIREFOX = /firefox|fxios/i.test(globalThis.navigator?.userAgent || '');
+const IS_MOBILE_VIEW = /android|mobile|tablet|ipad|iphone|ipod/i.test(globalThis.navigator?.userAgent || '')
+  || globalThis.matchMedia?.('(hover: none) and (pointer: coarse)')?.matches;
+
 const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
 const versionLine = document.querySelector('#mapPreviewVersion');
@@ -41,6 +45,7 @@ const unsupportedAscii = document.querySelector('#mapPreviewUnsupportedAscii');
 // Compatibility shim for stale code paths that previously used a separate loading element.
 const audioLoadingIndicator = null;
 const audioStatusBadge = document.querySelector('#mapPreviewAudioBadge');
+const popupToast = document.querySelector('#mapPreviewToast');
 const debugPanel = document.querySelector('#mapPreviewDebugPanel');
 const debugStatus = document.querySelector('#mapPreviewDebugStatus');
 const debugLog = document.querySelector('#mapPreviewDebugLog');
@@ -170,6 +175,7 @@ const state = {
   providerCooldowns: {},
   currentArchiveProviderLabel: '',
   audioBadgeHideTimer: null,
+  toastHideTimer: null,
   volume: DEFAULT_AUDIO_VOLUME,
   volumePersistTimer: null,
   hasAutoStarted: false,
@@ -276,6 +282,14 @@ state.audio.addEventListener('timeupdate', () => {
     resyncVisualPlaybackToAudio();
   }
 });
+state.audio.addEventListener('ended', () => {
+  if (state.playbackMode === 'audio') {
+    syncVisualClockToMapTime(getAudioMappedTimeMs());
+  }
+  state.currentTimeMs = clamp(state.currentTimeMs, 0, state.durationMs || 1);
+  renderFrame();
+  stopPlayback();
+});
 
 const formatDebugTime = (unixMs) => {
   const date = new Date(unixMs);
@@ -357,6 +371,27 @@ const openExtensionOptions = async () => {
     await createTab({ url: 'options.html' });
   }
   setInfoMenuOpen(false);
+  if (IS_FIREFOX && IS_MOBILE_VIEW) {
+    showPopupToast('settings page opened, exit this view to see settings');
+  }
+};
+
+const showPopupToast = (message, hideDelayMs = 3500) => {
+  if (!popupToast) {
+    return;
+  }
+
+  if (state.toastHideTimer) {
+    clearTimeout(state.toastHideTimer);
+    state.toastHideTimer = null;
+  }
+
+  popupToast.textContent = message;
+  popupToast.classList.add('is-visible');
+  state.toastHideTimer = setTimeout(() => {
+    popupToast.classList.remove('is-visible');
+    state.toastHideTimer = null;
+  }, hideDelayMs);
 };
 
 const randomRange = (min, max) => min + (Math.random() * (max - min));
@@ -880,6 +915,22 @@ const makeFullAudioCacheKey = (setId, audioFilename) => {
   return `https://osu.ppy.sh/beatmapsets/${safeSetId}/audio/${safeFile}`;
 };
 
+const getFullAudioCacheKeyCandidates = (setId, audioFilename) => {
+  const normalizedSetId = String(setId || '').trim();
+  const normalizedPath = normalizePath(audioFilename).toLowerCase();
+  if (!normalizedSetId || !normalizedPath) {
+    return [];
+  }
+
+  const names = [normalizedPath];
+  const baseName = getPathBaseName(normalizedPath);
+  if (baseName && baseName !== normalizedPath) {
+    names.push(baseName);
+  }
+
+  return [...new Set(names)].map((name) => makeFullAudioCacheKey(normalizedSetId, name));
+};
+
 const readLastFullAudioPruneTime = async () => {
   if (!hasStorageArea('local')) {
     return 0;
@@ -996,11 +1047,13 @@ const readCachedFullAudioBlob = async (setId, audioFilename) => {
   }
   try {
     const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    const response = await cache.match(makeFullAudioCacheKey(setId, audioFilename));
-    if (!response || !response.ok) {
-      return null;
+    for (const key of getFullAudioCacheKeyCandidates(setId, audioFilename)) {
+      const response = await cache.match(key);
+      if (response?.ok) {
+        return await response.blob();
+      }
     }
-    return await response.blob();
+    return null;
   } catch {
     return null;
   }
@@ -1021,16 +1074,18 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
 
   try {
     const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    const key = makeFullAudioCacheKey(setId, audioFilename);
-    await cache.put(
-      key,
-      new Response(blob, {
-        headers: {
-          'content-type': blob.type || getAudioMimeType(audioFilename),
-          'x-mosu-cached-at': String(Date.now()),
-        },
-      }),
-    );
+    const keys = getFullAudioCacheKeyCandidates(setId, audioFilename);
+    for (const key of keys) {
+      await cache.put(
+        key,
+        new Response(blob, {
+          headers: {
+            'content-type': blob.type || getAudioMimeType(audioFilename),
+            'x-mosu-cached-at': String(Date.now()),
+          },
+        }),
+      );
+    }
     void pruneFullAudioCache();
     return true;
   } catch {
@@ -1038,8 +1093,8 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
   }
 };
 
-const waitForAudioReady = () => new Promise((resolve) => {
-  if (state.audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+const waitForAudioReady = ({ requireFreshEvent = false } = {}) => new Promise((resolve) => {
+  if (!requireFreshEvent && state.audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     resolve(true);
     return;
   }
@@ -1072,6 +1127,38 @@ const waitForAudioReady = () => new Promise((resolve) => {
   state.audio.addEventListener('error', onError);
 });
 
+const waitForAudioSeek = () => new Promise((resolve) => {
+  if (!state.audio?.src || state.audio.seeking === false) {
+    resolve(true);
+    return;
+  }
+
+  const onSeeked = () => {
+    cleanup();
+    resolve(true);
+  };
+
+  const onError = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const onTimeout = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const cleanup = () => {
+    clearTimeout(timer);
+    state.audio.removeEventListener('seeked', onSeeked);
+    state.audio.removeEventListener('error', onError);
+  };
+
+  const timer = setTimeout(onTimeout, 2500);
+  state.audio.addEventListener('seeked', onSeeked, { once: true });
+  state.audio.addEventListener('error', onError, { once: true });
+});
+
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   state.audioSyncEnabled = Boolean(sourceUrl);
   state.audioReady = false;
@@ -1088,9 +1175,13 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   if (state.audio.src !== sourceUrl) {
     state.audio.src = sourceUrl;
     state.audio.load();
+    state.audio.playbackRate = state.playbackSpeed;
+    syncPlaybackDuration();
+    return true;
   }
   state.audio.playbackRate = state.playbackSpeed;
   syncPlaybackDuration();
+  return false;
 };
 
 const decodeZipName = (nameBytes, isUtf8) => {
@@ -1680,9 +1771,9 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     providerLabel,
     `Using full audio: ${sourceAudioFilename}`,
   );
-  setAudioElementSource(fullAudioUrl, 0);
+  const sourceChanged = setAudioElementSource(fullAudioUrl, 0);
 
-  const ready = await waitForAudioReady();
+  const ready = await waitForAudioReady({ requireFreshEvent: sourceChanged });
   if (!ready || jobId !== state.fullAudioJobId) {
     addDebugLog('audio: hotswap failed, media element not ready');
     return false;
@@ -1702,13 +1793,20 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     return false;
   }
 
-  if (wasPlaying) {
+  const seekSettled = await waitForAudioSeek();
+  if (!seekSettled || jobId !== state.fullAudioJobId) {
+    addDebugLog('audio: hotswap failed, seek did not settle');
+    return false;
+  }
+
+  const shouldResumePlayback = wasPlaying || state.isPlaying;
+  if (shouldResumePlayback) {
     try {
       state.audio.playbackRate = state.playbackSpeed;
       await state.audio.play();
       state.playbackMode = 'audio';
       state.isPlaying = true;
-      syncVisualClockToMapTime(swapMapTimeMs);
+      syncVisualClockToMapTime(getAudioMappedTimeMs());
       resyncVisualPlaybackToAudio({ force: true });
       if (state.rafId === null) {
         state.rafId = requestAnimationFrame(playbackTick);
@@ -1804,6 +1902,9 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
     const mime = getAudioMimeType(pickedEntry.name);
     const audioBlob = new Blob([audioBytes], { type: mime });
     await writeCachedFullAudioBlob(setId, audioFileName, audioBlob);
+    if (normalizePath(pickedEntry.name).toLowerCase() !== normalizePath(audioFileName).toLowerCase()) {
+      await writeCachedFullAudioBlob(setId, pickedEntry.name, audioBlob);
+    }
     addDebugLog('audio: cache write attempted');
     await hotswapToFullAudio(audioBlob, setId, pickedEntry.name, jobId, sourceLabel);
   } catch (error) {
@@ -2176,13 +2277,13 @@ const seekFromTimelineEvent = (event) => {
   const newTime = renderer.timeFromTimelineEvent(event);
   syncVisualClockToMapTime(newTime);
 
-  if (state.playbackMode === 'audio' && state.audioSyncEnabled) {
+  if (state.audioSyncEnabled && state.audio?.src) {
     try {
       const hasTarget = seekAudioToMapTime(state.currentTimeMs);
-      if (!hasTarget && state.isPlaying) {
+      if (!hasTarget && state.isPlaying && state.playbackMode === 'audio') {
         state.audio.pause();
         state.playbackMode = 'manual';
-      } else {
+      } else if (state.playbackMode === 'audio') {
         resyncVisualPlaybackToAudio({ force: true });
       }
     } catch {
@@ -2314,6 +2415,10 @@ window.addEventListener('unload', () => {
   if (state.audioBadgeHideTimer) {
     clearTimeout(state.audioBadgeHideTimer);
     state.audioBadgeHideTimer = null;
+  }
+  if (state.toastHideTimer) {
+    clearTimeout(state.toastHideTimer);
+    state.toastHideTimer = null;
   }
   stopPlayback();
   if (state.indicatorTimer) {

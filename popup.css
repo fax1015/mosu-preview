@@ -427,11 +427,37 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 .map-preview-canvas-wrap {
     position: relative;
     width: 100%;
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 1.29 / 1;
     border-radius: calc(var(--border-radius) - 3px);
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(0, 0, 0, 0.2);
+}
+
+.map-preview-toast {
+    position: absolute;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 3.15rem;
+    z-index: 8;
+    padding: 0.45rem 0.65rem;
+    border-radius: calc(var(--border-radius) - 3px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(24, 23, 28, 0.94);
+    color: rgba(238, 241, 248, 0.96);
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.25;
+    text-align: center;
+    opacity: 0;
+    transform: translateY(6px);
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.map-preview-toast.is-visible {
+    opacity: 1;
+    transform: translateY(0);
 }
 
 .map-preview-canvas {

@@ -13,6 +13,7 @@ const extractFullBeatmapAudioToPayload = async ({
   providerOverride = 'auto',
   onTryingSource,
   onDownloadProgress,
+  signal,
 } = {}) => {
   const normalizedSetId = String(setId || '').trim();
   const normalizedAudio = String(audioFilename || '').trim();
@@ -26,7 +27,7 @@ const extractFullBeatmapAudioToPayload = async ({
     const { archiveBuffer, sourceLabel } = await downloadBeatmapArchive(
       normalizedSetId,
       normalizedOverride,
-      { onTryingSource, onDownloadProgress },
+      { onTryingSource, onDownloadProgress, signal },
     );
     const archiveBytes = new Uint8Array(archiveBuffer);
     const entries = parseZipEntries(archiveBytes);

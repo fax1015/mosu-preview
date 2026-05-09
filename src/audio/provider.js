@@ -191,20 +191,38 @@ const getProviderSequenceForDownload = (providerOverride = 'auto') => {
   });
 };
 
+const combineSignals = (signal, controller) => {
+  if (!signal) {
+    return controller.signal;
+  }
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([signal, controller.signal]);
+  }
+  // Polyfill: forward external abort into our controller.
+  if (signal.aborted) {
+    controller.abort(signal.reason);
+  } else {
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+};
+
 const fetchArrayBufferWithTimeout = async (
   url,
   options = {},
   timeoutMs = FETCH_TIMEOUT_MS,
   maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
   onBodyProgress,
+  externalSignal,
 ) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const mergedSignal = combineSignals(externalSignal, controller);
 
   try {
     const response = await fetch(url, mergeArchiveFetchOptions({
       ...options,
-      signal: controller.signal,
+      signal: mergedSignal,
     }));
     const buffer = await readResponseArrayBufferLimited(response, maxBytes, undefined, onBodyProgress);
     return { response, buffer };
@@ -220,14 +238,16 @@ const fetchBeatmapArchiveAdaptive = async (
   bodyProbeDeadlineMs,
   maxBytes,
   onBodyProgress,
+  externalSignal,
 ) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
+  const mergedSignal = combineSignals(externalSignal, controller);
   let response;
   try {
     response = await fetch(url, mergeArchiveFetchOptions({
       ...options,
-      signal: controller.signal,
+      signal: mergedSignal,
     }));
   } finally {
     clearTimeout(timer);
@@ -307,7 +327,7 @@ const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIME
 };
 
 const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = {}) => {
-  const { onTryingSource, onDownloadProgress } = hooks;
+  const { onTryingSource, onDownloadProgress, signal } = hooks;
   const failures = [];
   const sources = getProviderSequenceForDownload(providerOverride);
   const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
@@ -317,6 +337,10 @@ const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = 
   }
 
   for (const source of sources) {
+    if (signal?.aborted) {
+      throw new Error('download cancelled');
+    }
+
     if (providerOverride === 'auto' && isProviderInCooldown(source.id)) {
       continue;
     }
@@ -336,6 +360,10 @@ const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = 
     let sourceSucceeded = false;
 
     for (let attemptIndex = 0; attemptIndex < attemptTimeouts.length && !sourceSucceeded; attemptIndex += 1) {
+      if (signal?.aborted) {
+        throw new Error('download cancelled');
+      }
+
       const attemptTimeoutMs = attemptTimeouts[attemptIndex];
 
       try {
@@ -352,6 +380,7 @@ const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = 
             attemptTimeoutMs,
             MAX_ARCHIVE_DOWNLOAD_BYTES,
             reportProgress ?? undefined,
+            signal,
           )
           : await fetchArrayBufferWithTimeout(
             requestUrl,
@@ -359,6 +388,7 @@ const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = 
             attemptTimeoutMs,
             MAX_ARCHIVE_DOWNLOAD_BYTES,
             reportProgress ?? undefined,
+            signal,
           );
 
         if (!response.ok) {
@@ -383,6 +413,9 @@ const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = 
         markProviderSuccess(source.id, performance.now() - requestStartMs);
         return { archiveBuffer, sourceLabel: source.label };
       } catch (error) {
+        if (signal?.aborted) {
+          throw new Error('download cancelled');
+        }
         const isTimeout = error?.name === 'AbortError';
         failures.push(`${source.label}:${isTimeout ? 'timeout' : (error?.message || 'network error')}${attemptIndex > 0 ? '(retry)' : ''}`);
         if (attemptIndex === attemptTimeouts.length - 1) {

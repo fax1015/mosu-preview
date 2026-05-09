@@ -23,7 +23,7 @@ const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
 const MANIA_SCROLL_TRAVEL_HEIGHT_SCALE = 1.34;
 const IS_FIREFOX = /firefox/i.test(globalThis.navigator?.userAgent || '');
-const MAX_CANVAS_DPR = IS_FIREFOX ? 1 : 2;
+const MAX_CANVAS_DPR = 2;
 const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
 const canvasContextCache = new WeakMap();
 

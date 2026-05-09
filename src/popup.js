@@ -77,6 +77,10 @@ const MAX_ZIP_ENTRIES = 6000;
 const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
 const AUDIO_BADGE_AUTO_HIDE_DELAY_MS = 3500;
 const FETCH_TIMEOUT_MS = 18000;
+/** When another mirror can be tried, fail the fetch quickly instead of waiting on a dead host. */
+const FETCH_TIMEOUT_FAILOVER_MS = 8000;
+/** Max time to read a confirmed beatmap archive body (connect is covered separately). */
+const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
 const DEBUG_LOG_LIMIT = 80;
 const PREVIEW_AUDIO_PROVIDER_LABEL = 'b.ppy.sh';
 const CACHE_AUDIO_PROVIDER_LABEL = 'cache';
@@ -105,21 +109,21 @@ const ARCHIVE_DOWNLOAD_SOURCES = [
     id: 'mino',
     label: 'Mino',
     rank: 0,
-    url: (setId) => `https://catboy.best/d/${setId}`,
-    credentials: 'omit',
-  },
-  {
-    id: 'nerinyan',
-    label: 'NeriNyan',
-    rank: 1,
-    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
+    url: (setId) => `https://catboy.best/d/${setId}n`,
     credentials: 'omit',
   },
   {
     id: 'osu_direct',
     label: 'osu.direct',
-    rank: 2,
+    rank: 1,
     url: (setId) => `https://osu.direct/api/d/${setId}`,
+    credentials: 'omit',
+  },
+  {
+    id: 'nerinyan',
+    label: 'NeriNyan',
+    rank: 2,
+    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
     credentials: 'omit',
   },
   {
@@ -196,6 +200,12 @@ const hasFullAudioSource = () => (
   && Boolean(state.fullAudioObjectUrl)
   && typeof state.audio?.src === 'string'
   && state.audio.src === state.fullAudioObjectUrl
+);
+
+const shouldContinueTimelineWhileFetchingFullAudio = () => (
+  state.audioSyncEnabled
+  && !hasFullAudioSource()
+  && state.fullAudioStatus === 'loading'
 );
 
 const getResolvedPlaybackDurationMs = () => {
@@ -288,6 +298,19 @@ state.audio.addEventListener('ended', () => {
   }
   state.currentTimeMs = clamp(state.currentTimeMs, 0, state.durationMs || 1);
   renderFrame();
+
+  if (state.isPlaying && shouldContinueTimelineWhileFetchingFullAudio()) {
+    const nowPerf = performance.now();
+    state.playbackMode = 'manual';
+    state.playStartMapMs = state.currentTimeMs;
+    state.playStartPerfMs = nowPerf;
+    state.lastAudioVisualSyncPerfMs = 0;
+    if (state.rafId === null) {
+      state.rafId = requestAnimationFrame(playbackTick);
+    }
+    return;
+  }
+
   stopPlayback();
 });
 
@@ -1310,15 +1333,70 @@ const inflateDeflateRaw = async (compressedBytes) => {
   }
 };
 
-const readResponseArrayBufferLimited = async (response, maxBytes) => {
+const mergeUint8Chunks = (chunks, totalBytes) => {
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged.buffer;
+};
+
+const readStreamChunkWithDeadline = async (reader, remainingMs) => {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    await reader.cancel();
+    const err = new Error('timeout');
+    err.name = 'AbortError';
+    throw err;
+  }
+  let timeoutId;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
+        }, remainingMs);
+      }),
+    ]);
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      await reader.cancel();
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs) => {
   const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
   const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
   if (Number.isFinite(contentLength) && contentLength > cap) {
     throw new Error(`archive too large (${contentLength} bytes)`);
   }
 
+  const bodyDeadline = Number.isFinite(bodyBudgetMs) && bodyBudgetMs > 0
+    ? performance.now() + bodyBudgetMs
+    : null;
+
   if (!response.body) {
-    const fallbackBuffer = await response.arrayBuffer();
+    if (bodyDeadline === null) {
+      const fallbackBuffer = await response.arrayBuffer();
+      if (fallbackBuffer.byteLength > cap) {
+        throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
+      }
+      return fallbackBuffer;
+    }
+    const fallbackBuffer = await Promise.race([
+      response.arrayBuffer(),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
+        }, bodyBudgetMs);
+      }),
+    ]);
     if (fallbackBuffer.byteLength > cap) {
       throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
     }
@@ -1332,7 +1410,10 @@ const readResponseArrayBufferLimited = async (response, maxBytes) => {
   try {
     // Stream the response with a hard cap to avoid memory exhaustion.
     while (true) {
-      const { done, value } = await reader.read();
+      const chunkResult = bodyDeadline === null
+        ? await reader.read()
+        : await readStreamChunkWithDeadline(reader, bodyDeadline - performance.now());
+      const { done, value } = chunkResult;
       if (done) {
         break;
       }
@@ -1351,13 +1432,163 @@ const readResponseArrayBufferLimited = async (response, maxBytes) => {
     reader.releaseLock();
   }
 
-  const merged = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+  return mergeUint8Chunks(chunks, totalBytes);
+};
+
+const responseLooksLikeBeatmapArchiveDownload = (response) => {
+  const disposition = (response.headers.get('content-disposition') || '').toLowerCase();
+  if (disposition.includes('.osz')) {
+    return true;
   }
-  return merged.buffer;
+  const rawType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  return rawType === 'application/zip' || rawType === 'application/x-zip-compressed';
+};
+
+/**
+ * Before we know the body is a ZIP, enforce `initialReadDeadlineMs` from first body read.
+ * Once `PK` is seen (or sooner if headers matched elsewhere), reads still respect `archiveBodyBudgetMs`.
+ */
+const readResponseArrayBufferLimitedWithInitialZipProbe = async (
+  response,
+  maxBytes,
+  initialReadDeadlineMs,
+  archiveBodyBudgetMs,
+) => {
+  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
+  const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
+  if (Number.isFinite(contentLength) && contentLength > cap) {
+    throw new Error(`archive too large (${contentLength} bytes)`);
+  }
+
+  if (!response.body) {
+    const fallbackBuffer = await Promise.race([
+      response.arrayBuffer(),
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
+        }, archiveBodyBudgetMs);
+      }),
+    ]);
+    if (fallbackBuffer.byteLength > cap) {
+      throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
+    }
+    return fallbackBuffer;
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  const bodyReadStart = performance.now();
+  const bodyDeadline = performance.now() + archiveBodyBudgetMs;
+  let zipConfirmed = false;
+
+  try {
+    while (true) {
+      const now = performance.now();
+      const remainingBudget = bodyDeadline - now;
+      if (remainingBudget <= 0) {
+        await reader.cancel();
+        const err = new Error('timeout');
+        err.name = 'AbortError';
+        throw err;
+      }
+
+      let remainingForRace;
+      if (zipConfirmed) {
+        remainingForRace = remainingBudget;
+      } else {
+        const elapsed = now - bodyReadStart;
+        const remainingProbe = initialReadDeadlineMs - elapsed;
+        remainingForRace = Math.min(remainingBudget, remainingProbe);
+      }
+
+      const chunkResult = await readStreamChunkWithDeadline(reader, remainingForRace);
+      const { done, value } = chunkResult;
+      if (done) {
+        break;
+      }
+      if (!(value instanceof Uint8Array) || value.byteLength <= 0) {
+        continue;
+      }
+
+      totalBytes += value.byteLength;
+      if (totalBytes > cap) {
+        await reader.cancel();
+        throw new Error(`archive exceeds limit (${totalBytes} bytes)`);
+      }
+      chunks.push(value);
+
+      if (!zipConfirmed && totalBytes >= 2) {
+        const head = new Uint8Array(2);
+        let o = 0;
+        for (const ch of chunks) {
+          for (let i = 0; i < ch.byteLength && o < 2; i += 1) {
+            head[o] = ch[i];
+            o += 1;
+          }
+          if (o >= 2) {
+            break;
+          }
+        }
+        if (head[0] === 0x50 && head[1] === 0x4b) {
+          zipConfirmed = true;
+        } else {
+          await reader.cancel();
+          break;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return mergeUint8Chunks(chunks, totalBytes);
+};
+
+const fetchBeatmapArchiveAdaptive = async (
+  url,
+  options,
+  headerTimeoutMs,
+  bodyProbeDeadlineMs,
+  maxBytes,
+) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // ignore cancel errors from hosts that omit a body stream
+    }
+    return { response, buffer: new ArrayBuffer(0) };
+  }
+
+  if (responseLooksLikeBeatmapArchiveDownload(response)) {
+    const buffer = await readResponseArrayBufferLimited(
+      response,
+      maxBytes,
+      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+    );
+    return { response, buffer };
+  }
+
+  const buffer = await readResponseArrayBufferLimitedWithInitialZipProbe(
+    response,
+    maxBytes,
+    bodyProbeDeadlineMs,
+    FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+  );
+  return { response, buffer };
 };
 
 const extractZipEntry = async (archiveBytes, entry) => {
@@ -1473,10 +1704,10 @@ const fetchArrayBufferWithTimeout = async (
   }
 };
 
-const probeArchiveSource = async (source, setId) => {
+const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIMEOUT_MS, 12000)) => {
   const url = source.url(setId);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(FETCH_TIMEOUT_MS, 12000));
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       method: 'GET',
@@ -1522,6 +1753,7 @@ const probeArchiveSource = async (source, setId) => {
 const downloadBeatmapArchive = async (setId) => {
   const failures = [];
   const sources = getProviderSequenceForDownload();
+  const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
   const modeLabel = state.providerOverride === 'auto'
     ? 'auto'
     : `forced:${getProviderDisplayName(state.providerOverride)}`;
@@ -1543,16 +1775,25 @@ const downloadBeatmapArchive = async (setId) => {
 
       state.currentArchiveProviderLabel = source.label;
       setAudioBadgeWithProvider('loading', 'Loading full audio', source.label, `Downloading from ${source.label}`);
+
       const requestUrl = source.url(setId);
       const requestStartMs = performance.now();
       addDebugLog(`audio: ${source.label} -> request start`);
-
-      const { response, buffer } = await fetchArrayBufferWithTimeout(requestUrl, {
+      const fetchOpts = {
         method: 'GET',
         credentials: source.credentials || 'omit',
         cache: 'no-store',
         redirect: 'follow',
-      }, FETCH_TIMEOUT_MS);
+      };
+      const { response, buffer } = sources.length > 1
+        ? await fetchBeatmapArchiveAdaptive(
+          requestUrl,
+          fetchOpts,
+          fetchTimeoutMs,
+          fetchTimeoutMs,
+          MAX_ARCHIVE_DOWNLOAD_BYTES,
+        )
+        : await fetchArrayBufferWithTimeout(requestUrl, fetchOpts, fetchTimeoutMs);
 
       if (!response.ok) {
         failures.push(`${source.label}:${response.status}`);
@@ -1619,7 +1860,18 @@ const playbackTick = (now) => {
   if (state.playbackMode === 'audio' && state.audioSyncEnabled && state.audio) {
     if (state.audio.paused) {
       state.playbackMode = 'manual';
-      syncVisualClockToMapTime(state.currentTimeMs, now);
+      if (
+        state.isPlaying
+        && shouldContinueTimelineWhileFetchingFullAudio()
+        && state.audio.ended
+      ) {
+        syncVisualClockToMapTime(
+          clamp(getAudioMappedTimeMs(), 0, state.durationMs || 1),
+          now,
+        );
+      } else {
+        syncVisualClockToMapTime(state.currentTimeMs, now);
+      }
     } else if ((now - state.lastAudioVisualSyncPerfMs) >= AUDIO_VISUAL_SYNC_INTERVAL_MS) {
       resyncVisualPlaybackToAudio({ nowPerfMs: now });
     }
@@ -1941,10 +2193,11 @@ const runAudioFetchProbe = async () => {
     return;
   }
 
+  const probeTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : Math.min(FETCH_TIMEOUT_MS, 12000);
   addDebugLog(`probe: running provider checks for set ${targetSetId} (${getProviderDisplayName(state.providerOverride)})`);
   addDebugLog(`probe: provider order ${sources.map((source) => source.label).join(' -> ')}`);
   for (const source of sources) {
-    const result = await probeArchiveSource(source, targetSetId);
+    const result = await probeArchiveSource(source, targetSetId, probeTimeoutMs);
     if (result.ok) {
       addDebugLog(
         `probe: ${source.label} ok (${result.status}) bytes=[${result.firstBytes || 'none'}] url=${result.finalUrl}`,

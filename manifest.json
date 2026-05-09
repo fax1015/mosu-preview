@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "mosu! preview",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
   "permissions": [
     "activeTab",
@@ -34,7 +34,9 @@
   },
   "background": {
     "service_worker": "src/background.js",
-    "scripts": ["src/background.js"],
+    "scripts": [
+      "src/background.js"
+    ],
     "type": "module"
   },
   "options_ui": {
@@ -46,7 +48,9 @@
       "id": "{4b8ec57c-3fdf-4fda-8fda-95c9ad94f4df}",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     },
     "gecko_android": {

@@ -2,6 +2,8 @@ import {
   PROVIDER_OVERRIDE_KEY,
   MANIA_SCROLL_SPEED_KEY,
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+  MANIA_SCROLL_DIRECTION_KEY,
+  MANIA_TIMING_NOTE_COLOURS_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_SNAKE_OUT_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
@@ -27,6 +29,8 @@ const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
 const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
 const maniaScrollTimeValue = document.querySelector('#maniaScrollTimeValue');
 const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm');
+const maniaScrollDirection = document.querySelector('#maniaScrollDirection');
+const maniaTimingNoteColours = document.querySelector('#maniaTimingNoteColours');
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
 const standardSliderSnakeOut = document.querySelector('#standardSliderSnakeOut');
 const standardSliderEndCircles = document.querySelector('#standardSliderEndCircles');
@@ -42,6 +46,8 @@ const readSettings = async () => {
       PROVIDER_OVERRIDE_KEY,
       MANIA_SCROLL_SPEED_KEY,
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+      MANIA_SCROLL_DIRECTION_KEY,
+      MANIA_TIMING_NOTE_COLOURS_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_SNAKE_OUT_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
@@ -317,7 +323,7 @@ const renderManiaScrollSpeed = (value) => {
     maniaScrollSpeedInput.value = String(normalized);
   }
   if (maniaScrollSpeedValue) {
-    maniaScrollSpeedValue.textContent = String(normalized);
+    maniaScrollSpeedValue.textContent = normalized.toFixed(1);
   }
   if (maniaScrollTimeValue) {
     maniaScrollTimeValue.textContent = `${baseScrollTimeMs} ms`;
@@ -329,6 +335,8 @@ const getFormSettings = () => ({
     popupSize: popupSizeSelect?.value,
     maniaScrollSpeed: maniaScrollSpeedInput?.value ?? maniaScrollSpeedRange?.value,
     maniaScaleScrollSpeedWithBpm: maniaScaleScrollWithBpm?.checked,
+    maniaScrollDirection: maniaScrollDirection?.value,
+    maniaTimingNoteColours: maniaTimingNoteColours?.checked,
     standardSnakingSliders: standardSnakingSliders?.checked,
     standardSliderSnakeOut: standardSliderSnakeOut?.checked,
     standardSliderEndCircles: standardSliderEndCircles?.checked,
@@ -354,6 +362,8 @@ const initialize = async () => {
     || !maniaScrollSpeedRange
     || !maniaScrollSpeedInput
     || !maniaScaleScrollWithBpm
+    || !maniaScrollDirection
+    || !maniaTimingNoteColours
     || !standardSnakingSliders
     || !standardSliderSnakeOut
     || !standardSliderEndCircles
@@ -376,6 +386,8 @@ const initialize = async () => {
   renderManiaScrollSpeed(settings.maniaScrollSpeed);
   renderProviderPriority();
   maniaScaleScrollWithBpm.checked = settings.maniaScaleScrollSpeedWithBpm;
+  maniaScrollDirection.value = settings.maniaScrollDirection;
+  maniaTimingNoteColours.checked = settings.maniaTimingNoteColours;
   standardSnakingSliders.checked = settings.standardSnakingSliders;
   standardSliderSnakeOut.checked = settings.standardSliderSnakeOut;
   standardSliderEndCircles.checked = settings.standardSliderEndCircles;
@@ -413,6 +425,14 @@ const initialize = async () => {
   });
 
   maniaScaleScrollWithBpm.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  maniaScrollDirection.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  maniaTimingNoteColours.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

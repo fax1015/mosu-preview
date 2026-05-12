@@ -182,6 +182,53 @@ body {
   align-items: center;
 }
 
+.settings-slider-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.85rem;
+  padding: 0.92rem 1rem;
+  margin-bottom: 0.9rem;
+  outline: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--border-radius-small);
+  transition: outline-color var(--transition), box-shadow var(--transition), color var(--transition), transform var(--transition);
+  background:
+    linear-gradient(180deg, rgba(86, 82, 100, 0.28), rgba(102, 98, 119, 0.12)),
+    var(--panel-secondary);
+}
+
+.settings-slider-card:hover {
+  outline-color: var(--accent-primary);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 4px rgba(140, 102, 255, 0.12);
+}
+
+.settings-slider-copy {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.settings-slider-title {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.settings-slider-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  color: var(--text-primary);
+  font-size: 1.08rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-slider-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 0.75rem;
+  align-items: center;
+}
+
 .settings-select-wrap {
   --select-picker-offset-y: -1rem;
   --select-picker-origin: bottom center;

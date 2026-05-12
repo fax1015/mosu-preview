@@ -83,20 +83,46 @@
 
       <div class="settings-group">
         <h2 class="settings-section-title">mania preview</h2>
-        <label for="maniaScrollSpeedRange" class="settings-label">
-          Scroll speed
-        </label>
-        <div class="settings-speed-row">
-          <input id="maniaScrollSpeedRange" class="settings-range" type="range" min="1" max="40" step="1" value="28" />
-          <input id="maniaScrollSpeedInput" class="settings-number" type="number" min="1" max="40" step="1"
-            value="28" />
+        <div class="settings-slider-card">
+          <label for="maniaScrollSpeedRange" class="settings-slider-copy">
+            <span class="settings-slider-title">Scroll speed</span>
+            <span class="settings-slider-value">
+              <span id="maniaScrollTimeValue">1429 ms</span>
+              <span>(speed <span id="maniaScrollSpeedValue">28.0</span>)</span>
+            </span>
+          </label>
+          <div class="settings-slider-controls">
+            <input id="maniaScrollSpeedRange" class="settings-range" type="range" min="1" max="40" step="1" value="28" />
+            <input id="maniaScrollSpeedInput" class="settings-number" type="number" min="1" max="40" step="1"
+              value="28" aria-label="Mania scroll speed" />
+          </div>
         </div>
+        <br>
+        <label for="maniaScrollDirection" class="settings-label">Scroll direction</label>
+        <div class="settings-select-wrap">
+          <select id="maniaScrollDirection" class="settings-select">
+            <option value="down">Down</option>
+            <option value="up">Up</option>
+          </select>
+          <p class="settings-help">
+          Swap the direction of note travel.
+        </p>
+        </div>
+        <br>
         <label for="maniaScrollScaleWithBpm" class="settings-toggle-card">
           <input id="maniaScrollScaleWithBpm" type="checkbox" />
           <span class="settings-toggle-mark" aria-hidden="true"></span>
           <span class="settings-toggle-copy">
             <span class="settings-toggle-title">Scale scroll speed with BPM</span>
             <span class="settings-toggle-description">Adjust the scroll speed based on the BPM of the song.</span>
+          </span>
+        </label>
+        <label for="maniaTimingNoteColours" class="settings-toggle-card">
+          <input id="maniaTimingNoteColours" type="checkbox" />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Timing-based note colours</span>
+            <span class="settings-toggle-description">Colour notes by beat division, including 1/2, 1/3, 1/4, and finer snaps.</span>
           </span>
         </label>
       </div>

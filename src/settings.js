@@ -2,6 +2,8 @@ export const PROVIDER_OVERRIDE_KEY = 'providerOverride';
 export const AUDIO_VOLUME_KEY = 'audioVolume';
 export const MANIA_SCROLL_SPEED_KEY = 'maniaScrollSpeed';
 export const MANIA_SCROLL_SCALE_WITH_BPM_KEY = 'maniaScaleScrollSpeedWithBpm';
+export const MANIA_SCROLL_DIRECTION_KEY = 'maniaScrollDirection';
+export const MANIA_TIMING_NOTE_COLOURS_KEY = 'maniaTimingNoteColours';
 export const STANDARD_SNAKING_SLIDERS_KEY = 'standardSnakingSliders';
 export const STANDARD_SLIDER_SNAKE_OUT_KEY = 'standardSliderSnakeOut';
 export const STANDARD_SLIDER_END_CIRCLES_KEY = 'standardSliderEndCircles';
@@ -15,6 +17,8 @@ export const MIN_MANIA_SCROLL_SPEED = 1;
 export const MAX_MANIA_SCROLL_SPEED = 40;
 export const DEFAULT_MANIA_SCROLL_SPEED = 28;
 export const DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM = false;
+export const DEFAULT_MANIA_SCROLL_DIRECTION = 'down';
+export const DEFAULT_MANIA_TIMING_NOTE_COLOURS = false;
 export const DEFAULT_STANDARD_SNAKING_SLIDERS = false;
 export const DEFAULT_STANDARD_SLIDER_SNAKE_OUT = false;
 export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
@@ -178,6 +182,17 @@ export const normalizeManiaScrollScaleWithBpm = (value) => (
   || value === '1'
 );
 
+export const normalizeManiaScrollDirection = (value) => (
+  String(value || DEFAULT_MANIA_SCROLL_DIRECTION).toLowerCase() === 'up' ? 'up' : DEFAULT_MANIA_SCROLL_DIRECTION
+);
+
+export const normalizeManiaTimingNoteColours = (value) => (
+  value === true
+  || value === 'true'
+  || value === 1
+  || value === '1'
+);
+
 export const normalizeStandardSnakingSliders = (value) => (
   value === true
   || value === 'true'
@@ -223,6 +238,12 @@ export const normalizePreviewSettings = (items = {}) => ({
   maniaScaleScrollSpeedWithBpm: normalizeManiaScrollScaleWithBpm(
     items?.[MANIA_SCROLL_SCALE_WITH_BPM_KEY] ?? items?.maniaScaleScrollSpeedWithBpm,
   ),
+  maniaScrollDirection: normalizeManiaScrollDirection(
+    items?.[MANIA_SCROLL_DIRECTION_KEY] ?? items?.maniaScrollDirection,
+  ),
+  maniaTimingNoteColours: normalizeManiaTimingNoteColours(
+    items?.[MANIA_TIMING_NOTE_COLOURS_KEY] ?? items?.maniaTimingNoteColours,
+  ),
   standardSnakingSliders: normalizeStandardSnakingSliders(
     items?.[STANDARD_SNAKING_SLIDERS_KEY] ?? items?.standardSnakingSliders,
   ),
@@ -245,6 +266,8 @@ export const toPreviewSettingsStorage = (settings = {}) => {
   return {
     [MANIA_SCROLL_SPEED_KEY]: normalized.maniaScrollSpeed,
     [MANIA_SCROLL_SCALE_WITH_BPM_KEY]: normalized.maniaScaleScrollSpeedWithBpm,
+    [MANIA_SCROLL_DIRECTION_KEY]: normalized.maniaScrollDirection,
+    [MANIA_TIMING_NOTE_COLOURS_KEY]: normalized.maniaTimingNoteColours,
     [STANDARD_SNAKING_SLIDERS_KEY]: normalized.standardSnakingSliders,
     [STANDARD_SLIDER_SNAKE_OUT_KEY]: normalized.standardSliderSnakeOut,
     [STANDARD_SLIDER_END_CIRCLES_KEY]: normalized.standardSliderEndCircles,

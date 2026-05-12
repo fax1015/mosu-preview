@@ -771,6 +771,8 @@ export class PreviewRenderer {
     this.catchLastEffectTime = Number.NaN;
     this.maniaScrollSpeed = DEFAULT_MANIA_SCROLL_SPEED;
     this.maniaScaleScrollSpeedWithBpm = DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM;
+    this.maniaScrollDirection = 'down';
+    this.maniaTimingNoteColours = false;
     this.standardSnakingSliders = false;
     this.standardSliderSnakeOut = false;
     this.standardSliderEndCircles = true;
@@ -967,6 +969,12 @@ export class PreviewRenderer {
     if (Object.hasOwn(settings, 'maniaScaleScrollSpeedWithBpm')) {
       this.maniaScaleScrollSpeedWithBpm = Boolean(settings.maniaScaleScrollSpeedWithBpm);
     }
+    if (Object.hasOwn(settings, 'maniaScrollDirection')) {
+      this.maniaScrollDirection = settings.maniaScrollDirection === 'up' ? 'up' : 'down';
+    }
+    if (Object.hasOwn(settings, 'maniaTimingNoteColours')) {
+      this.maniaTimingNoteColours = Boolean(settings.maniaTimingNoteColours);
+    }
     if (Object.hasOwn(settings, 'standardSnakingSliders')) {
       this.standardSnakingSliders = Boolean(settings.standardSnakingSliders);
     }
@@ -1013,6 +1021,7 @@ export class PreviewRenderer {
     const controlPoints = this.getManiaTimingControlPoints();
     let beatLength = 60000 / 120;
     let svMultiplier = 1;
+    let sectionStart = 0;
 
     for (const point of controlPoints) {
       if (!point || point.time > time) {
@@ -1022,6 +1031,7 @@ export class PreviewRenderer {
       if (point.uninherited && point.beatLength > 0) {
         beatLength = point.beatLength;
         svMultiplier = 1;
+        sectionStart = point.time;
       } else if (!point.uninherited && point.svMultiplier > 0) {
         svMultiplier = point.svMultiplier;
       }
@@ -1031,6 +1041,7 @@ export class PreviewRenderer {
       beatLength,
       bpm: 60000 / Math.max(1, beatLength),
       svMultiplier,
+      sectionStart,
     };
   }
 
@@ -1069,6 +1080,34 @@ export class PreviewRenderer {
 
     distance += this.getManiaPixelsPerMs(segmentStart, playfieldHeight) * (toTime - segmentStart);
     return distance * direction;
+  }
+
+  getManiaTimingNoteColour(time) {
+    const timing = this.getManiaTimingState(time);
+    const beatLength = Math.max(1, timing.beatLength);
+    const sectionStart = Number.isFinite(timing.sectionStart) ? timing.sectionStart : 0;
+    const beatPosition = (time - sectionStart) / beatLength;
+    const fraction = beatPosition - Math.floor(beatPosition);
+    const normalized = ((fraction % 1) + 1) % 1;
+    const snapColours = [
+      { denominator: 1, colour: { r: 255, g: 238, b: 134 } },
+      { denominator: 2, colour: { r: 105, g: 196, b: 255 } },
+      { denominator: 3, colour: { r: 202, g: 146, b: 255 } },
+      { denominator: 4, colour: { r: 255, g: 116, b: 162 } },
+      { denominator: 6, colour: { r: 126, g: 232, b: 169 } },
+      { denominator: 8, colour: { r: 255, g: 174, b: 103 } },
+      { denominator: 12, colour: { r: 132, g: 255, b: 226 } },
+      { denominator: 16, colour: { r: 235, g: 139, b: 255 } },
+    ];
+
+    for (const { denominator, colour } of snapColours) {
+      const scaled = normalized * denominator;
+      if (Math.abs(scaled - Math.round(scaled)) <= 0.035) {
+        return colour;
+      }
+    }
+
+    return { r: 255, g: 255, b: 255 };
   }
 
   getTaikoTimingControlPoints() {
@@ -2034,7 +2073,10 @@ export class PreviewRenderer {
     const laneAreaWidth = playfieldWidth * 0.62;
     const laneAreaX = playfieldX + ((playfieldWidth - laneAreaWidth) / 2);
     const laneWidth = laneAreaWidth / keys;
-    const receptorY = playfieldY + (playfieldHeight * 0.88);
+    const scrollsUp = this.maniaScrollDirection === 'up';
+    const receptorY = scrollsUp
+      ? playfieldY + (playfieldHeight * 0.12)
+      : playfieldY + (playfieldHeight * 0.88);
     const lookBehindMs = 80;
     const visibleStart = currentTime - lookBehindMs;
     const visibleEnd = currentTime + 10000;
@@ -2083,12 +2125,13 @@ export class PreviewRenderer {
     // Mania notes spawn a bit above the visible field, so use a slightly larger travel distance.
     const scrollTravelHeight = playfieldHeight * MANIA_SCROLL_TRAVEL_HEIGHT_SCALE;
     const currentPixelsPerMs = Math.max(0.001, this.getManiaPixelsPerMs(currentTime, scrollTravelHeight));
-    const topFadeHeight = Math.max(16, playfieldHeight * 0.11);
-    const topFadeEndY = playfieldY + topFadeHeight;
+    const edgeFadeHeight = Math.max(16, playfieldHeight * 0.11);
+    const topFadeEndY = playfieldY + edgeFadeHeight;
+    const bottomFadeStartY = playfieldY + playfieldHeight - edgeFadeHeight;
     const postJudgeTravelPx = Math.max(receptorHalf, noteHeight * 0.25);
     const postJudgeDelayMs = postJudgeTravelPx / currentPixelsPerMs;
-    const holdBodyBottomClampY = receptorY + receptorHalf;
-    const receptorVanishCenterY = receptorY + (receptorHalf * 0.5);
+    const holdBodyClampY = scrollsUp ? receptorY - receptorHalf : receptorY + receptorHalf;
+    const receptorVanishCenterY = receptorY + ((scrollsUp ? -1 : 1) * receptorHalf * 0.5);
     const receptorVanishFadePx = Math.max(1, receptorHalf);
 
     for (const object of objects) {
@@ -2131,7 +2174,8 @@ export class PreviewRenderer {
       );
       const laneX = laneAreaX + (lane * laneWidth);
       const noteX = laneX + lanePadding;
-      const rawHeadY = receptorY - this.getManiaScrollOffset(currentTime, object.time, scrollTravelHeight) - (noteHeight / 2);
+      const scrollOffset = this.getManiaScrollOffset(currentTime, object.time, scrollTravelHeight);
+      const rawHeadY = receptorY + ((scrollsUp ? 1 : -1) * scrollOffset) - (noteHeight / 2);
       const headY = (isHoldNote && currentTime >= object.time && currentTime <= holdEndClampTime)
         ? (receptorY - (noteHeight / 2))
         : rawHeadY;
@@ -2139,19 +2183,26 @@ export class PreviewRenderer {
 
       const noteCenterY = headY + (noteHeight / 2);
       if (!isHoldNote && dt > 0) {
-        const futureDistance = clamp(receptorY - noteCenterY, 0, playfieldHeight);
+        const futureDistance = clamp(Math.abs(receptorY - noteCenterY), 0, playfieldHeight);
         alpha = 0.24 + (0.66 * clamp(1 - (futureDistance / Math.max(playfieldHeight, 1)), 0, 1));
       }
-      if (noteCenterY < topFadeEndY) {
-        alpha *= clamp((noteCenterY - playfieldY) / Math.max(topFadeHeight, 1), 0, 1);
+      if (!scrollsUp && noteCenterY < topFadeEndY) {
+        alpha *= clamp((noteCenterY - playfieldY) / Math.max(edgeFadeHeight, 1), 0, 1);
+        if (alpha <= 0.02) {
+          continue;
+        }
+      } else if (scrollsUp && noteCenterY > bottomFadeStartY) {
+        alpha *= clamp(((playfieldY + playfieldHeight) - noteCenterY) / Math.max(edgeFadeHeight, 1), 0, 1);
         if (alpha <= 0.02) {
           continue;
         }
       }
 
       if (!isHoldNote) {
-        if (noteCenterY > receptorVanishCenterY) {
-          const overPx = noteCenterY - receptorVanishCenterY;
+        const overPx = scrollsUp
+          ? receptorVanishCenterY - noteCenterY
+          : noteCenterY - receptorVanishCenterY;
+        if (overPx > 0) {
           alpha *= clamp(1 - (overPx / receptorVanishFadePx), 0, 1);
           if (alpha <= 0.02) {
             continue;
@@ -2165,29 +2216,43 @@ export class PreviewRenderer {
         g: Math.min(255, groupBase.g + 16),
         b: Math.min(255, groupBase.b + 16),
       };
+      const noteFillColour = this.maniaTimingNoteColours
+        ? this.getManiaTimingNoteColour(object.time)
+        : noteColor;
 
       if (shouldRenderHoldBody) {
-        const tailY = receptorY - this.getManiaScrollOffset(currentTime, object.endTime, scrollTravelHeight) + (noteHeight / 2);
+        const tailOffset = this.getManiaScrollOffset(currentTime, object.endTime, scrollTravelHeight);
+        const tailY = receptorY + ((scrollsUp ? 1 : -1) * tailOffset) + (noteHeight / 2);
         const bodyTop = Math.max(playfieldY - 20, Math.min(headY, tailY));
         const bodyBottom = Math.min(
-          holdBodyBottomClampY,
+          scrollsUp ? (playfieldY + playfieldHeight + 20) : holdBodyClampY,
           Math.max(headY + noteHeight, tailY),
         );
         const bodyHeight = bodyBottom - bodyTop;
         if (bodyHeight > 2) {
           const bodyAlpha = alpha * 0.35;
-          if (bodyTop < topFadeEndY) {
+          if (!scrollsUp && bodyTop < topFadeEndY) {
             const fadeStop = clamp((topFadeEndY - bodyTop) / Math.max(bodyHeight, 1), 0, 1);
             const startAlpha = bodyTop <= playfieldY
               ? 0
-              : bodyAlpha * clamp((bodyTop - playfieldY) / Math.max(topFadeHeight, 1), 0, 1);
+              : bodyAlpha * clamp((bodyTop - playfieldY) / Math.max(edgeFadeHeight, 1), 0, 1);
             const bodyGradient = ctx.createLinearGradient(0, bodyTop, 0, bodyBottom);
-            bodyGradient.addColorStop(0, withAlpha(groupBase, startAlpha));
-            bodyGradient.addColorStop(fadeStop, withAlpha(groupBase, bodyAlpha));
-            bodyGradient.addColorStop(1, withAlpha(groupBase, bodyAlpha));
+            bodyGradient.addColorStop(0, withAlpha(noteFillColour, startAlpha));
+            bodyGradient.addColorStop(fadeStop, withAlpha(noteFillColour, bodyAlpha));
+            bodyGradient.addColorStop(1, withAlpha(noteFillColour, bodyAlpha));
+            ctx.fillStyle = bodyGradient;
+          } else if (scrollsUp && bodyBottom > bottomFadeStartY) {
+            const fadeStart = clamp((bottomFadeStartY - bodyTop) / Math.max(bodyHeight, 1), 0, 1);
+            const endAlpha = bodyBottom >= playfieldY + playfieldHeight
+              ? 0
+              : bodyAlpha * clamp(((playfieldY + playfieldHeight) - bodyBottom) / Math.max(edgeFadeHeight, 1), 0, 1);
+            const bodyGradient = ctx.createLinearGradient(0, bodyTop, 0, bodyBottom);
+            bodyGradient.addColorStop(0, withAlpha(noteFillColour, bodyAlpha));
+            bodyGradient.addColorStop(fadeStart, withAlpha(noteFillColour, bodyAlpha));
+            bodyGradient.addColorStop(1, withAlpha(noteFillColour, endAlpha));
             ctx.fillStyle = bodyGradient;
           } else {
-            ctx.fillStyle = withAlpha(groupBase, bodyAlpha);
+            ctx.fillStyle = withAlpha(noteFillColour, bodyAlpha);
           }
           ctx.fillRect(noteX + (noteWidth * 0.2), bodyTop, noteWidth * 0.6, bodyHeight);
         }
@@ -2197,7 +2262,7 @@ export class PreviewRenderer {
         continue;
       }
 
-      ctx.fillStyle = withAlpha(noteColor, alpha);
+      ctx.fillStyle = withAlpha(noteFillColour, alpha);
       ctx.fillRect(noteX, headY, noteWidth, noteHeight);
       ctx.strokeStyle = `rgba(255,255,255,${clamp(alpha * 0.8, 0, 1)})`;
       ctx.lineWidth = 1;

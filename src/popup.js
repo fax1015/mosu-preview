@@ -6,6 +6,8 @@ import {
   DEFAULT_AUDIO_VOLUME,
   MANIA_SCROLL_SPEED_KEY,
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+  MANIA_SCROLL_DIRECTION_KEY,
+  MANIA_TIMING_NOTE_COLOURS_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_SNAKE_OUT_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
@@ -466,6 +468,8 @@ const readPreviewSettings = async () => {
     const items = await storageGet('sync', [
       MANIA_SCROLL_SPEED_KEY,
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+      MANIA_SCROLL_DIRECTION_KEY,
+      MANIA_TIMING_NOTE_COLOURS_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_SNAKE_OUT_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
@@ -518,6 +522,8 @@ const applyPreviewSettings = (settings = {}) => {
   const normalized = normalizePreviewSettings(settings);
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
   state.maniaScaleScrollSpeedWithBpm = normalized.maniaScaleScrollSpeedWithBpm;
+  state.maniaScrollDirection = normalized.maniaScrollDirection;
+  state.maniaTimingNoteColours = normalized.maniaTimingNoteColours;
   state.standardSnakingSliders = normalized.standardSnakingSliders;
   state.standardSliderSnakeOut = normalized.standardSliderSnakeOut;
   state.standardSliderEndCircles = normalized.standardSliderEndCircles;
@@ -1626,6 +1632,8 @@ addStorageChangedListener((changes, areaName) => {
   if (
     changes[MANIA_SCROLL_SPEED_KEY]
     || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
+    || changes[MANIA_SCROLL_DIRECTION_KEY]
+    || changes[MANIA_TIMING_NOTE_COLOURS_KEY]
     || changes[STANDARD_SNAKING_SLIDERS_KEY]
     || changes[STANDARD_SLIDER_SNAKE_OUT_KEY]
     || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
@@ -1638,6 +1646,10 @@ addStorageChangedListener((changes, areaName) => {
       maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
       maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
         ?? state.maniaScaleScrollSpeedWithBpm,
+      maniaScrollDirection: changes[MANIA_SCROLL_DIRECTION_KEY]?.newValue
+        ?? state.maniaScrollDirection,
+      maniaTimingNoteColours: changes[MANIA_TIMING_NOTE_COLOURS_KEY]?.newValue
+        ?? state.maniaTimingNoteColours,
       standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
         ?? state.standardSnakingSliders,
       standardSliderSnakeOut: changes[STANDARD_SLIDER_SNAKE_OUT_KEY]?.newValue

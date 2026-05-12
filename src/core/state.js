@@ -52,6 +52,8 @@ const createInitialState = () => {
     lastAudioVisualSyncPerfMs: 0,
     maniaScrollSpeed: normalizedSettings.maniaScrollSpeed,
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
+    maniaScrollDirection: normalizedSettings.maniaScrollDirection,
+    maniaTimingNoteColours: normalizedSettings.maniaTimingNoteColours,
     standardSnakingSliders: normalizedSettings.standardSnakingSliders,
     standardSliderSnakeOut: normalizedSettings.standardSliderSnakeOut,
     standardSliderEndCircles: normalizedSettings.standardSliderEndCircles,

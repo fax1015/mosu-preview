@@ -161,14 +161,13 @@ const createUnsupportedViewController = ({
       return;
     }
 
+    unsupportedPanel.classList.toggle('is-hidden', !enabled);
     if (!enabled) {
-      unsupportedPanel.hidden = true;
       stopUnsupportedAsciiAnimation();
       unsupportedAscii.textContent = '';
       return;
     }
 
-    unsupportedPanel.hidden = false;
     startUnsupportedAsciiAnimation();
   };
 

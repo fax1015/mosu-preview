@@ -1,4 +1,11 @@
 @font-face {
+    font-family: 'JetBrains Mono';
+    src: url(./assets/fonts/JetBrainsMono-Regular.ttf) format('truetype');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+@font-face {
     font-family: 'Torus';
     src: url('./assets/fonts/Torus-Thin.otf') format('opentype');
     font-weight: 100;
@@ -46,7 +53,6 @@
     font-display: swap;
 }
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&display=swap');
 
 *,
 *::before,
@@ -247,7 +253,7 @@ h6 {
     max-width: var(--popup-content-width);
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0;
     padding: 0.75rem;
     margin: 0;
     border-radius: var(--border-radius);
@@ -309,15 +315,30 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     flex-direction: column;
     text-align: center;
     gap: 0.7rem;
-    padding: 1rem 0.9rem 1.05rem;
+    padding: 1rem 0.9rem;
+}
+
+.map-preview-popup.is-unsupported .map-preview-unsupported {
+    display: flex;
+    flex: 1;
+    order: -1;
+}
+
+.map-preview-unsupported.is-hidden {
+    display: none !important;
+}
+
+.map-preview-popup.is-unsupported {
+    min-height: calc(100vh - 16px);
+    gap: 0;
 }
 
 .map-preview-popup.is-unsupported> :not(.map-preview-unsupported):not(.map-preview-recent-panel) {
     display: none !important;
 }
 
-.map-preview-popup.is-unsupported .map-preview-unsupported {
-    display: flex;
+.map-preview-popup.is-unsupported .map-preview-recent-panel {
+    flex-shrink: 0;
 }
 
 .map-preview-unsupported-title {
@@ -355,6 +376,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     justify-content: space-between;
     align-items: center;
     gap: 0.6rem;
+    margin-bottom: 0.6rem;
 }
 
 .map-preview-header-actions {
@@ -364,27 +386,34 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-info-btn {
-    width: 20px;
-    height: 20px;
-    flex: 0 0 20px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.08);
-    color: rgba(188, 197, 214, 0.92);
-    font-size: 0.68rem;
-    font-weight: 700;
-    line-height: 1;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--text-secondary);
     cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+    padding: 0;
 }
 
 .map-preview-info-btn:hover {
-    background: rgba(255, 255, 255, 0.12);
-    color: rgba(233, 239, 248, 0.95);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.18);
+    transform: scale(1.08);
+}
+
+.map-preview-info-btn:active {
+    transform: scale(0.94);
 }
 
 .map-preview-info-btn:focus-visible {
-    outline: 2px solid rgba(205, 223, 255, 0.92);
+    outline: 2px solid rgba(205, 223, 255, 0.9);
     outline-offset: 2px;
 }
 
@@ -443,32 +472,45 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(0, 0, 0, 0.2);
+    margin-bottom: 0.6rem;
 }
 
 .map-preview-toast {
     position: absolute;
-    left: 0.75rem;
-    right: 0.75rem;
-    bottom: 3.15rem;
+    top: 0.5rem;
+    right: 0.5rem;
+    left: auto;
+    bottom: auto;
     z-index: 8;
-    padding: 0.45rem 0.65rem;
-    border-radius: calc(var(--border-radius) - 3px);
+    max-width: calc(100% - 1rem);
+    padding: 0.22rem 0.52rem;
+    border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     background: rgba(24, 23, 28, 0.94);
     color: rgba(238, 241, 248, 0.96);
-    font-size: 0.68rem;
+    font-size: 0.62rem;
     font-weight: 700;
-    line-height: 1.25;
+    line-height: 1;
     text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(-4px);
     pointer-events: none;
-    transition: opacity 0.18s ease, transform 0.18s ease;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    letter-spacing: 0.01em;
 }
 
 .map-preview-toast.is-visible {
     opacity: 1;
     transform: translateY(0);
+}
+
+.map-preview-toast.is-copied {
+    color: rgba(200, 190, 220, 0.92);
+    background: rgba(58, 50, 75, 0.85);
+    border-color: rgba(140, 120, 170, 0.35);
 }
 
 .map-preview-canvas {
@@ -568,10 +610,24 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     padding: 0.48rem;
     display: grid;
     gap: 0.4rem;
+    margin-top: 0.6rem;
+    max-height: 300px;
+    overflow: hidden;
+    transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 0.3s ease,
+                padding 0.3s ease,
+                margin-top 0.3s ease;
 }
 
 .map-preview-debug-panel[hidden] {
-    display: none;
+    display: grid;
+    max-height: 0;
+    opacity: 0;
+    padding: 0;
+    margin-top: 0;
+    overflow: hidden;
+    pointer-events: none;
+    border-width: 0;
 }
 
 .map-preview-debug-header {
@@ -710,11 +766,17 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     color: rgba(188, 197, 214, 0.9);
     font-size: 1.1rem;
     line-height: 1.1rem;
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .map-preview-info-close:hover {
     background: rgba(255, 255, 255, 0.11);
     color: rgba(236, 241, 248, 0.95);
+    transform: scale(1.1);
+}
+
+.map-preview-info-close:active {
+    transform: scale(0.92);
 }
 
 .map-preview-info-actions {
@@ -768,6 +830,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 
 .map-preview-info-modal--shortcuts {
     width: min(100%, 280px);
+    max-height: calc(100% - 3rem);
+    overflow-y: scroll;
 }
 
 .map-preview-shortcuts-list {
@@ -982,19 +1046,37 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    padding: 0.5rem;
+    padding-top: 1rem;
     min-height: 240px;
+    max-height: 600px;
+    overflow: hidden;
+    transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 0.3s ease,
+                padding 0.3s ease,
+                gap 0.3s ease;
 }
 
 .map-preview-recent-panel[hidden] {
-    display: none;
+    display: flex;
+    max-height: 0;
+    min-height: 0;
+    opacity: 0;
+    padding: 0;
+    gap: 0;
+    pointer-events: none;
+}
+
+.map-preview-recent-header {
+    padding-left: 0.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
 .map-preview-recent-title {
     font-size: 0.95rem;
     font-weight: 700;
     color: var(--text-primary);
-    margin-bottom: 0.25rem;
 }
 
 .map-preview-recent-list {
@@ -1002,8 +1084,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     flex-direction: column;
     gap: 0.45rem;
     max-height: 320px;
-    overflow-y: auto;
-    padding-right: 0.25rem;
+    overflow-y: auto;;
 }
 
 .map-preview-recent-list::-webkit-scrollbar {
@@ -1028,7 +1109,6 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-recent-item:hover {
-    transform: translateX(2px);
     background: rgba(255, 255, 255, 0.06);
     border-color: rgba(255, 255, 255, 0.1);
 }
@@ -1069,19 +1149,24 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-recent-clear-btn {
-    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: transparent;
     border: none;
     color: var(--text-secondary);
-    font-size: 0.7rem;
-    font-weight: 600;
     cursor: pointer;
-    opacity: 0.6;
-    transition: opacity 0.2s ease, color 0.2s ease;
-    padding: 0.5rem;
+    opacity: 0.45;
+    transition: opacity 0.2s ease, color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+    padding: 0.25rem;
 }
 
 .map-preview-recent-clear-btn:hover {
     opacity: 1;
     color: var(--error);
+    transform: scale(1.15);
+}
+
+.map-preview-recent-clear-btn:active {
+    transform: scale(0.92);
 }

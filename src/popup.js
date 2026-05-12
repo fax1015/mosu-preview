@@ -41,6 +41,7 @@ import {
 import { createTimingController } from './core/timing.js';
 import { base64ToUint8Array } from './core/base64Payload.js';
 import {
+  FULL_AUDIO_CACHE_NAME,
   getAudioMimeType,
   normalizePath,
   pruneFullAudioCache,
@@ -349,6 +350,24 @@ const setShortcutsMenuOpen = (isOpen) => {
   renderShortcutsMenu();
 };
 
+const getCachedSetIds = async () => {
+  if (!('caches' in globalThis)) return null;
+  try {
+    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
+    const requests = await cache.keys();
+    const setIds = new Set();
+    for (const req of requests) {
+      const match = req.url.match(/beatmapsets\/(\d+)\/audio\//);
+      if (match) {
+        setIds.add(match[1]);
+      }
+    }
+    return setIds.size > 0 ? setIds : null;
+  } catch {
+    return null;
+  }
+};
+
 const renderRecentPanel = async () => {
   if (!recentPanel || !recentList) return;
 
@@ -358,10 +377,19 @@ const renderRecentPanel = async () => {
     return;
   }
 
+  const cachedSetIds = await getCachedSetIds();
+  const filteredHistory = cachedSetIds
+    ? history.filter((entry) => cachedSetIds.has(entry.beatmapSetId))
+    : history;
+  if (filteredHistory.length === 0) {
+    recentPanel.hidden = true;
+    return;
+  }
+
   recentPanel.hidden = false;
   recentList.innerHTML = '';
 
-  history.forEach((entry) => {
+  filteredHistory.forEach((entry) => {
     const item = document.createElement('div');
     item.className = 'map-preview-recent-item';
     item.innerHTML = `
@@ -441,6 +469,8 @@ const readPreviewSettings = async () => {
       STANDARD_SLIDER_END_CIRCLES_KEY,
       POPUP_SIZE_KEY,
       PROVIDER_PRIORITY_KEY,
+      DISABLED_PROVIDERS_KEY,
+      AUTO_FALLBACK_KEY,
     ]);
     return normalizePreviewSettings(items);
   } catch {
@@ -489,6 +519,8 @@ const applyPreviewSettings = (settings = {}) => {
   state.standardSnakingSliders = normalized.standardSnakingSliders;
   state.standardSliderEndCircles = normalized.standardSliderEndCircles;
   state.providerPriority = normalized.providerPriority;
+  state.disabledProviders = normalized.disabledProviders;
+  state.autoFallback = normalized.autoFallback;
   applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
@@ -1058,22 +1090,13 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
     try {
       extractionResult = await sendRuntimeMessage({
         type: 'extractFullAudio',
+        jobId,
         setId,
         audioFilename: audioFileName,
         providerOverride: state.providerOverride,
         providerPriority: state.providerPriority,
         disabledProviders: state.disabledProviders,
         autoFallback: state.autoFallback,
-        onTryingSource: (label) => {
-          if (jobId === state.fullAudioJobId) {
-            showTryingArchiveProviderBadge(label);
-          }
-        },
-        onDownloadProgress: (progress) => {
-          if (jobId === state.fullAudioJobId) {
-            showTryingArchiveProviderBadge(progress.providerLabel, progress);
-          }
-        },
       });
     } catch (swMessageError) {
       addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
@@ -1087,6 +1110,8 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
         audioFilename: audioFileName,
         providerOverride: state.providerOverride,
         userPriority: state.providerPriority,
+        disabledProviders: state.disabledProviders,
+        autoFallback: state.autoFallback,
         onTryingSource: showTryingArchiveProviderBadge,
         onDownloadProgress: (evt) => {
           if (jobId !== state.fullAudioJobId) {
@@ -1347,6 +1372,10 @@ const initializePreviewForCurrentTab = async () => {
       versionLine.title = '';
       configureAudioPreview(null, 0);
       if (unsupportedAscii) {
+        if (unsupportedPanel && !info.unsupportedSite) {
+          const titleEl = unsupportedPanel.querySelector('.map-preview-unsupported-title');
+          if (titleEl) titleEl.textContent = 'no map detected... o_0';
+        }
         setUnsupportedMode(true);
         void renderRecentPanel();
       } else {
@@ -1488,6 +1517,7 @@ bindPopupUiEvents({
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
+    popupToast,
   },
   state,
   registry,

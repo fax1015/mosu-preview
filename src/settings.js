@@ -20,36 +20,78 @@ export const DEFAULT_POPUP_SIZE = 'default';
 export const DEFAULT_DISABLED_PROVIDERS = [];
 export const DEFAULT_AUTO_FALLBACK = true;
 
-export const ARCHIVE_DOWNLOAD_SOURCES = Object.freeze([
-  Object.freeze({
+export const PROVIDER_PRIORITY_TIERS = Object.freeze({
+  PRIMARY: 'primary',
+  SECONDARY: 'secondary',
+  EXPERIMENTAL: 'experimental',
+});
+
+export const PROVIDER_TIER_LABELS = Object.freeze({
+  primary: 'Primary',
+  secondary: 'Secondary',
+  experimental: 'Experimental',
+});
+
+const PROVIDER_DEFINITIONS = [
+  {
     id: 'mino',
     label: 'Mino',
     rank: 0,
-    url: (setId) => `https://catboy.best/d/${setId}n`,
-    credentials: 'omit',
-  }),
-  Object.freeze({
+    buildArchiveUrl: ({ setId, noVideo } = {}) => {
+      const useNoVideo = noVideo !== false;
+      return `https://catboy.best/d/${setId}${useNoVideo ? 'n' : ''}`;
+    },
+    supportsNoVideo: true,
+    supportsCors: true,
+    supportsRangeRequests: false,
+    regionBias: 'global',
+    expectedReliability: 0.85,
+    averageStartupLatency: 1200,
+  },
+  {
     id: 'osu_direct',
     label: 'osu.direct',
     rank: 1,
-    url: (setId) => `https://osu.direct/api/d/${setId}`,
-    credentials: 'omit',
-  }),
-  Object.freeze({
+    buildArchiveUrl: ({ setId } = {}) => `https://osu.direct/api/d/${setId}`,
+    supportsNoVideo: false,
+    supportsCors: true,
+    supportsRangeRequests: false,
+    regionBias: 'global',
+    expectedReliability: 0.8,
+    averageStartupLatency: 1500,
+  },
+  {
     id: 'nerinyan',
     label: 'NeriNyan',
     rank: 2,
-    url: (setId) => `https://api.nerinyan.moe/d/${setId}`,
-    credentials: 'omit',
-  }),
-  Object.freeze({
+    buildArchiveUrl: ({ setId } = {}) => `https://api.nerinyan.moe/d/${setId}`,
+    supportsNoVideo: false,
+    supportsCors: true,
+    supportsRangeRequests: false,
+    regionBias: 'global',
+    expectedReliability: 0.82,
+    averageStartupLatency: 1000,
+  },
+  {
     id: 'sayobot',
     label: 'Sayobot',
     rank: 3,
-    url: (setId) => `https://txy1.sayobot.cn/beatmaps/download/novideo/${setId}?server=null`,
-    credentials: 'omit',
-  }),
-]);
+    buildArchiveUrl: ({ setId, noVideo } = {}) => {
+      const useNoVideo = noVideo !== false;
+      return `https://txy1.sayobot.cn/beatmaps/download/${useNoVideo ? 'novideo' : 'origin'}/${setId}?server=null`;
+    },
+    supportsNoVideo: true,
+    supportsCors: true,
+    supportsRangeRequests: false,
+    regionBias: 'asia',
+    expectedReliability: 0.75,
+    averageStartupLatency: 800,
+  },
+];
+
+export const ARCHIVE_DOWNLOAD_SOURCES = Object.freeze(
+  PROVIDER_DEFINITIONS.map((def) => Object.freeze({ ...def })),
+);
 
 export const ALLOWED_PROVIDER_OVERRIDES = Object.freeze(
   new Set(['auto', ...ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id)]),
@@ -58,6 +100,37 @@ export const ALLOWED_PROVIDER_OVERRIDES = Object.freeze(
 export const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
   catboy: 'mino',
 });
+
+export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
+  staticWeight: 0.10,
+  reliability: 0.35,
+  speed: 0.25,
+  userPreference: 0.20,
+  recencyBonus: 0.10,
+});
+
+export const computeProviderScore = (provider, stats, userPriorityIndex = -1) => {
+  const totalAttempts = (stats?.successes ?? 0) + (stats?.failures ?? 0);
+  const reliability = totalAttempts > 0
+    ? (stats.successes / totalAttempts)
+    : (provider.expectedReliability ?? 0.5);
+  const avgSpeed = (stats?.timedSuccesses ?? 0) > 0
+    ? (stats.totalSuccessMs / stats.timedSuccesses)
+    : (provider.averageStartupLatency ?? 3000);
+  const speedScore = Math.max(0, 1 - (avgSpeed / 30000));
+  const userPreferenceScore = userPriorityIndex >= 0
+    ? Math.max(0, 1 - (userPriorityIndex / 10))
+    : 0.5;
+  const recencyBonus = Math.min(1, totalAttempts / 10);
+
+  return (
+    (provider.expectedReliability ?? 0.5) * PROVIDER_SCORE_WEIGHTS.staticWeight
+    + reliability * PROVIDER_SCORE_WEIGHTS.reliability
+    + speedScore * PROVIDER_SCORE_WEIGHTS.speed
+    + userPreferenceScore * PROVIDER_SCORE_WEIGHTS.userPreference
+    + recencyBonus * PROVIDER_SCORE_WEIGHTS.recencyBonus
+  );
+};
 
 export const normalizeProviderOverride = (value) => {
   const candidate = String(value || 'auto');

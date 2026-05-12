@@ -1,4 +1,9 @@
-import { DEFAULT_AUDIO_VOLUME, normalizePreviewSettings } from '../settings.js';
+import {
+  DEFAULT_AUDIO_VOLUME,
+  DEFAULT_DISABLED_PROVIDERS,
+  DEFAULT_AUTO_FALLBACK,
+  normalizePreviewSettings,
+} from '../settings.js';
 
 const createInitialState = () => {
   const normalizedSettings = normalizePreviewSettings();
@@ -49,6 +54,9 @@ const createInitialState = () => {
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
     standardSnakingSliders: normalizedSettings.standardSnakingSliders,
     standardSliderEndCircles: normalizedSettings.standardSliderEndCircles,
+    providerPriority: normalizedSettings.providerPriority,
+    disabledProviders: DEFAULT_DISABLED_PROVIDERS,
+    autoFallback: DEFAULT_AUTO_FALLBACK,
   };
 };
 

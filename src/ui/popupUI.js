@@ -25,6 +25,7 @@ const bindPopupUiEvents = ({
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
+    popupToast,
   } = elements;
 
   const {
@@ -123,12 +124,20 @@ const bindPopupUiEvents = ({
   });
 
   timeLabel?.addEventListener('click', () => {
-    const text = timeLabel.textContent || '';
-    const currentPart = text.split('/')[0].trim();
-    if (!currentPart) return;
+    const tsMs = state.currentTimeMs;
+    if (!Number.isFinite(tsMs) || tsMs < 0) return;
+    const totalSec = Math.floor(tsMs / 1000);
+    const mins = String(Math.floor(totalSec / 60)).padStart(2, '0');
+    const secs = String(totalSec % 60).padStart(2, '0');
+    const ms = String(Math.floor(tsMs % 1000)).padStart(3, '0');
+    const timestamp = `${mins}:${secs}:${ms}`;
 
-    navigator.clipboard.writeText(currentPart).then(() => {
-      showPopupToast(`Copied ${currentPart}`);
+    navigator.clipboard.writeText(timestamp).then(() => {
+      showPopupToast(`Copied ${timestamp}`);
+      if (popupToast) {
+        popupToast.classList.add('is-copied');
+        setTimeout(() => popupToast.classList.remove('is-copied'), 3700);
+      }
     }).catch((err) => {
       addDebugLog(`ui: failed to copy timestamp -> ${err?.message || 'unknown error'}`);
     });

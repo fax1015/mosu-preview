@@ -212,6 +212,7 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
 };
 
 export {
+  FULL_AUDIO_CACHE_NAME,
   getAudioMimeType,
   normalizePath,
   getPathBaseName,

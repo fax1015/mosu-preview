@@ -51,6 +51,15 @@ const formatTime = (ms) => {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 };
 
+const formatTimestamp = (ms) => {
+  const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const millis = Math.floor(safeMs % 1000);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(millis).padStart(3, '0')}`;
+};
+
 const withAlpha = (rgb, alpha) => `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${clamp(alpha, 0, 1)})`;
 
 const DEFAULT_COLOURS = [

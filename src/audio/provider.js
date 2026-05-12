@@ -1,6 +1,7 @@
 import {
   ARCHIVE_DOWNLOAD_SOURCES,
   normalizeProviderOverride,
+  computeProviderScore,
 } from '../settings.js';
 import {
   readResponseArrayBufferLimited,
@@ -106,10 +107,21 @@ const getAutoOrderedProviders = (userPriority = []) => {
 
   const available = baseOrder.filter((source) => !isProviderInCooldown(source.id));
   return available.sort((a, b) => {
-    const aScore = getProviderReliabilityScore(a.id);
-    const bScore = getProviderReliabilityScore(b.id);
-    if (aScore !== bScore) {
-      return bScore - aScore;
+    const statsA = ensureProviderStats(a.id);
+    const statsB = ensureProviderStats(b.id);
+    const idxA = userPriority.indexOf(a.id);
+    const idxB = userPriority.indexOf(b.id);
+
+    const scoreA = computeProviderScore(a, statsA, idxA);
+    const scoreB = computeProviderScore(b, statsB, idxB);
+    if (scoreA !== scoreB) {
+      return scoreB - scoreA;
+    }
+
+    const aReliability = getProviderReliabilityScore(a.id);
+    const bReliability = getProviderReliabilityScore(b.id);
+    if (aReliability !== bReliability) {
+      return bReliability - aReliability;
     }
 
     const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
@@ -118,21 +130,14 @@ const getAutoOrderedProviders = (userPriority = []) => {
       return aAvgSuccessMs - bAvgSuccessMs;
     }
 
-    const aStats = ensureProviderStats(a.id);
-    const bStats = ensureProviderStats(b.id);
-    const aAttempts = aStats.successes + aStats.failures;
-    const bAttempts = bStats.successes + bStats.failures;
+    const aAttempts = statsA.successes + statsA.failures;
+    const bAttempts = statsB.successes + statsB.failures;
     if (aAttempts !== bAttempts) {
       return bAttempts - aAttempts;
     }
 
-    // Use user priority as the final tie-breaker if available
-    if (userPriority.length > 0) {
-      const aIdx = userPriority.indexOf(a.id);
-      const bIdx = userPriority.indexOf(b.id);
-      if (aIdx !== -1 && bIdx !== -1) {
-        return aIdx - bIdx;
-      }
+    if (idxA !== -1 && idxB !== -1) {
+      return idxA - idxB;
     }
 
     return a.rank - b.rank;
@@ -203,17 +208,19 @@ const getProviderSequenceForDownload = (
     return [];
   }
 
+  const enabled = enabledPriority
+    .map((id) => getProviderById(id))
+    .filter((source) => source && !isProviderInCooldown(source.id));
+
   if (!autoFallback) {
-    const forced = getProviderById(enabledPriority[0]);
-    return forced ? [forced] : [];
+    return enabled.length > 0 ? [enabled[0]] : [];
   }
 
-  const autoOrdered = getAutoOrderedProviders(enabledPriority);
-  if (autoOrdered.length > 0) {
-    return autoOrdered;
+  if (enabled.length > 0) {
+    return enabled;
   }
 
-  // Fallback if all in cooldown
+  // Fallback: all in cooldown, try them anyway
   return enabledPriority.map((id) => getProviderById(id)).filter(Boolean);
 };
 
@@ -309,7 +316,7 @@ const fetchBeatmapArchiveAdaptive = async (
 };
 
 const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIMEOUT_MS, 12000)) => {
-  const url = source.url(setId);
+  const url = source.buildArchiveUrl({ setId });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -390,7 +397,7 @@ const downloadBeatmapArchive = async (
       source.label,
     );
 
-    const requestUrl = source.url(setId);
+    const requestUrl = source.buildArchiveUrl({ setId });
     const attemptTimeouts = sources.length > 1
       ? [fetchTimeoutMs, Math.min(45000, FETCH_TIMEOUT_ARCHIVE_BODY_MS)]
       : [fetchTimeoutMs, Math.min(fetchTimeoutMs * 2, 90000)];

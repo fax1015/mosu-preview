@@ -375,10 +375,11 @@ body {
   background:
     linear-gradient(90deg,
       var(--accent-secondary) 0%,
-      var(--accent-secondary) var(--range-progress),
+      var(--accent-secondary) calc(var(--range-progress) - 1%),
       rgba(60, 58, 70, 0.95) var(--range-progress),
       rgba(60, 58, 70, 0.95) 100%);
   outline: none;
+  background-clip: padding-box;
 }
 
 .settings-range::-webkit-slider-thumb {
@@ -435,9 +436,10 @@ body {
   background:
     linear-gradient(90deg,
       rgba(237, 209, 220, 0.92) 0%,
-      var(--accent-primary) var(--range-progress),
+      var(--accent-primary) calc(var(--range-progress) - 1%),
       rgba(60, 58, 70, 0.95) var(--range-progress),
       rgba(60, 58, 70, 0.95) 100%);
+  background-clip: padding-box;
 }
 
 .settings-number {

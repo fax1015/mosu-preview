@@ -322,15 +322,15 @@ const renderManiaScrollSpeed = (value) => {
 };
 
 const getFormSettings = () => ({
-  providerPriority: currentProviderPriority,
-  disabledProviders: disabledProviders,
-  autoFallback: autoFallbackToggle?.checked ?? true,
   ...normalizePreviewSettings({
     popupSize: popupSizeSelect?.value,
     maniaScrollSpeed: maniaScrollSpeedInput?.value ?? maniaScrollSpeedRange?.value,
     maniaScaleScrollSpeedWithBpm: maniaScaleScrollWithBpm?.checked,
     standardSnakingSliders: standardSnakingSliders?.checked,
     standardSliderEndCircles: standardSliderEndCircles?.checked,
+    providerPriority: currentProviderPriority,
+    disabledProviders,
+    autoFallback: autoFallbackToggle?.checked ?? true,
   }),
 });
 

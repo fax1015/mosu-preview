@@ -280,7 +280,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
 
 export const calculateManiaScrollTimeMs = (scrollSpeed, bpm = 120, scaleWithBpm = false) => {
   const normalizedSpeed = normalizeManiaScrollSpeed(scrollSpeed);
-  let scrollTimeMs = 1000 * (40 / normalizedSpeed);
+  let scrollTimeMs = 11485 / normalizedSpeed;
 
   if (scaleWithBpm) {
     const normalizedBpm = Number(bpm);

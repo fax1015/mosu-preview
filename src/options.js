@@ -159,26 +159,44 @@ const renderProviderPriority = () => {
     item.className = `priority-item ${isEnabled ? '' : 'is-disabled'}`;
     item.draggable = true;
     item.dataset.id = source.id;
-    item.innerHTML = `
-      <div class="priority-handle">⋮⋮</div>
-      <div class="priority-label">${source.label}</div>
-      <div class="priority-actions">
-        <div class="priority-move-btns">
-          <button type="button" class="priority-btn" data-action="up" data-id="${source.id}" title="Move up" ${index === 0 ? 'disabled' : ''}>
-            <svg viewBox="0 0 320 512"><path d="M182.6 137.4c-12.5-12.5-32.8-12.5-45.3 0l-128 128c-9.2 9.2-11.9 22.9-6.9 34.9s16.6 19.8 29.6 19.8H288c13 0 24.6-7.8 29.6-19.8s2.2-25.7-6.9-34.9l-128-128z"/></svg>
-          </button>
-          <button type="button" class="priority-btn" data-action="down" data-id="${source.id}" title="Move down" ${index === sortedSources.length - 1 ? 'disabled' : ''}>
-            <svg viewBox="0 0 320 512"><path d="M137.4 374.6c12.5 12.5 32.8 12.5 45.3 0l128-128c9.2-9.2 11.9-22.9 6.9-34.9s-16.6-19.8-29.6-19.8H32c-13 0-24.6 7.8-29.6 19.8s-2.2 25.7 6.9 34.9l128 128z"/></svg>
-          </button>
-        </div>
-        <div class="priority-toggle-wrap">
-          <label class="priority-toggle">
-            <input type="checkbox" class="priority-toggle-input" data-id="${source.id}" ${isEnabled ? 'checked' : ''} />
-            <span class="settings-toggle-mark" aria-hidden="true"></span>
-          </label>
-        </div>
-      </div>
-    `;
+    const handle = document.createElement('div');
+    handle.className = 'priority-handle';
+    handle.textContent = '⋮⋮';
+
+    const label = document.createElement('div');
+    label.className = 'priority-label';
+    label.textContent = source.label;
+
+    const actions = document.createElement('div');
+    actions.className = 'priority-actions';
+
+    const moveBtns = document.createElement('div');
+    moveBtns.className = 'priority-move-btns';
+
+    const upBtn = document.createElement('button');
+    upBtn.type = 'button';
+    upBtn.className = 'priority-btn';
+    upBtn.dataset.action = 'up';
+    upBtn.dataset.id = source.id;
+    upBtn.title = 'Move up';
+    if (index === 0) upBtn.disabled = true;
+    upBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M182.6 137.4c-12.5-12.5-32.8-12.5-45.3 0l-128 128c-9.2 9.2-11.9 22.9-6.9 34.9s16.6 19.8 29.6 19.8H288c13 0 24.6-7.8 29.6-19.8s2.2-25.7-6.9-34.9l-128-128z"/></svg>';
+
+    const downBtn = document.createElement('button');
+    downBtn.type = 'button';
+    downBtn.className = 'priority-btn';
+    downBtn.dataset.action = 'down';
+    downBtn.dataset.id = source.id;
+    downBtn.title = 'Move down';
+    if (index === sortedSources.length - 1) downBtn.disabled = true;
+    downBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M137.4 374.6c12.5 12.5 32.8 12.5 45.3 0l128-128c9.2-9.2 11.9-22.9 6.9-34.9s-16.6-19.8-29.6-19.8H32c-13 0-24.6 7.8-29.6 19.8s-2.2 25.7 6.9 34.9l128 128z"/></svg>';
+
+    moveBtns.appendChild(upBtn);
+    moveBtns.appendChild(downBtn);
+    actions.appendChild(moveBtns);
+    item.appendChild(handle);
+    item.appendChild(label);
+    item.appendChild(actions);
 
     const handle = item.querySelector('.priority-handle');
     handle.draggable = true;

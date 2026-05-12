@@ -395,13 +395,25 @@ const renderRecentPanel = async () => {
   filteredHistory.forEach((entry) => {
     const item = document.createElement('div');
     item.className = 'map-preview-recent-item';
-    item.innerHTML = `
-      <div class="map-preview-recent-thumbnail" style="background-image: url(https://assets.ppy.sh/beatmaps/${entry.beatmapSetId}/covers/list.jpg)"></div>
-      <div class="map-preview-recent-info">
-        <div class="map-preview-recent-item-title">${entry.title}</div>
-        <div class="map-preview-recent-item-meta">${entry.artist} // ${entry.creator}</div>
-      </div>
-    `;
+    const thumbnail = document.createElement('div');
+    thumbnail.className = 'map-preview-recent-thumbnail';
+    thumbnail.style.backgroundImage = `url(https://assets.ppy.sh/beatmaps/${entry.beatmapSetId}/covers/list.jpg)`;
+
+    const info = document.createElement('div');
+    info.className = 'map-preview-recent-info';
+
+    const title = document.createElement('div');
+    title.className = 'map-preview-recent-item-title';
+    title.textContent = entry.title;
+
+    const meta = document.createElement('div');
+    meta.className = 'map-preview-recent-item-meta';
+    meta.textContent = `${entry.artist} // ${entry.creator}`;
+
+    info.appendChild(title);
+    info.appendChild(meta);
+    item.appendChild(thumbnail);
+    item.appendChild(info);
     item.addEventListener('click', () => {
       const url = `https://osu.ppy.sh/beatmapsets/${entry.beatmapSetId}`;
       createTab({ url });

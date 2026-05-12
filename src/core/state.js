@@ -53,6 +53,7 @@ const createInitialState = () => {
     maniaScrollSpeed: normalizedSettings.maniaScrollSpeed,
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
     standardSnakingSliders: normalizedSettings.standardSnakingSliders,
+    standardSliderSnakeOut: normalizedSettings.standardSliderSnakeOut,
     standardSliderEndCircles: normalizedSettings.standardSliderEndCircles,
     providerPriority: normalizedSettings.providerPriority,
     disabledProviders: DEFAULT_DISABLED_PROVIDERS,

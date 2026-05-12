@@ -3,6 +3,7 @@ export const AUDIO_VOLUME_KEY = 'audioVolume';
 export const MANIA_SCROLL_SPEED_KEY = 'maniaScrollSpeed';
 export const MANIA_SCROLL_SCALE_WITH_BPM_KEY = 'maniaScaleScrollSpeedWithBpm';
 export const STANDARD_SNAKING_SLIDERS_KEY = 'standardSnakingSliders';
+export const STANDARD_SLIDER_SNAKE_OUT_KEY = 'standardSliderSnakeOut';
 export const STANDARD_SLIDER_END_CIRCLES_KEY = 'standardSliderEndCircles';
 export const POPUP_SIZE_KEY = 'popupSize';
 export const PROVIDER_PRIORITY_KEY = 'providerPriority';
@@ -15,6 +16,7 @@ export const MAX_MANIA_SCROLL_SPEED = 40;
 export const DEFAULT_MANIA_SCROLL_SPEED = 28;
 export const DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM = false;
 export const DEFAULT_STANDARD_SNAKING_SLIDERS = false;
+export const DEFAULT_STANDARD_SLIDER_SNAKE_OUT = false;
 export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
 export const DEFAULT_POPUP_SIZE = 'default';
 export const DEFAULT_DISABLED_PROVIDERS = [];
@@ -183,6 +185,13 @@ export const normalizeStandardSnakingSliders = (value) => (
   || value === '1'
 );
 
+export const normalizeStandardSliderSnakeOut = (value) => (
+  value === true
+  || value === 'true'
+  || value === 1
+  || value === '1'
+);
+
 export const normalizeStandardSliderEndCircles = (value) => (
   value === true
   || value === 'true'
@@ -217,6 +226,9 @@ export const normalizePreviewSettings = (items = {}) => ({
   standardSnakingSliders: normalizeStandardSnakingSliders(
     items?.[STANDARD_SNAKING_SLIDERS_KEY] ?? items?.standardSnakingSliders,
   ),
+  standardSliderSnakeOut: normalizeStandardSliderSnakeOut(
+    items?.[STANDARD_SLIDER_SNAKE_OUT_KEY] ?? items?.standardSliderSnakeOut,
+  ),
   standardSliderEndCircles: normalizeStandardSliderEndCircles(
     items?.[STANDARD_SLIDER_END_CIRCLES_KEY] ?? items?.standardSliderEndCircles,
   ),
@@ -234,6 +246,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [MANIA_SCROLL_SPEED_KEY]: normalized.maniaScrollSpeed,
     [MANIA_SCROLL_SCALE_WITH_BPM_KEY]: normalized.maniaScaleScrollSpeedWithBpm,
     [STANDARD_SNAKING_SLIDERS_KEY]: normalized.standardSnakingSliders,
+    [STANDARD_SLIDER_SNAKE_OUT_KEY]: normalized.standardSliderSnakeOut,
     [STANDARD_SLIDER_END_CIRCLES_KEY]: normalized.standardSliderEndCircles,
     [POPUP_SIZE_KEY]: normalized.popupSize,
     [PROVIDER_PRIORITY_KEY]: normalized.providerPriority,

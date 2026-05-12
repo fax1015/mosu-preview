@@ -3,6 +3,7 @@ import {
   MANIA_SCROLL_SPEED_KEY,
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
+  STANDARD_SLIDER_SNAKE_OUT_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
   PROVIDER_PRIORITY_KEY,
@@ -27,6 +28,7 @@ const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
 const maniaScrollTimeValue = document.querySelector('#maniaScrollTimeValue');
 const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm');
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
+const standardSliderSnakeOut = document.querySelector('#standardSliderSnakeOut');
 const standardSliderEndCircles = document.querySelector('#standardSliderEndCircles');
 const autoFallbackToggle = document.querySelector('#autoFallback');
 const providerPriorityList = document.querySelector('#providerPriorityList');
@@ -41,6 +43,7 @@ const readSettings = async () => {
       MANIA_SCROLL_SPEED_KEY,
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
+      STANDARD_SLIDER_SNAKE_OUT_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
       POPUP_SIZE_KEY,
       PROVIDER_PRIORITY_KEY,
@@ -327,6 +330,7 @@ const getFormSettings = () => ({
     maniaScrollSpeed: maniaScrollSpeedInput?.value ?? maniaScrollSpeedRange?.value,
     maniaScaleScrollSpeedWithBpm: maniaScaleScrollWithBpm?.checked,
     standardSnakingSliders: standardSnakingSliders?.checked,
+    standardSliderSnakeOut: standardSliderSnakeOut?.checked,
     standardSliderEndCircles: standardSliderEndCircles?.checked,
     providerPriority: currentProviderPriority,
     disabledProviders,
@@ -351,6 +355,7 @@ const initialize = async () => {
     || !maniaScrollSpeedInput
     || !maniaScaleScrollWithBpm
     || !standardSnakingSliders
+    || !standardSliderSnakeOut
     || !standardSliderEndCircles
   ) {
     return;
@@ -372,6 +377,7 @@ const initialize = async () => {
   renderProviderPriority();
   maniaScaleScrollWithBpm.checked = settings.maniaScaleScrollSpeedWithBpm;
   standardSnakingSliders.checked = settings.standardSnakingSliders;
+  standardSliderSnakeOut.checked = settings.standardSliderSnakeOut;
   standardSliderEndCircles.checked = settings.standardSliderEndCircles;
 
   popupSizeSelect.addEventListener('change', async () => {
@@ -415,6 +421,10 @@ const initialize = async () => {
   });
 
   standardSnakingSliders.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  standardSliderSnakeOut.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

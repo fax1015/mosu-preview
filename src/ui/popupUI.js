@@ -1,6 +1,7 @@
 const bindPopupUiEvents = ({
   elements,
   state,
+  renderer,
   registry,
   actions,
   supportLinks,
@@ -32,7 +33,6 @@ const bindPopupUiEvents = ({
     cyclePlaybackSpeed,
     togglePlayback,
     showCanvasToggleFeedback,
-    seekFromTimelineEvent,
     toggleDebugPanelOpen,
     setInfoMenuOpen,
     openExtensionOptions,
@@ -45,11 +45,107 @@ const bindPopupUiEvents = ({
     writeAudioVolumeSetting,
     showPopupToast,
     seekRelative,
+    seekToTimeMs,
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
     clearHistory,
   } = actions;
+
+  let isCtrlTimelineZoomActive = false;
+  let lastTimelinePointerEvent = null;
+  let lastPointerPosition = null;
+  let timelineZoomRafId = null;
+
+  const isPointerNearTimeline = () => {
+    if (!lastPointerPosition) {
+      return false;
+    }
+
+    const rect = timelineCanvas.getBoundingClientRect();
+    const verticalPadding = 24;
+    const horizontalPadding = 12;
+    return lastPointerPosition.clientX >= rect.left - horizontalPadding
+      && lastPointerPosition.clientX <= rect.right + horizontalPadding
+      && lastPointerPosition.clientY >= rect.top - verticalPadding
+      && lastPointerPosition.clientY <= rect.bottom + verticalPadding;
+  };
+
+  const getTimelinePointerEvent = () => {
+    if (!lastPointerPosition) {
+      return null;
+    }
+
+    return {
+      clientX: lastPointerPosition.clientX,
+      clientY: lastPointerPosition.clientY,
+    };
+  };
+
+  const scheduleTimelineZoomRender = () => {
+    if (timelineZoomRafId !== null) {
+      return;
+    }
+
+    const tick = () => {
+      timelineZoomRafId = null;
+      if (isCtrlTimelineZoomActive) {
+        updateTimelineZoomTarget({ animate: false, schedule: false });
+      }
+      renderer.renderTimeline();
+      if (isCtrlTimelineZoomActive || renderer.isTimelineAnimating()) {
+        timelineZoomRafId = requestAnimationFrame(tick);
+      }
+    };
+
+    timelineZoomRafId = requestAnimationFrame(tick);
+  };
+
+  const getTimelinePointerRatio = (event) => {
+    const rect = timelineCanvas.getBoundingClientRect();
+    if (rect.width <= 0) {
+      return 0.5;
+    }
+    return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  };
+
+  const updateTimelineZoomTarget = ({ animate = true, schedule = true } = {}) => {
+    if (!state.mapData || state.durationMs <= 0) {
+      return;
+    }
+
+    const pointerEvent = getTimelinePointerEvent();
+    if (pointerEvent && isPointerNearTimeline()) {
+      const anchorTimeMs = renderer.timeFromTimelineEvent(pointerEvent);
+      renderer.setTimelineZoom(anchorTimeMs, 4000, {
+        animate,
+        anchorRatio: getTimelinePointerRatio(pointerEvent),
+      });
+    } else {
+      renderer.setTimelineZoom(state.currentTimeMs, 4000, {
+        animate,
+        anchorRatio: 0.5,
+      });
+    }
+    if (schedule) {
+      scheduleTimelineZoomRender();
+    }
+  };
+
+  const setCtrlTimelineZoomActive = (active) => {
+    if (isCtrlTimelineZoomActive === active) {
+      return;
+    }
+
+    isCtrlTimelineZoomActive = active;
+    if (active) {
+      updateTimelineZoomTarget({ animate: true });
+      return;
+    }
+
+    renderer.resetTimelineZoom({ animate: true });
+    scheduleTimelineZoomRender();
+  };
 
   document.addEventListener('keydown', async (event) => {
     // Ignore while typing
@@ -58,6 +154,11 @@ const bindPopupUiEvents = ({
     if (isTyping) return;
 
     const { key, shiftKey } = event;
+
+    if (key === 'Control') {
+      setCtrlTimelineZoomActive(true);
+      return;
+    }
 
     // Prevention of browser scrolling for specific keys
     if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
@@ -94,6 +195,9 @@ const bindPopupUiEvents = ({
       case 'r':
         restartPreview();
         break;
+      case 'escape':
+        setCtrlTimelineZoomActive(false);
+        break;
       case '?':
       case '/':
         if (key === '?' || (key === '/' && shiftKey)) {
@@ -101,6 +205,23 @@ const bindPopupUiEvents = ({
         }
         break;
     }
+  });
+
+  document.addEventListener('keyup', (event) => {
+    if (event.key === 'Control') {
+      setCtrlTimelineZoomActive(false);
+    }
+  });
+
+  window.addEventListener('blur', () => {
+    setCtrlTimelineZoomActive(false);
+  });
+
+  document.addEventListener('mousemove', (event) => {
+    lastPointerPosition = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
   });
 
   shortcutsButton?.addEventListener('click', () => {
@@ -152,10 +273,24 @@ const bindPopupUiEvents = ({
   });
 
   timelineCanvas.addEventListener('mousedown', (event) => {
-    seekFromTimelineEvent(event);
+    lastTimelinePointerEvent = event;
+    lastPointerPosition = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
+    if (event.ctrlKey && !isCtrlTimelineZoomActive) {
+      setCtrlTimelineZoomActive(true);
+    }
+    const startTimeMs = renderer.timeFromTimelineEvent(event);
+    seekToTimeMs(startTimeMs);
 
     const onMove = (moveEvent) => {
-      seekFromTimelineEvent(moveEvent);
+      lastTimelinePointerEvent = moveEvent;
+      lastPointerPosition = {
+        clientX: moveEvent.clientX,
+        clientY: moveEvent.clientY,
+      };
+      seekToTimeMs(renderer.timeFromTimelineEvent(moveEvent));
     };
 
     const onUp = () => {
@@ -165,6 +300,19 @@ const bindPopupUiEvents = ({
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  });
+
+  timelineCanvas.addEventListener('mousemove', (event) => {
+    const hadTimelinePointerEvent = Boolean(lastTimelinePointerEvent);
+    lastTimelinePointerEvent = event;
+    lastPointerPosition = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+    };
+    if (isCtrlTimelineZoomActive) {
+      updateTimelineZoomTarget({ animate: !hadTimelinePointerEvent });
+      renderer.renderTimeline();
+    }
   });
 
   audioStatusBadge?.addEventListener('click', () => {

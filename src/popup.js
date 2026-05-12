@@ -7,6 +7,7 @@ import {
   MANIA_SCROLL_SPEED_KEY,
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
+  STANDARD_SLIDER_SNAKE_OUT_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
   PROVIDER_PRIORITY_KEY,
@@ -466,6 +467,7 @@ const readPreviewSettings = async () => {
       MANIA_SCROLL_SPEED_KEY,
       MANIA_SCROLL_SCALE_WITH_BPM_KEY,
       STANDARD_SNAKING_SLIDERS_KEY,
+      STANDARD_SLIDER_SNAKE_OUT_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
       POPUP_SIZE_KEY,
       PROVIDER_PRIORITY_KEY,
@@ -517,6 +519,7 @@ const applyPreviewSettings = (settings = {}) => {
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
   state.maniaScaleScrollSpeedWithBpm = normalized.maniaScaleScrollSpeedWithBpm;
   state.standardSnakingSliders = normalized.standardSnakingSliders;
+  state.standardSliderSnakeOut = normalized.standardSliderSnakeOut;
   state.standardSliderEndCircles = normalized.standardSliderEndCircles;
   state.providerPriority = normalized.providerPriority;
   state.disabledProviders = normalized.disabledProviders;
@@ -793,7 +796,6 @@ const {
   stopPlayback,
   playbackTick,
   togglePlayback,
-  seekFromTimelineEvent,
 } = playbackController;
 
 const showCanvasToggleFeedback = (action) => {
@@ -829,12 +831,27 @@ const seekRelative = (deltaMs) => {
   if (!state.mapData || state.durationMs <= 0) {
     return;
   }
-  const nextTime = clamp(state.currentTimeMs + deltaMs, 0, state.durationMs || 0);
+  seekToTimeMs(state.currentTimeMs + deltaMs);
+};
+
+const seekToTimeMs = (timeMs) => {
+  if (!state.mapData || state.durationMs <= 0) {
+    return;
+  }
+
+  const nextTime = clamp(timeMs, 0, state.durationMs || 0);
   syncVisualClockToMapTime(nextTime);
   if (state.audioSyncEnabled && state.audio?.src) {
-    seekAudioToMapTime(nextTime);
-    if (state.playbackMode === 'audio') {
-      resyncVisualPlaybackToAudio({ force: true });
+    try {
+      const hasTarget = seekAudioToMapTime(nextTime);
+      if (!hasTarget && state.isPlaying && state.playbackMode === 'audio') {
+        state.audio.pause();
+        state.playbackMode = 'manual';
+      } else if (state.playbackMode === 'audio') {
+        resyncVisualPlaybackToAudio({ force: true });
+      }
+    } catch {
+      // Ignore seek errors; visual playback continues.
     }
   }
   renderFrame();
@@ -1520,13 +1537,13 @@ bindPopupUiEvents({
     popupToast,
   },
   state,
+  renderer,
   registry,
   supportLinks: SUPPORT_LINKS,
   actions: {
     cyclePlaybackSpeed,
     togglePlayback,
     showCanvasToggleFeedback,
-    seekFromTimelineEvent,
     toggleDebugPanelOpen,
     setInfoMenuOpen,
     openExtensionOptions,
@@ -1539,6 +1556,7 @@ bindPopupUiEvents({
     writeAudioVolumeSetting,
     showPopupToast,
     seekRelative,
+    seekToTimeMs,
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
@@ -1608,6 +1626,8 @@ addStorageChangedListener((changes, areaName) => {
   if (
     changes[MANIA_SCROLL_SPEED_KEY]
     || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
+    || changes[STANDARD_SNAKING_SLIDERS_KEY]
+    || changes[STANDARD_SLIDER_SNAKE_OUT_KEY]
     || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
     || changes[POPUP_SIZE_KEY]
     || changes[PROVIDER_PRIORITY_KEY]
@@ -1620,6 +1640,8 @@ addStorageChangedListener((changes, areaName) => {
         ?? state.maniaScaleScrollSpeedWithBpm,
       standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
         ?? state.standardSnakingSliders,
+      standardSliderSnakeOut: changes[STANDARD_SLIDER_SNAKE_OUT_KEY]?.newValue
+        ?? state.standardSliderSnakeOut,
       standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
         ?? state.standardSliderEndCircles,
       popupSize: changes[POPUP_SIZE_KEY]?.newValue ?? state.popupSize,

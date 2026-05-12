@@ -51,15 +51,6 @@ const formatTime = (ms) => {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 };
 
-const formatTimestamp = (ms) => {
-  const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
-  const totalSeconds = Math.floor(safeMs / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  const millis = Math.floor(safeMs % 1000);
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(millis).padStart(3, '0')}`;
-};
-
 const withAlpha = (rgb, alpha) => `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${clamp(alpha, 0, 1)})`;
 
 const DEFAULT_COLOURS = [
@@ -90,8 +81,11 @@ const dedupeAdjacentPoints = (points, epsilon = 0.001) => {
 
 const trimPathToLength = (points, targetLength) => {
   const cleanPoints = dedupeAdjacentPoints(points);
-  if (cleanPoints.length < 2 || !Number.isFinite(targetLength) || targetLength <= 0) {
+  if (cleanPoints.length < 2 || !Number.isFinite(targetLength)) {
     return cleanPoints;
+  }
+  if (targetLength <= 0) {
+    return [cleanPoints[0]];
   }
 
   let remaining = targetLength;
@@ -119,6 +113,39 @@ const trimPathToLength = (points, targetLength) => {
   }
 
   return dedupeAdjacentPoints(trimmed);
+};
+
+const trimPathFromStart = (points, trimLength) => {
+  const cleanPoints = dedupeAdjacentPoints(points);
+  if (cleanPoints.length < 2 || !Number.isFinite(trimLength) || trimLength <= 0) {
+    return cleanPoints;
+  }
+
+  let remaining = trimLength;
+  for (let i = 1; i < cleanPoints.length; i += 1) {
+    const start = cleanPoints[i - 1];
+    const end = cleanPoints[i];
+    const segmentLength = pointDistance(start, end);
+    if (segmentLength <= 0) {
+      continue;
+    }
+
+    if (remaining >= segmentLength) {
+      remaining -= segmentLength;
+      continue;
+    }
+
+    const t = clamp(remaining / segmentLength, 0, 1);
+    return dedupeAdjacentPoints([
+      {
+        x: start.x + ((end.x - start.x) * t),
+        y: start.y + ((end.y - start.y) * t),
+      },
+      ...cleanPoints.slice(i),
+    ]);
+  }
+
+  return [cleanPoints[cleanPoints.length - 1]];
 };
 
 const getPathLength = (points) => {
@@ -583,14 +610,18 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency) => {
   }
 };
 
-const buildDensityBins = (objects, durationMs, bins = 150) => {
+const buildDensityBins = (objects, durationMs, bins = 150, startTimeMs = 0) => {
   if (!Array.isArray(objects) || objects.length === 0 || !Number.isFinite(durationMs) || durationMs <= 0) {
     return new Array(bins).fill(0);
   }
 
   const counts = new Array(bins).fill(0);
+  const endTimeMs = startTimeMs + durationMs;
   for (const object of objects) {
-    const ratio = clamp(object.time / durationMs, 0, 1);
+    if (!object || object.time < startTimeMs || object.time > endTimeMs) {
+      continue;
+    }
+    const ratio = clamp((object.time - startTimeMs) / durationMs, 0, 1);
     const index = Math.min(bins - 1, Math.floor(ratio * bins));
     counts[index] += 1;
   }
@@ -728,6 +759,9 @@ export class PreviewRenderer {
     this.timelineDensity = [];
     this.visualTimelineDurationMs = 1;
     this.timelineDurationAnimation = null;
+    this.timelineViewStartMs = 0;
+    this.timelineViewDurationMs = null;
+    this.timelineViewAnimation = null;
     this.comboColours = DEFAULT_COLOURS;
     this.catcherRenderX = Number.NaN;
     this.catcherRenderTime = Number.NaN;
@@ -738,6 +772,7 @@ export class PreviewRenderer {
     this.maniaScrollSpeed = DEFAULT_MANIA_SCROLL_SPEED;
     this.maniaScaleScrollSpeedWithBpm = DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM;
     this.standardSnakingSliders = false;
+    this.standardSliderSnakeOut = false;
     this.standardSliderEndCircles = true;
     this.catchRenderObjects = null;
   }
@@ -748,6 +783,7 @@ export class PreviewRenderer {
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     this.visualTimelineDurationMs = this.durationMs;
     this.timelineDurationAnimation = null;
+    this.resetTimelineZoom({ animate: false });
     this.timelineDensity = buildDensityBins(mapData?.objects || [], this.durationMs);
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours
@@ -795,12 +831,25 @@ export class PreviewRenderer {
     return Boolean(this.timelineDurationAnimation);
   }
 
+  isTimelineViewAnimating() {
+    return Boolean(this.timelineViewAnimation);
+  }
+
+  isTimelineAnimating() {
+    return this.isTimelineDurationAnimating() || this.isTimelineViewAnimating();
+  }
+
   setDuration(durationMs, { animate = false } = {}) {
     const nextDurationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     const currentVisualDurationMs = this.getVisualTimelineDuration();
     const previousDurationMs = this.durationMs;
     this.durationMs = nextDurationMs;
     this.timelineDensity = buildDensityBins(this.mapData?.objects || [], this.durationMs);
+    if (this.timelineViewDurationMs !== null && this.timelineViewDurationMs >= nextDurationMs) {
+      this.resetTimelineZoom({ animate: false });
+    } else if (this.timelineViewDurationMs !== null) {
+      this.timelineViewStartMs = clamp(this.timelineViewStartMs, 0, Math.max(0, nextDurationMs - this.timelineViewDurationMs));
+    }
 
     if (animate && nextDurationMs > currentVisualDurationMs) {
       this.visualTimelineDurationMs = currentVisualDurationMs;
@@ -830,6 +879,87 @@ export class PreviewRenderer {
     this.currentTimeMs = clamp(ms, 0, this.durationMs || 1);
   }
 
+  isTimelineZoomed() {
+    const { durationMs } = this.getTimelineViewRange();
+    return durationMs < this.durationMs - 0.5;
+  }
+
+  animateTimelineView(toStartMs, toDurationMs, animate = true) {
+    const durationMs = this.durationMs || 1;
+    const nextDurationMs = Math.min(durationMs, Math.max(1, toDurationMs));
+    const nextStartMs = clamp(toStartMs, 0, Math.max(0, durationMs - nextDurationMs));
+    const { startMs, durationMs: currentDurationMs } = this.getTimelineViewRange();
+
+    if (!animate) {
+      this.timelineViewStartMs = nextStartMs;
+      this.timelineViewDurationMs = nextDurationMs >= durationMs ? null : nextDurationMs;
+      this.timelineViewAnimation = null;
+      return;
+    }
+
+    this.timelineViewAnimation = {
+      startTime: performance.now(),
+      durationMs: 180,
+      fromStartMs: startMs,
+      fromDurationMs: currentDurationMs,
+      toStartMs: nextStartMs,
+      toDurationMs: nextDurationMs,
+    };
+    this.timelineViewStartMs = nextStartMs;
+    this.timelineViewDurationMs = nextDurationMs >= durationMs ? null : nextDurationMs;
+  }
+
+  resetTimelineZoom({ animate = true } = {}) {
+    this.animateTimelineView(0, this.durationMs || 1, animate);
+  }
+
+  setTimelineZoom(centerTimeMs, windowMs = 4000, { animate = true, anchorRatio = 0.5 } = {}) {
+    const durationMs = this.durationMs || 1;
+    const zoomDurationMs = Math.min(durationMs, Math.max(1000, Number.isFinite(windowMs) ? windowMs : 4000));
+    if (zoomDurationMs >= durationMs) {
+      this.resetTimelineZoom({ animate });
+      return;
+    }
+
+    const center = clamp(Number.isFinite(centerTimeMs) ? centerTimeMs : this.currentTimeMs, 0, durationMs);
+    const ratio = clamp(Number.isFinite(anchorRatio) ? anchorRatio : 0.5, 0, 1);
+    this.animateTimelineView(center - (zoomDurationMs * ratio), zoomDurationMs, animate);
+    this.timelineDurationAnimation = null;
+  }
+
+  getTimelineViewRange() {
+    const fullDurationMs = this.getVisualTimelineDuration();
+    let startMs = this.timelineViewDurationMs !== null ? this.timelineViewStartMs : 0;
+    let durationMs = this.timelineViewDurationMs !== null ? this.timelineViewDurationMs : fullDurationMs;
+
+    if (this.timelineViewAnimation) {
+      const progress = clamp(
+        (performance.now() - this.timelineViewAnimation.startTime) / this.timelineViewAnimation.durationMs,
+        0,
+        1,
+      );
+      const eased = easeOutCubic(progress);
+      startMs = this.timelineViewAnimation.fromStartMs
+        + ((this.timelineViewAnimation.toStartMs - this.timelineViewAnimation.fromStartMs) * eased);
+      durationMs = this.timelineViewAnimation.fromDurationMs
+        + ((this.timelineViewAnimation.toDurationMs - this.timelineViewAnimation.fromDurationMs) * eased);
+
+      if (progress >= 1) {
+        this.timelineViewAnimation = null;
+        startMs = this.timelineViewStartMs;
+        durationMs = this.timelineViewDurationMs !== null ? this.timelineViewDurationMs : fullDurationMs;
+      }
+    }
+
+    durationMs = Math.max(1, durationMs || fullDurationMs || this.durationMs || 1);
+    startMs = clamp(startMs, 0, Math.max(0, (this.durationMs || durationMs) - durationMs));
+    return {
+      startMs,
+      durationMs,
+      endMs: startMs + durationMs,
+    };
+  }
+
   setPreviewSettings(settings = {}) {
     if (Object.hasOwn(settings, 'maniaScrollSpeed')) {
       this.maniaScrollSpeed = settings.maniaScrollSpeed;
@@ -839,6 +969,9 @@ export class PreviewRenderer {
     }
     if (Object.hasOwn(settings, 'standardSnakingSliders')) {
       this.standardSnakingSliders = Boolean(settings.standardSnakingSliders);
+    }
+    if (Object.hasOwn(settings, 'standardSliderSnakeOut')) {
+      this.standardSliderSnakeOut = Boolean(settings.standardSliderSnakeOut);
     }
     if (Object.hasOwn(settings, 'standardSliderEndCircles')) {
       this.standardSliderEndCircles = Boolean(settings.standardSliderEndCircles);
@@ -1361,7 +1494,8 @@ export class PreviewRenderer {
     }
 
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    return ratio * this.durationMs;
+    const { startMs, durationMs } = this.getTimelineViewRange();
+    return startMs + (ratio * durationMs);
   }
 
   render() {
@@ -2212,15 +2346,33 @@ export class PreviewRenderer {
       if (object.kind === 'slider') {
         const fullPathPoints = buildSliderPathPointsOsu(object);
         let sliderDrawPointsOsu = fullPathPoints;
+        const fullPathLength = getPathLength(fullPathPoints);
         if (this.standardSnakingSliders && timeUntil > 0) {
           const fadeInElapsedMs = preemptMs - timeUntil;
           const snakeProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
-          const fullPathLength = getPathLength(fullPathPoints);
           if (fullPathLength > 0) {
             sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * snakeProgress);
           }
+        } else if (this.standardSliderSnakeOut && this.currentTimeMs > object.time) {
+          const sliderDuration = Math.max(1, object.endTime - object.time);
+          const slides = Math.max(1, object.slides || 1);
+          const spanDuration = sliderDuration / slides;
+          const elapsed = clamp(this.currentTimeMs - object.time, 0, sliderDuration);
+          const spanIndex = Math.min(slides - 1, Math.floor(elapsed / Math.max(1, spanDuration)));
+
+          if (spanIndex === slides - 1 && fullPathLength > 0) {
+            const spanProgress = clamp((elapsed - (spanIndex * spanDuration)) / Math.max(1, spanDuration), 0, 1);
+            if ((spanIndex % 2) === 0) {
+              sliderDrawPointsOsu = trimPathFromStart(fullPathPoints, fullPathLength * spanProgress);
+            } else {
+              sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * (1 - spanProgress));
+            }
+          }
         }
         const pathPoints = sliderDrawPointsOsu.map((p) => toCanvas(p.x, p.y));
+        if (pathPoints.length > 0) {
+          sliderTailCanvasPoint = pathPoints[pathPoints.length - 1];
+        }
         if (pathPoints.length > 1) {
           const sliderShadowAlpha = clamp(baseAlpha * 0.24, 0, 0.3);
           ctx.strokeStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderShadowAlpha);
@@ -2554,7 +2706,7 @@ export class PreviewRenderer {
     ctx.fillStyle = 'rgba(36, 34, 42, 1)';
     ctx.fillRect(0, 0, width, height);
 
-    const visualDurationMs = this.getVisualTimelineDuration();
+    const { startMs, durationMs: timelineDurationMs, endMs } = this.getTimelineViewRange();
 
     // Render Kiai Sections
     const timingPoints = this.mapData?.timingControlPoints || [];
@@ -2565,23 +2717,31 @@ export class PreviewRenderer {
         if (tp.kiai && kiaiStart === -1) {
           kiaiStart = tp.time;
         } else if (!tp.kiai && kiaiStart !== -1) {
-          const startX = (kiaiStart / visualDurationMs) * width;
-          const endX = (tp.time / visualDurationMs) * width;
-          ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
-          ctx.fillRect(startX, 0, endX - startX, height);
+          const segmentStart = Math.max(kiaiStart, startMs);
+          const segmentEnd = Math.min(tp.time, endMs);
+          if (segmentEnd > segmentStart) {
+            const startX = ((segmentStart - startMs) / timelineDurationMs) * width;
+            const endX = ((segmentEnd - startMs) / timelineDurationMs) * width;
+            ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
+            ctx.fillRect(startX, 0, endX - startX, height);
+          }
           kiaiStart = -1;
         }
       }
       if (kiaiStart !== -1) {
-        const startX = (kiaiStart / visualDurationMs) * width;
-        const endX = width;
-        ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
-        ctx.fillRect(startX, 0, endX - startX, height);
+        const segmentStart = Math.max(kiaiStart, startMs);
+        const segmentEnd = endMs;
+        if (segmentEnd > segmentStart) {
+          const startX = ((segmentStart - startMs) / timelineDurationMs) * width;
+          const endX = width;
+          ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
+          ctx.fillRect(startX, 0, endX - startX, height);
+        }
       }
     }
 
-    const density = this.isTimelineDurationAnimating()
-      ? buildDensityBins(this.mapData?.objects || [], visualDurationMs)
+    const density = this.isTimelineZoomed() || this.isTimelineDurationAnimating()
+      ? buildDensityBins(this.mapData?.objects || [], timelineDurationMs, 150, startMs)
       : (this.timelineDensity || []);
     if (density.length > 0) {
       const barWidth = width / density.length;
@@ -2595,12 +2755,14 @@ export class PreviewRenderer {
       }
     }
 
-    const progress = clamp((this.currentTimeMs / (visualDurationMs || 1)), 0, 1);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-    ctx.shadowBlur = 4;
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect((progress * width) - 1, 0, 2, height);
-    ctx.shadowBlur = 0;
+    if (this.currentTimeMs >= startMs && this.currentTimeMs <= endMs) {
+      const progress = (this.currentTimeMs - startMs) / (timelineDurationMs || 1);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+      ctx.shadowBlur = 4;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect((progress * width) - 1, 0, 2, height);
+      ctx.shadowBlur = 0;
+    }
   }
 }
 

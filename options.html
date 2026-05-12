@@ -34,10 +34,10 @@
     <section class="settings-card">
       <p id="saveStatus" class="settings-status" aria-live="polite"></p>
       <div class="settings-header">
-        <p class="settings-eyebrow">Extension settings</p>
+        <p class="settings-eyebrow">Settings</p>
         <h1>mosu! Preview</h1>
       </div>
-      
+
       <div class="settings-group">
         <h2 class="settings-section-title">popup</h2>
         <label for="popupSize" class="settings-label">Popup size</label>
@@ -95,19 +95,23 @@
 
       <div class="settings-group">
         <h2 class="settings-section-title">audio</h2>
-        <label for="providerOverride" class="settings-label">Provider override</label>
-        <div class="settings-select-wrap settings-select-wrap--drop-up">
-          <select id="providerOverride" class="settings-select">
-            <option value="auto">Auto (recommended)</option>
-            <option value="osu_direct">osu.direct</option>
-            <option value="mino">Mino (catboy.best)</option>
-            <option value="nerinyan">NeriNyan</option>
-            <option value="sayobot">Sayobot</option>
-          </select>
+        <label for="autoFallback" class="settings-toggle-card">
+          <input id="autoFallback" type="checkbox" checked />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Enable automatic fallback</span>
+            <span class="settings-toggle-description">Try other providers if the preferred one fails.</span>
+          </span>
+        </label>
+
+        <div class="settings-priority-header">
+          <label for="providerPriorityList" class="settings-label">Provider priority</label>
+          <p class="settings-help">The top enabled provider is tried first.</p>
         </div>
-        <p class="settings-help">
-          Auto prioritizes the most reliable provider and temporarily cools down failures.
-        </p>
+
+        <div id="providerPriorityList" class="settings-priority-list">
+          <!-- Priority items with toggles injected here -->
+        </div>
       </div>
     </section>
   </main>

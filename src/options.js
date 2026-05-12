@@ -5,6 +5,9 @@ import {
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
+  PROVIDER_PRIORITY_KEY,
+  DISABLED_PROVIDERS_KEY,
+  AUTO_FALLBACK_KEY,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
   ALLOWED_PROVIDER_OVERRIDES,
@@ -13,10 +16,10 @@ import {
   normalizePreviewSettings,
   toPreviewSettingsStorage,
   calculateManiaScrollTimeMs,
+  ARCHIVE_DOWNLOAD_SOURCES,
 } from './settings.js';
 import { storageGet, storageSet } from './webextension.js';
 
-const providerSelect = document.querySelector('#providerOverride');
 const popupSizeSelect = document.querySelector('#popupSize');
 const maniaScrollSpeedRange = document.querySelector('#maniaScrollSpeedRange');
 const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
@@ -25,6 +28,8 @@ const maniaScrollTimeValue = document.querySelector('#maniaScrollTimeValue');
 const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm');
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
 const standardSliderEndCircles = document.querySelector('#standardSliderEndCircles');
+const autoFallbackToggle = document.querySelector('#autoFallback');
+const providerPriorityList = document.querySelector('#providerPriorityList');
 const saveStatus = document.querySelector('#saveStatus');
 let saveStatusHideTimeout = null;
 let saveStatusClearTimeout = null;
@@ -38,15 +43,24 @@ const readSettings = async () => {
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
       POPUP_SIZE_KEY,
+      PROVIDER_PRIORITY_KEY,
+      DISABLED_PROVIDERS_KEY,
+      AUTO_FALLBACK_KEY,
     ]);
 
     return {
       providerOverride: normalizeProviderOverride(items?.[PROVIDER_OVERRIDE_KEY]),
+      providerPriority: items?.[PROVIDER_PRIORITY_KEY] || [],
+      disabledProviders: items?.[DISABLED_PROVIDERS_KEY] || [],
+      autoFallback: items?.[AUTO_FALLBACK_KEY] ?? true,
       ...normalizePreviewSettings(items),
     };
   } catch {
     return {
       providerOverride: 'auto',
+      providerPriority: [],
+      disabledProviders: [],
+      autoFallback: true,
       ...normalizePreviewSettings(),
     };
   }
@@ -58,6 +72,9 @@ const writeSettings = async (settings) => {
   try {
     await storageSet('sync', {
       [PROVIDER_OVERRIDE_KEY]: providerOverride,
+      [PROVIDER_PRIORITY_KEY]: settings?.providerPriority || [],
+      [DISABLED_PROVIDERS_KEY]: settings?.disabledProviders || [],
+      [AUTO_FALLBACK_KEY]: settings?.autoFallback ?? true,
       ...toPreviewSettingsStorage(settings),
     });
     return true;
@@ -106,6 +123,185 @@ const updateManiaScrollRangeProgress = (value) => {
   maniaScrollSpeedRange.style.setProperty('--range-progress', `${progress}%`);
 };
 
+let currentProviderPriority = [];
+let disabledProviders = [];
+
+const renderProviderPriority = () => {
+  if (!providerPriorityList) return;
+
+  const allIds = ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
+  const normalizedPriority = [...currentProviderPriority];
+  allIds.forEach((id) => {
+    if (!normalizedPriority.includes(id)) {
+      normalizedPriority.push(id);
+    }
+  });
+
+  const sortedSources = [...ARCHIVE_DOWNLOAD_SOURCES].sort((a, b) => {
+    const indexA = normalizedPriority.indexOf(a.id);
+    const indexB = normalizedPriority.indexOf(b.id);
+    return indexA - indexB;
+  });
+
+  providerPriorityList.innerHTML = '';
+  sortedSources.forEach((source, index) => {
+    const isEnabled = !disabledProviders.includes(source.id);
+    const item = document.createElement('div');
+    item.className = `priority-item ${isEnabled ? '' : 'is-disabled'}`;
+    item.draggable = true;
+    item.dataset.id = source.id;
+    item.innerHTML = `
+      <div class="priority-handle">⋮⋮</div>
+      <div class="priority-label">${source.label}</div>
+      <div class="priority-actions">
+        <div class="priority-move-btns">
+          <button type="button" class="priority-btn" data-action="up" data-id="${source.id}" title="Move up" ${index === 0 ? 'disabled' : ''}>
+            <svg viewBox="0 0 320 512"><path d="M182.6 137.4c-12.5-12.5-32.8-12.5-45.3 0l-128 128c-9.2 9.2-11.9 22.9-6.9 34.9s16.6 19.8 29.6 19.8H288c13 0 24.6-7.8 29.6-19.8s2.2-25.7-6.9-34.9l-128-128z"/></svg>
+          </button>
+          <button type="button" class="priority-btn" data-action="down" data-id="${source.id}" title="Move down" ${index === sortedSources.length - 1 ? 'disabled' : ''}>
+            <svg viewBox="0 0 320 512"><path d="M137.4 374.6c12.5 12.5 32.8 12.5 45.3 0l128-128c9.2-9.2 11.9-22.9 6.9-34.9s-16.6-19.8-29.6-19.8H32c-13 0-24.6 7.8-29.6 19.8s-2.2 25.7 6.9 34.9l128 128z"/></svg>
+          </button>
+        </div>
+        <div class="priority-toggle-wrap">
+          <label class="priority-toggle">
+            <input type="checkbox" class="priority-toggle-input" data-id="${source.id}" ${isEnabled ? 'checked' : ''} />
+            <span class="settings-toggle-mark" aria-hidden="true"></span>
+          </label>
+        </div>
+      </div>
+    `;
+
+    const handle = item.querySelector('.priority-handle');
+    handle.draggable = true;
+
+    item.addEventListener('dragstart', (e) => {
+      if (!e.target.closest('.priority-handle')) {
+        e.preventDefault();
+        return;
+      }
+
+      e.dataTransfer.setData('text/plain', source.id);
+      e.dataTransfer.effectAllowed = 'move';
+      
+      const img = new Image();
+      img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+      e.dataTransfer.setDragImage(img, 0, 0);
+
+      // Use requestAnimationFrame to avoid browser cancelling drag due to immediate style changes
+      requestAnimationFrame(() => {
+        item.classList.add('is-dragging');
+        providerPriorityList.classList.add('is-dragging-active');
+      });
+    });
+
+    item.addEventListener('dragend', async () => {
+      item.classList.remove('is-dragging');
+      providerPriorityList.classList.remove('is-dragging-active');
+
+      // Reset any animation styles applied during dragging
+      providerPriorityList.querySelectorAll('.priority-item').forEach(el => {
+        el.style.transform = '';
+        el.style.transition = '';
+      });
+
+      const newOrder = [...providerPriorityList.querySelectorAll('.priority-item')].map(el => el.dataset.id);
+      if (JSON.stringify(newOrder) !== JSON.stringify(currentProviderPriority)) {
+        currentProviderPriority = newOrder;
+        renderProviderPriority();
+        await persistFormSettings();
+      }
+    });
+
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const draggingItem = providerPriorityList.querySelector('.is-dragging');
+      if (!draggingItem || draggingItem === item) return;
+
+      // FLIP: First - capture current positions
+      const items = [...providerPriorityList.querySelectorAll('.priority-item')];
+      const positions = items.map(el => el.getBoundingClientRect().top);
+
+      const bounding = item.getBoundingClientRect();
+      const offset = e.clientY - (bounding.top + bounding.height / 2);
+      
+      let changed = false;
+      if (offset > 0) {
+        if (item.nextSibling !== draggingItem) {
+          item.after(draggingItem);
+          changed = true;
+        }
+      } else {
+        if (item.previousSibling !== draggingItem) {
+          item.before(draggingItem);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        // FLIP: Last, Invert, Play
+        const newItems = [...providerPriorityList.querySelectorAll('.priority-item')];
+        newItems.forEach((el, i) => {
+          if (el === draggingItem) return;
+          const oldTop = positions[items.indexOf(el)];
+          const newTop = el.getBoundingClientRect().top;
+          const delta = oldTop - newTop;
+          
+          if (delta !== 0) {
+            el.style.transition = 'none';
+            el.style.transform = `translateY(${delta}px)`;
+            el.offsetHeight; // trigger reflow
+            el.style.transition = 'transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)';
+            el.style.transform = 'translateY(0)';
+          }
+        });
+      }
+    });
+
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+    });
+
+    providerPriorityList.appendChild(item);
+  });
+};
+
+const moveProvider = async (id, direction) => {
+  const allIds = ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
+  if (currentProviderPriority.length === 0) {
+    currentProviderPriority = [...allIds];
+  }
+
+  const index = currentProviderPriority.indexOf(id);
+  if (index === -1) return;
+
+  const newIndex = direction === 'up' ? index - 1 : index + 1;
+  if (newIndex < 0 || newIndex >= currentProviderPriority.length) return;
+
+  const temp = currentProviderPriority[index];
+  currentProviderPriority[index] = currentProviderPriority[newIndex];
+  currentProviderPriority[newIndex] = temp;
+
+  renderProviderPriority();
+  await persistFormSettings();
+};
+
+const toggleProvider = async (id, isEnabled) => {
+  if (isEnabled) {
+    disabledProviders = disabledProviders.filter((d) => d !== id);
+  } else if (!disabledProviders.includes(id)) {
+    disabledProviders.push(id);
+  }
+
+  // Update DOM directly to allow transitions to play
+  const item = providerPriorityList.querySelector(`.priority-item[data-id="${id}"]`);
+  if (item) {
+    item.classList.toggle('is-disabled', !isEnabled);
+  }
+
+  await persistFormSettings();
+};
+
 const renderManiaScrollSpeed = (value) => {
   const normalized = normalizePreviewSettings({ maniaScrollSpeed: value }).maniaScrollSpeed;
   const baseScrollTimeMs = calculateManiaScrollTimeMs(normalized);
@@ -126,9 +322,9 @@ const renderManiaScrollSpeed = (value) => {
 };
 
 const getFormSettings = () => ({
-  providerOverride: ALLOWED_PROVIDER_OVERRIDES.has(providerSelect?.value)
-    ? providerSelect.value
-    : 'auto',
+  providerPriority: currentProviderPriority,
+  disabledProviders: disabledProviders,
+  autoFallback: autoFallbackToggle?.checked ?? true,
   ...normalizePreviewSettings({
     popupSize: popupSizeSelect?.value,
     maniaScrollSpeed: maniaScrollSpeedInput?.value ?? maniaScrollSpeedRange?.value,
@@ -150,8 +346,7 @@ const persistFormSettings = async () => {
 
 const initialize = async () => {
   if (
-    !providerSelect
-    || !popupSizeSelect
+    !popupSizeSelect
     || !maniaScrollSpeedRange
     || !maniaScrollSpeedInput
     || !maniaScaleScrollWithBpm
@@ -167,16 +362,17 @@ const initialize = async () => {
   maniaScrollSpeedInput.max = String(MAX_MANIA_SCROLL_SPEED);
 
   const settings = await readSettings();
-  providerSelect.value = settings.providerOverride;
+  currentProviderPriority = settings.providerPriority || [];
+  disabledProviders = settings.disabledProviders || [];
+  if (autoFallbackToggle) {
+    autoFallbackToggle.checked = settings.autoFallback;
+  }
   popupSizeSelect.value = settings.popupSize;
   renderManiaScrollSpeed(settings.maniaScrollSpeed);
+  renderProviderPriority();
   maniaScaleScrollWithBpm.checked = settings.maniaScaleScrollSpeedWithBpm;
   standardSnakingSliders.checked = settings.standardSnakingSliders;
   standardSliderEndCircles.checked = settings.standardSliderEndCircles;
-
-  providerSelect.addEventListener('change', async () => {
-    await persistFormSettings();
-  });
 
   popupSizeSelect.addEventListener('change', async () => {
     await persistFormSettings();
@@ -214,12 +410,43 @@ const initialize = async () => {
     await persistFormSettings();
   });
 
+  autoFallbackToggle?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
   standardSnakingSliders.addEventListener('change', async () => {
     await persistFormSettings();
   });
 
   standardSliderEndCircles.addEventListener('change', async () => {
     await persistFormSettings();
+  });
+
+  providerPriorityList.addEventListener('click', async (event) => {
+    const btn = event.target.closest('.priority-btn');
+    if (!btn) return;
+    const { id, action } = btn.dataset;
+    if (id && action) {
+      await moveProvider(id, action);
+    }
+  });
+
+  providerPriorityList.addEventListener('change', async (event) => {
+    const toggle = event.target.closest('.priority-toggle-input');
+    if (!toggle) return;
+    const { id } = toggle.dataset;
+    if (id) {
+      await toggleProvider(id, toggle.checked);
+    }
+  });
+
+  providerPriorityList.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+  });
+
+  providerPriorityList.addEventListener('dragenter', (e) => {
+    e.preventDefault();
   });
 };
 

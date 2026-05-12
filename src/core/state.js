@@ -31,6 +31,7 @@ const createInitialState = () => {
     debugLogs: [],
     debugPanelOpen: false,
     infoMenuOpen: false,
+    shortcutsMenuOpen: false,
     activeSetId: null,
     providerOverride: 'auto',
     currentArchiveProviderLabel: '',
@@ -73,6 +74,7 @@ const setTimelineState = (patch = {}) => {
 const setUiState = (patch = {}) => {
   if (Object.hasOwn(patch, 'debugPanelOpen')) state.debugPanelOpen = Boolean(patch.debugPanelOpen);
   if (Object.hasOwn(patch, 'infoMenuOpen')) state.infoMenuOpen = Boolean(patch.infoMenuOpen);
+  if (Object.hasOwn(patch, 'shortcutsMenuOpen')) state.shortcutsMenuOpen = Boolean(patch.shortcutsMenuOpen);
   if (Object.hasOwn(patch, 'popupSize')) state.popupSize = patch.popupSize;
 };
 

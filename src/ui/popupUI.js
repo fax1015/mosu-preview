@@ -20,6 +20,11 @@ const bindPopupUiEvents = ({
     debugClearButton,
     debugCloseButton,
     volumeSlider,
+    timeLabel,
+    shortcutsButton,
+    shortcutsBackdrop,
+    shortcutsCloseButton,
+    recentClearBtn,
   } = elements;
 
   const {
@@ -37,10 +42,96 @@ const bindPopupUiEvents = ({
     setDebugPanelOpen,
     applyAudioVolume,
     writeAudioVolumeSetting,
+    showPopupToast,
+    seekRelative,
+    restartPreview,
+    toggleMute,
+    setShortcutsMenuOpen,
+    clearHistory,
   } = actions;
+
+  document.addEventListener('keydown', async (event) => {
+    // Ignore while typing
+    const isTyping = ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)
+      || event.target.isContentEditable;
+    if (isTyping) return;
+
+    const { key, shiftKey } = event;
+
+    // Prevention of browser scrolling for specific keys
+    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
+      event.preventDefault();
+    }
+
+    switch (key.toLowerCase()) {
+      case ' ': {
+        const wasPlaying = state.isPlaying;
+        const isPlayingNow = await togglePlayback();
+        if (isPlayingNow || wasPlaying) {
+          showCanvasToggleFeedback(wasPlaying ? 'pause' : 'play');
+        }
+        break;
+      }
+      case 'arrowleft':
+        seekRelative(shiftKey ? -15000 : -5000);
+        break;
+      case 'arrowright':
+        seekRelative(shiftKey ? 15000 : 5000);
+        break;
+      case 'arrowup':
+        applyAudioVolume(state.volume + 0.05);
+        break;
+      case 'arrowdown':
+        applyAudioVolume(state.volume - 0.05);
+        break;
+      case 's':
+        cyclePlaybackSpeed();
+        break;
+      case 'm':
+        toggleMute();
+        break;
+      case 'r':
+        restartPreview();
+        break;
+      case '?':
+      case '/':
+        if (key === '?' || (key === '/' && shiftKey)) {
+          setShortcutsMenuOpen(!state.shortcutsMenuOpen);
+        }
+        break;
+    }
+  });
+
+  shortcutsButton?.addEventListener('click', () => {
+    setShortcutsMenuOpen(!state.shortcutsMenuOpen);
+  });
+
+  shortcutsBackdrop?.addEventListener('click', () => {
+    setShortcutsMenuOpen(false);
+  });
+
+  shortcutsCloseButton?.addEventListener('click', () => {
+    setShortcutsMenuOpen(false);
+  });
+
+  recentClearBtn?.addEventListener('click', () => {
+    void clearHistory();
+  });
 
   togglePlaybackButton.addEventListener('click', () => {
     cyclePlaybackSpeed();
+  });
+
+  timeLabel?.addEventListener('click', () => {
+    const text = timeLabel.textContent || '';
+    const currentPart = text.split('/')[0].trim();
+    if (!currentPart) return;
+
+    navigator.clipboard.writeText(currentPart).then(() => {
+      showPopupToast(`Copied ${currentPart}`);
+    }).catch((err) => {
+      addDebugLog(`ui: failed to copy timestamp -> ${err?.message || 'unknown error'}`);
+    });
   });
 
   playfieldCanvas.addEventListener('click', async () => {
@@ -113,12 +204,6 @@ const bindPopupUiEvents = ({
     setDebugPanelOpen(false);
   });
 
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.infoMenuOpen) {
-      setInfoMenuOpen(false);
-    }
-  });
-
   volumeSlider?.addEventListener('input', () => {
     const next = Number(volumeSlider.value) / 100;
     applyAudioVolume(next);
@@ -144,6 +229,14 @@ const bindPopupUiEvents = ({
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (state.infoMenuOpen) {
+        setInfoMenuOpen(false);
+        return;
+      }
+      if (state.shortcutsMenuOpen) {
+        setShortcutsMenuOpen(false);
+        return;
+      }
       window.close();
     }
   });

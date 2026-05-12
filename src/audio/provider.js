@@ -99,8 +99,12 @@ const getProviderAverageSuccessMs = (providerId) => {
   return stats.totalSuccessMs / stats.timedSuccesses;
 };
 
-const getAutoOrderedProviders = () => {
-  const available = ARCHIVE_DOWNLOAD_SOURCES.filter((source) => !isProviderInCooldown(source.id));
+const getAutoOrderedProviders = (userPriority = []) => {
+  const baseOrder = userPriority.length > 0
+    ? userPriority.map((id) => getProviderById(id)).filter(Boolean)
+    : ARCHIVE_DOWNLOAD_SOURCES;
+
+  const available = baseOrder.filter((source) => !isProviderInCooldown(source.id));
   return available.sort((a, b) => {
     const aScore = getProviderReliabilityScore(a.id);
     const bScore = getProviderReliabilityScore(b.id);
@@ -121,6 +125,16 @@ const getAutoOrderedProviders = () => {
     if (aAttempts !== bAttempts) {
       return bAttempts - aAttempts;
     }
+
+    // Use user priority as the final tie-breaker if available
+    if (userPriority.length > 0) {
+      const aIdx = userPriority.indexOf(a.id);
+      const bIdx = userPriority.indexOf(b.id);
+      if (aIdx !== -1 && bIdx !== -1) {
+        return aIdx - bIdx;
+      }
+    }
+
     return a.rank - b.rank;
   });
 };
@@ -164,31 +178,43 @@ const createThrottledArchiveProgressReporter = (downstream, providerLabel, {
   };
 };
 
-const getProviderSequenceForDownload = (providerOverride = 'auto') => {
+const getProviderSequenceForDownload = (
+  providerOverride = 'auto',
+  userPriority = [],
+  disabledProviders = [],
+  autoFallback = true,
+) => {
   const normalizedOverride = normalizeProviderOverride(providerOverride);
   if (normalizedOverride !== 'auto') {
     const forced = getProviderById(normalizedOverride);
     return forced ? [forced] : [];
   }
 
-  const autoOrdered = getAutoOrderedProviders();
+  const allIds = ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
+  const normalizedPriority = [...userPriority];
+  allIds.forEach((id) => {
+    if (!normalizedPriority.includes(id)) {
+      normalizedPriority.push(id);
+    }
+  });
+
+  const enabledPriority = normalizedPriority.filter((id) => !disabledProviders.includes(id));
+  if (enabledPriority.length === 0) {
+    return [];
+  }
+
+  if (!autoFallback) {
+    const forced = getProviderById(enabledPriority[0]);
+    return forced ? [forced] : [];
+  }
+
+  const autoOrdered = getAutoOrderedProviders(enabledPriority);
   if (autoOrdered.length > 0) {
     return autoOrdered;
   }
 
-  return [...ARCHIVE_DOWNLOAD_SOURCES].sort((a, b) => {
-    const aScore = getProviderReliabilityScore(a.id);
-    const bScore = getProviderReliabilityScore(b.id);
-    if (aScore !== bScore) {
-      return bScore - aScore;
-    }
-    const aAvgSuccessMs = getProviderAverageSuccessMs(a.id);
-    const bAvgSuccessMs = getProviderAverageSuccessMs(b.id);
-    if (aAvgSuccessMs !== bAvgSuccessMs) {
-      return aAvgSuccessMs - bAvgSuccessMs;
-    }
-    return a.rank - b.rank;
-  });
+  // Fallback if all in cooldown
+  return enabledPriority.map((id) => getProviderById(id)).filter(Boolean);
 };
 
 const combineSignals = (signal, controller) => {
@@ -326,10 +352,22 @@ const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIME
   }
 };
 
-const downloadBeatmapArchive = async (setId, providerOverride = 'auto', hooks = {}) => {
+const downloadBeatmapArchive = async (
+  setId,
+  providerOverride = 'auto',
+  hooks = {},
+  userPriority = [],
+  disabledProviders = [],
+  autoFallback = true,
+) => {
   const { onTryingSource, onDownloadProgress, signal } = hooks;
   const failures = [];
-  const sources = getProviderSequenceForDownload(providerOverride);
+  const sources = getProviderSequenceForDownload(
+    providerOverride,
+    userPriority,
+    disabledProviders,
+    autoFallback,
+  );
   const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
 
   if (!sources.length) {

@@ -313,6 +313,7 @@ export const parseMapPreviewData = (content, options = {}) => {
       bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
       svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,
       omitFirstBarLine: Boolean((tp.effects || 0) & 8),
+      kiai: Boolean((tp.effects || 0) & 1),
     })),
     comboColours: parseColours(content),
     maxObjectTime,

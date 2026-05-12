@@ -9,6 +9,9 @@ import {
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
   POPUP_SIZE_KEY,
+  PROVIDER_PRIORITY_KEY,
+  DISABLED_PROVIDERS_KEY,
+  AUTO_FALLBACK_KEY,
   POPUP_SIZE_PRESETS,
   normalizeProviderOverride,
   normalizePreviewSettings,
@@ -25,6 +28,7 @@ import {
   storageSet,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
+import { getHistory, addToHistory, clearHistory } from './core/history.js';
 import {
   state,
   resetState,
@@ -93,6 +97,14 @@ const infoCloseButton = document.querySelector('#mapPreviewInfoCloseBtn');
 const infoOptionsButton = document.querySelector('#mapPreviewInfoOptionsBtn');
 const infoIssueButton = document.querySelector('#mapPreviewInfoIssueBtn');
 const infoOsuButton = document.querySelector('#mapPreviewInfoOsuBtn');
+const shortcutsButton = document.querySelector('#mapPreviewHelpBtn');
+const shortcutsModal = document.querySelector('#mapPreviewShortcutsModal');
+const shortcutsBackdrop = document.querySelector('#mapPreviewShortcutsBackdrop');
+const shortcutsCloseButton = document.querySelector('#mapPreviewShortcutsCloseBtn');
+
+const recentPanel = document.querySelector('#mapPreviewRecentPanel');
+const recentList = document.querySelector('#mapPreviewRecentList');
+const recentClearBtn = document.querySelector('#mapPreviewRecentClearBtn');
 
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
 const CACHE_KEY = 'mosuPreviewCacheV1';
@@ -323,6 +335,50 @@ const openSupportLink = async (url) => {
   setInfoMenuOpen(false);
 };
 
+const renderShortcutsMenu = () => {
+  if (shortcutsModal) {
+    shortcutsModal.hidden = !state.shortcutsMenuOpen;
+  }
+};
+
+const setShortcutsMenuOpen = (isOpen) => {
+  if (isOpen) {
+    setInfoMenuOpen(false);
+  }
+  setUiState({ shortcutsMenuOpen: isOpen });
+  renderShortcutsMenu();
+};
+
+const renderRecentPanel = async () => {
+  if (!recentPanel || !recentList) return;
+
+  const history = await getHistory();
+  if (history.length === 0) {
+    recentPanel.hidden = true;
+    return;
+  }
+
+  recentPanel.hidden = false;
+  recentList.innerHTML = '';
+
+  history.forEach((entry) => {
+    const item = document.createElement('div');
+    item.className = 'map-preview-recent-item';
+    item.innerHTML = `
+      <div class="map-preview-recent-thumbnail" style="background-image: url(https://assets.ppy.sh/beatmaps/${entry.beatmapSetId}/covers/list.jpg)"></div>
+      <div class="map-preview-recent-info">
+        <div class="map-preview-recent-item-title">${entry.title}</div>
+        <div class="map-preview-recent-item-meta">${entry.artist} // ${entry.creator}</div>
+      </div>
+    `;
+    item.addEventListener('click', () => {
+      const url = `https://osu.ppy.sh/beatmapsets/${entry.beatmapSetId}`;
+      createTab({ url });
+    });
+    recentList.appendChild(item);
+  });
+};
+
 const openExtensionOptions = async () => {
   try {
     await openOptionsPage();
@@ -384,6 +440,7 @@ const readPreviewSettings = async () => {
       STANDARD_SNAKING_SLIDERS_KEY,
       STANDARD_SLIDER_END_CIRCLES_KEY,
       POPUP_SIZE_KEY,
+      PROVIDER_PRIORITY_KEY,
     ]);
     return normalizePreviewSettings(items);
   } catch {
@@ -431,6 +488,7 @@ const applyPreviewSettings = (settings = {}) => {
   state.maniaScaleScrollSpeedWithBpm = normalized.maniaScaleScrollSpeedWithBpm;
   state.standardSnakingSliders = normalized.standardSnakingSliders;
   state.standardSliderEndCircles = normalized.standardSliderEndCircles;
+  state.providerPriority = normalized.providerPriority;
   applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
@@ -735,6 +793,47 @@ const setStatus = (text, isError = false) => {
   }
 };
 
+const seekRelative = (deltaMs) => {
+  if (!state.mapData || state.durationMs <= 0) {
+    return;
+  }
+  const nextTime = clamp(state.currentTimeMs + deltaMs, 0, state.durationMs || 0);
+  syncVisualClockToMapTime(nextTime);
+  if (state.audioSyncEnabled && state.audio?.src) {
+    seekAudioToMapTime(nextTime);
+    if (state.playbackMode === 'audio') {
+      resyncVisualPlaybackToAudio({ force: true });
+    }
+  }
+  renderFrame();
+};
+
+const restartPreview = () => {
+  if (!state.mapData || state.durationMs <= 0) {
+    return;
+  }
+  syncVisualClockToMapTime(0);
+  if (state.audioSyncEnabled && state.audio?.src) {
+    seekAudioToMapTime(0);
+    if (state.playbackMode === 'audio') {
+      resyncVisualPlaybackToAudio({ force: true });
+    }
+  }
+  if (!state.isPlaying) {
+    void togglePlayback();
+  }
+  renderFrame();
+};
+
+const toggleMute = () => {
+  if (state.volume > 0) {
+    state.preMuteVolume = state.volume;
+    applyAudioVolume(0);
+  } else {
+    applyAudioVolume(state.preMuteVolume || 0.8);
+  }
+};
+
 const setMetadataText = () => {
   if (!state.metadata || !state.mapData) {
     titleLine.textContent = 'Map Preview';
@@ -933,7 +1032,12 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
     fullAudioError: '',
   });
   setFullAudioLoading(true);
-  const firstTrySequence = getProviderSequenceForDownload(state.providerOverride);
+  const firstTrySequence = getProviderSequenceForDownload(
+    state.providerOverride,
+    state.providerPriority,
+    state.disabledProviders,
+    state.autoFallback,
+  );
   showTryingArchiveProviderBadge(
     firstTrySequence[0]?.label ?? getProviderDisplayName(state.providerOverride),
   );
@@ -957,7 +1061,19 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
         setId,
         audioFilename: audioFileName,
         providerOverride: state.providerOverride,
-        jobId,
+        providerPriority: state.providerPriority,
+        disabledProviders: state.disabledProviders,
+        autoFallback: state.autoFallback,
+        onTryingSource: (label) => {
+          if (jobId === state.fullAudioJobId) {
+            showTryingArchiveProviderBadge(label);
+          }
+        },
+        onDownloadProgress: (progress) => {
+          if (jobId === state.fullAudioJobId) {
+            showTryingArchiveProviderBadge(progress.providerLabel, progress);
+          }
+        },
       });
     } catch (swMessageError) {
       addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
@@ -970,6 +1086,7 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
         setId,
         audioFilename: audioFileName,
         providerOverride: state.providerOverride,
+        userPriority: state.providerPriority,
         onTryingSource: showTryingArchiveProviderBadge,
         onDownloadProgress: (evt) => {
           if (jobId !== state.fullAudioJobId) {
@@ -1052,7 +1169,7 @@ const runAudioFetchProbe = async () => {
     return;
   }
 
-  const sources = getProviderSequenceForDownload(state.providerOverride);
+  const sources = getProviderSequenceForDownload(state.providerOverride, state.providerPriority);
   if (!sources.length) {
     addDebugLog('probe: no providers available');
     return;
@@ -1229,14 +1346,17 @@ const initializePreviewForCurrentTab = async () => {
       versionLine.textContent = '';
       versionLine.title = '';
       configureAudioPreview(null, 0);
-      if (info.unsupportedSite) {
+      if (unsupportedAscii) {
         setUnsupportedMode(true);
-        titleLine.textContent = 'unsupported website :(';
-        setStatus(info.reason, false);
+        void renderRecentPanel();
       } else {
         setUnsupportedMode(false);
         titleLine.textContent = 'Preview unavailable';
         setStatus(info.reason, true);
+      }
+      if (recentPanel) {
+        const history = await getHistory();
+        recentPanel.hidden = history.length === 0;
       }
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
@@ -1298,9 +1418,18 @@ const initializePreviewForCurrentTab = async () => {
     });
     configureAudioPreview(resolvedSetId, metadata.previewTime);
 
+
     renderer.setBeatmap(mapData, breaks, durationMs);
     syncPlaybackDuration();
     setMetadataText();
+
+    void addToHistory({
+      beatmapId: metadata.beatmapId || info.beatmapId || resolvedSetId,
+      beatmapSetId: resolvedSetId,
+      title: metadata.title,
+      artist: metadata.artist,
+      creator: metadata.creator,
+    });
     renderFrame();
 
     togglePlaybackButton.disabled = false;
@@ -1354,6 +1483,11 @@ bindPopupUiEvents({
     debugClearButton,
     debugCloseButton,
     volumeSlider,
+    timeLabel,
+    shortcutsButton,
+    shortcutsBackdrop,
+    shortcutsCloseButton,
+    recentClearBtn,
   },
   state,
   registry,
@@ -1373,6 +1507,15 @@ bindPopupUiEvents({
     setDebugPanelOpen,
     applyAudioVolume,
     writeAudioVolumeSetting,
+    showPopupToast,
+    seekRelative,
+    restartPreview,
+    toggleMute,
+    setShortcutsMenuOpen,
+    clearHistory: async () => {
+      await clearHistory();
+      void renderRecentPanel();
+    },
   },
 });
 
@@ -1435,9 +1578,11 @@ addStorageChangedListener((changes, areaName) => {
   if (
     changes[MANIA_SCROLL_SPEED_KEY]
     || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
-    || changes[STANDARD_SNAKING_SLIDERS_KEY]
     || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
     || changes[POPUP_SIZE_KEY]
+    || changes[PROVIDER_PRIORITY_KEY]
+    || changes[DISABLED_PROVIDERS_KEY]
+    || changes[AUTO_FALLBACK_KEY]
   ) {
     applyPreviewSettings({
       maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
@@ -1448,6 +1593,9 @@ addStorageChangedListener((changes, areaName) => {
       standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
         ?? state.standardSliderEndCircles,
       popupSize: changes[POPUP_SIZE_KEY]?.newValue ?? state.popupSize,
+      providerPriority: changes[PROVIDER_PRIORITY_KEY]?.newValue ?? state.providerPriority,
+      disabledProviders: changes[DISABLED_PROVIDERS_KEY]?.newValue ?? state.disabledProviders,
+      autoFallback: changes[AUTO_FALLBACK_KEY]?.newValue ?? state.autoFallback,
     });
 
     if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {

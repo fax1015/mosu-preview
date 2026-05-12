@@ -2546,6 +2546,31 @@ export class PreviewRenderer {
     ctx.fillRect(0, 0, width, height);
 
     const visualDurationMs = this.getVisualTimelineDuration();
+
+    // Render Kiai Sections
+    const timingPoints = this.mapData?.timingControlPoints || [];
+    if (timingPoints.length > 0) {
+      let kiaiStart = -1;
+      for (let i = 0; i < timingPoints.length; i += 1) {
+        const tp = timingPoints[i];
+        if (tp.kiai && kiaiStart === -1) {
+          kiaiStart = tp.time;
+        } else if (!tp.kiai && kiaiStart !== -1) {
+          const startX = (kiaiStart / visualDurationMs) * width;
+          const endX = (tp.time / visualDurationMs) * width;
+          ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
+          ctx.fillRect(startX, 0, endX - startX, height);
+          kiaiStart = -1;
+        }
+      }
+      if (kiaiStart !== -1) {
+        const startX = (kiaiStart / visualDurationMs) * width;
+        const endX = width;
+        ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
+        ctx.fillRect(startX, 0, endX - startX, height);
+      }
+    }
+
     const density = this.isTimelineDurationAnimating()
       ? buildDensityBins(this.mapData?.objects || [], visualDurationMs)
       : (this.timelineDensity || []);

@@ -303,10 +303,10 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-unsupported {
+    min-height: 150px;
     display: none;
     position: relative;
     overflow: hidden;
-    min-height: 248px;
     border-radius: calc(var(--border-radius) - 2px);
     border: 1px solid rgba(255, 255, 255, 0.1);
     background: rgb(24, 27, 33);
@@ -331,6 +331,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 .map-preview-popup.is-unsupported {
     min-height: calc(100vh - 16px);
     gap: 0;
+    overflow: hidden;
 }
 
 .map-preview-popup.is-unsupported> :not(.map-preview-unsupported):not(.map-preview-recent-panel) {
@@ -1047,7 +1048,6 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     flex-direction: column;
     gap: 0.75rem;
     padding-top: 1rem;
-    min-height: 240px;
     max-height: 600px;
     overflow: hidden;
     transition: max-height 0.35s cubic-bezier(0.32, 0.72, 0, 1),

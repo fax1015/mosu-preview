@@ -15,8 +15,7 @@
     "https://txy1.sayobot.cn/*",
     "https://catboy.best/*",
     "https://osu.sayobot.cn/*",
-    "https://assets.ppy.sh/*",
-    "https://api.chimu.moe/*"
+    "https://assets.ppy.sh/*"
   ],
   "icons": {
     "16": "assets/icons/icon16.png",
@@ -60,6 +59,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src https://osu.ppy.sh https://b.ppy.sh https://osu.direct https://api.nerinyan.moe https://txy1.sayobot.cn https://catboy.best https://osu.sayobot.cn https://api.chimu.moe; font-src 'self';"
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src https://osu.ppy.sh https://b.ppy.sh https://osu.direct https://api.nerinyan.moe https://txy1.sayobot.cn https://catboy.best https://osu.sayobot.cn; font-src 'self';"
   }
 }

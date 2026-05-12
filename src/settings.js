@@ -49,13 +49,6 @@ export const ARCHIVE_DOWNLOAD_SOURCES = Object.freeze([
     url: (setId) => `https://txy1.sayobot.cn/beatmaps/download/novideo/${setId}?server=null`,
     credentials: 'omit',
   }),
-  Object.freeze({
-    id: 'chimu',
-    label: 'Chimu',
-    rank: 4,
-    url: (setId) => `https://api.chimu.moe/v1/download/${setId}?n=1`,
-    credentials: 'omit',
-  }),
 ]);
 
 export const ALLOWED_PROVIDER_OVERRIDES = Object.freeze(

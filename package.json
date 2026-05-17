@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "package": "node scripts/package.mjs",
+    "package:chrome": "node scripts/package.mjs chrome",
+    "package:firefox": "node scripts/package.mjs firefox",
     "test": "node --test"
   }
 }

@@ -71,6 +71,15 @@ the extension does not inject content scripts into arbitrary pages. it runs from
 2. click **Load Temporary Add-on...**.
 3. select the `mosu-preview` zip file/xpi file.
 
+## package
+
+run `npm run package` to create release archives in `dist/`:
+
+- `mosu!-preview-chrome v{version}.zip`
+- `mosu!-preview-firefox v{version}.xpi`
+
+to build just one target, run `npm run package:chrome` or `npm run package:firefox`.
+
 ## notes
 
 this extension is kinda like a "refreshed" version of [osu! preview](https://github.com/JerryZhu99/osu-preview), updated to fit chrome's manifest V3 and firefox's webextension APIs. 

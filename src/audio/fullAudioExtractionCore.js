@@ -1,13 +1,12 @@
-import { getAudioMimeType, normalizePath } from './cache.js';
+import { getAudioMimeType, normalizePath, writeCachedFullAudioBlob } from './cache.js';
 import { downloadBeatmapArchive } from './provider.js';
 import { extractZipEntry, parseZipEntries, pickAudioEntryFromZip } from './zip.js';
-import { uint8ToBase64 } from '../core/base64Payload.js';
 
 /**
- * Downloads the beatmap archive, extracts the audio entry, returns a base64-safe payload for messaging.
- * Shared by the service worker and (on failure there) the popup fallback, which mirrors pre-SW behavior.
+ * Downloads the beatmap archive and extracts the selected audio entry.
+ * Shared by the service worker and popup fallback.
  */
-const extractFullBeatmapAudioToPayload = async ({
+const extractFullBeatmapAudio = async ({
   setId,
   audioFilename,
   providerOverride = 'auto',
@@ -45,7 +44,6 @@ const extractFullBeatmapAudioToPayload = async ({
     const audioBytes = await extractZipEntry(archiveBytes, pickedEntry);
     const standalone = new Uint8Array(audioBytes.byteLength);
     standalone.set(audioBytes);
-    const audioBase64 = uint8ToBase64(standalone);
     return {
       ok: true,
       sourceLabel,
@@ -54,11 +52,35 @@ const extractFullBeatmapAudioToPayload = async ({
       normalizedPickedAudioFilename: normalizePath(pickedEntry.name).toLowerCase(),
       normalizedRequestedAudioFilename: normalizePath(normalizedAudio).toLowerCase(),
       mime: getAudioMimeType(pickedEntry.name),
-      audioBase64,
+      audioBytes: standalone,
     };
   } catch (error) {
     return { ok: false, error: error?.message || 'archive download failed' };
   }
 };
 
-export { extractFullBeatmapAudioToPayload };
+const extractFullBeatmapAudioToCache = async (options = {}) => {
+  const result = await extractFullBeatmapAudio(options);
+  if (!result?.ok) {
+    return result;
+  }
+
+  const audioBlob = new Blob([result.audioBytes], { type: result.mime || getAudioMimeType(result.pickedAudioFilename) });
+  const wroteRequested = await writeCachedFullAudioBlob(options.setId, result.requestedAudioFilename, audioBlob);
+  if (!wroteRequested) {
+    return { ok: false, error: 'Could not write extracted audio to cache.' };
+  }
+
+  return {
+    ok: true,
+    sourceLabel: result.sourceLabel,
+    pickedAudioFilename: result.pickedAudioFilename,
+    requestedAudioFilename: result.requestedAudioFilename,
+    normalizedPickedAudioFilename: result.normalizedPickedAudioFilename,
+    normalizedRequestedAudioFilename: result.normalizedRequestedAudioFilename,
+    mime: result.mime,
+    byteLength: result.audioBytes.byteLength,
+  };
+};
+
+export { extractFullBeatmapAudio, extractFullBeatmapAudioToCache };

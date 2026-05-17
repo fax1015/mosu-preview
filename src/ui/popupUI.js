@@ -7,11 +7,12 @@ const bindPopupUiEvents = ({
   supportLinks,
 }) => {
   const {
-    togglePlaybackButton,
+    speedButton,
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
     infoButton,
+    infoModal,
     infoBackdrop,
     infoCloseButton,
     infoOptionsButton,
@@ -23,6 +24,7 @@ const bindPopupUiEvents = ({
     volumeSlider,
     timeLabel,
     shortcutsButton,
+    shortcutsModal,
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
@@ -56,6 +58,34 @@ const bindPopupUiEvents = ({
   let lastTimelinePointerEvent = null;
   let lastPointerPosition = null;
   let timelineZoomRafId = null;
+
+  const trapDialogTab = (event, modalShell) => {
+    if (event.key !== 'Tab' || !modalShell || modalShell.hidden) {
+      return false;
+    }
+
+    const focusable = [...modalShell.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    )].filter((el) => !el.disabled && el.offsetParent !== null);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return true;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+      return true;
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+      return true;
+    }
+    return false;
+  };
 
   const isPointerNearTimeline = () => {
     if (!lastPointerPosition) {
@@ -148,6 +178,10 @@ const bindPopupUiEvents = ({
   };
 
   document.addEventListener('keydown', async (event) => {
+    if (trapDialogTab(event, state.shortcutsMenuOpen ? shortcutsModal : infoModal)) {
+      return;
+    }
+
     // Ignore while typing
     const isTyping = ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)
       || event.target.isContentEditable;
@@ -240,7 +274,7 @@ const bindPopupUiEvents = ({
     void clearHistory();
   });
 
-  togglePlaybackButton.addEventListener('click', () => {
+  speedButton.addEventListener('click', () => {
     cyclePlaybackSpeed();
   });
 

@@ -1,4 +1,4 @@
-import { extractFullBeatmapAudioToPayload } from './audio/fullAudioExtractionCore.js';
+import { extractFullBeatmapAudioToCache } from './audio/fullAudioExtractionCore.js';
 
 const runtimeApi = globalThis.browser?.runtime ?? globalThis.chrome?.runtime ?? null;
 const usesChromeCallbackMessaging = Boolean(globalThis.chrome?.runtime && !globalThis.browser?.runtime);
@@ -59,7 +59,7 @@ const handleExtractFullAudio = async (message) => {
   activeExtractionJob = { controller, setId: message?.setId, jobId: message?.jobId };
 
   try {
-    const result = await extractFullBeatmapAudioToPayload({
+    const result = await extractFullBeatmapAudioToCache({
       setId: message?.setId,
       audioFilename: message?.audioFilename,
       providerOverride: message?.providerOverride,
@@ -93,4 +93,3 @@ if (runtimeApi?.onMessage?.addListener) {
     return handleExtractFullAudio(message);
   });
 }
-

@@ -8,6 +8,7 @@ import {
   readResponseArrayBufferLimitedWithInitialZipProbe,
   responseLooksLikeBeatmapArchiveDownload,
 } from './zip.js';
+import { hasStorageArea, storageGet, storageSet } from '../webextension.js';
 
 const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 18000;
@@ -15,16 +16,18 @@ const FETCH_TIMEOUT_MS = 18000;
 const FETCH_TIMEOUT_FAILOVER_MS = 20000;
 const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
 const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
+const PROVIDER_STATS_STORAGE_KEY = 'providerStatsV1';
 
 const mergeArchiveFetchOptions = (options = {}) => {
   const mergedHeaders = {
     Accept: '*/*',
-    Referer: 'https://osu.ppy.sh/',
     ...(options.headers && typeof options.headers === 'object' ? options.headers : {}),
   };
   return {
     cache: 'no-store',
     redirect: 'follow',
+    referrer: 'https://osu.ppy.sh/',
+    referrerPolicy: 'strict-origin-when-cross-origin',
     ...options,
     headers: mergedHeaders,
   };
@@ -32,6 +35,9 @@ const mergeArchiveFetchOptions = (options = {}) => {
 
 const providerStats = {};
 const providerCooldowns = {};
+let providerRuntimeStateLoaded = false;
+let providerRuntimeStateLoadPromise = null;
+let providerRuntimeStateSaveTimer = null;
 
 const getProviderById = (providerId) => ARCHIVE_DOWNLOAD_SOURCES.find((source) => source.id === providerId) || null;
 
@@ -60,6 +66,102 @@ const ensureProviderStats = (providerId) => {
   return providerStats[providerId];
 };
 
+const sanitizeProviderStatsRecord = (record = {}) => ({
+  successes: Math.max(0, Number(record.successes) || 0),
+  failures: Math.max(0, Number(record.failures) || 0),
+  timedSuccesses: Math.max(0, Number(record.timedSuccesses) || 0),
+  totalSuccessMs: Math.max(0, Number(record.totalSuccessMs) || 0),
+});
+
+const hydrateProviderRuntimeState = (snapshot = {}) => {
+  const knownIds = new Set(ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id));
+  Object.keys(providerStats).forEach((id) => {
+    delete providerStats[id];
+  });
+  Object.keys(providerCooldowns).forEach((id) => {
+    delete providerCooldowns[id];
+  });
+
+  const statsSnapshot = snapshot.stats && typeof snapshot.stats === 'object' ? snapshot.stats : {};
+  Object.entries(statsSnapshot).forEach(([id, record]) => {
+    if (knownIds.has(id)) {
+      providerStats[id] = sanitizeProviderStatsRecord(record);
+    }
+  });
+
+  const cooldownSnapshot = snapshot.cooldowns && typeof snapshot.cooldowns === 'object' ? snapshot.cooldowns : {};
+  Object.entries(cooldownSnapshot).forEach(([id, cooldownUntil]) => {
+    const numeric = Number(cooldownUntil);
+    if (knownIds.has(id) && Number.isFinite(numeric) && numeric > Date.now()) {
+      providerCooldowns[id] = numeric;
+    }
+  });
+};
+
+const serializeProviderRuntimeState = () => ({
+  version: 1,
+  savedAt: Date.now(),
+  stats: Object.fromEntries(
+    Object.entries(providerStats).map(([id, record]) => [id, sanitizeProviderStatsRecord(record)]),
+  ),
+  cooldowns: Object.fromEntries(
+    Object.entries(providerCooldowns)
+      .filter(([, cooldownUntil]) => Number(cooldownUntil) > Date.now()),
+  ),
+});
+
+const loadProviderRuntimeState = async () => {
+  if (providerRuntimeStateLoaded) {
+    return true;
+  }
+  if (providerRuntimeStateLoadPromise) {
+    return providerRuntimeStateLoadPromise;
+  }
+  providerRuntimeStateLoadPromise = (async () => {
+    if (!hasStorageArea('local')) {
+      providerRuntimeStateLoaded = true;
+      return false;
+    }
+    try {
+      const items = await storageGet('local', [PROVIDER_STATS_STORAGE_KEY]);
+      hydrateProviderRuntimeState(items?.[PROVIDER_STATS_STORAGE_KEY]);
+      providerRuntimeStateLoaded = true;
+      return true;
+    } catch {
+      providerRuntimeStateLoaded = true;
+      return false;
+    }
+  })();
+  return providerRuntimeStateLoadPromise;
+};
+
+const persistProviderRuntimeState = async () => {
+  if (!hasStorageArea('local')) {
+    return false;
+  }
+  try {
+    await storageSet('local', {
+      [PROVIDER_STATS_STORAGE_KEY]: serializeProviderRuntimeState(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const scheduleProviderRuntimeStatePersist = () => {
+  if (!hasStorageArea('local')) {
+    return;
+  }
+  if (providerRuntimeStateSaveTimer !== null) {
+    clearTimeout(providerRuntimeStateSaveTimer);
+  }
+  providerRuntimeStateSaveTimer = setTimeout(() => {
+    providerRuntimeStateSaveTimer = null;
+    void persistProviderRuntimeState();
+  }, 500);
+};
+
 const getProviderCooldownRemainingMs = (providerId) => {
   const cooldownUntil = Number(providerCooldowns[providerId] || 0);
   return Math.max(0, cooldownUntil - Date.now());
@@ -75,12 +177,14 @@ const markProviderSuccess = (providerId, durationMs = NaN) => {
     stats.totalSuccessMs += durationMs;
   }
   delete providerCooldowns[providerId];
+  scheduleProviderRuntimeStatePersist();
 };
 
 const markProviderFailure = (providerId) => {
   const stats = ensureProviderStats(providerId);
   stats.failures += 1;
   providerCooldowns[providerId] = Date.now() + PROVIDER_FAILURE_COOLDOWN_MS;
+  scheduleProviderRuntimeStatePersist();
 };
 
 const getProviderReliabilityScore = (providerId) => {
@@ -208,9 +312,8 @@ const getProviderSequenceForDownload = (
     return [];
   }
 
-  const enabled = enabledPriority
-    .map((id) => getProviderById(id))
-    .filter((source) => source && !isProviderInCooldown(source.id));
+  const enabled = getAutoOrderedProviders(enabledPriority)
+    .filter((source) => source && !disabledProviders.includes(source.id));
 
   if (!autoFallback) {
     return enabled.length > 0 ? [enabled[0]] : [];
@@ -367,6 +470,7 @@ const downloadBeatmapArchive = async (
   disabledProviders = [],
   autoFallback = true,
 ) => {
+  await loadProviderRuntimeState();
   const { onTryingSource, onDownloadProgress, signal } = hooks;
   const failures = [];
   const sources = getProviderSequenceForDownload(
@@ -487,10 +591,14 @@ export {
   getProviderAverageSuccessMs,
   getAutoOrderedProviders,
   getProviderSequenceForDownload,
+  loadProviderRuntimeState,
+  persistProviderRuntimeState,
   downloadBeatmapArchive,
   fetchArrayBufferWithTimeout,
   fetchBeatmapArchiveAdaptive,
   probeArchiveSource,
   providerStats,
   providerCooldowns,
+  hydrateProviderRuntimeState,
+  serializeProviderRuntimeState,
 };

@@ -26,10 +26,47 @@ const IS_FIREFOX = /firefox/i.test(globalThis.navigator?.userAgent || '');
 const MAX_CANVAS_DPR = 2;
 const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
 const canvasContextCache = new WeakMap();
+const sliderPathCache = new WeakMap();
+const standardSliderTickCache = new WeakMap();
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(cs, 0, 10));
+
+const getStandardPlayfieldLayout = (canvasWidth, canvasHeight, circleSize, padding = 0) => {
+  const width = Math.max(1, Number(canvasWidth) || 1);
+  const height = Math.max(1, Number(canvasHeight) || 1);
+  const safePadding = Math.max(0, Number(padding) || 0);
+  const availableWidth = Math.max(10, width - (safePadding * 2));
+  const availableHeight = Math.max(10, height - (safePadding * 2));
+  const edgeRadiusOsu = Math.max(0, getCircleRadius(circleSize) * DRAWN_CIRCLE_RADIUS_SCALE);
+  const scale = Math.min(
+    availableWidth / (OSU_WIDTH + (edgeRadiusOsu * 2)),
+    availableHeight / (OSU_HEIGHT + (edgeRadiusOsu * 2)),
+  );
+  const playfieldWidth = OSU_WIDTH * scale;
+  const playfieldHeight = OSU_HEIGHT * scale;
+  const edgePadding = edgeRadiusOsu * scale;
+  const visualWidth = playfieldWidth + (edgePadding * 2);
+  const visualHeight = playfieldHeight + (edgePadding * 2);
+  const visualX = (width - visualWidth) / 2;
+  const visualY = (height - visualHeight) / 2;
+  const playfieldX = visualX + edgePadding;
+  const playfieldY = visualY + edgePadding;
+
+  return {
+    scale,
+    playfieldX,
+    playfieldY,
+    playfieldWidth,
+    playfieldHeight,
+    visualX,
+    visualY,
+    visualWidth,
+    visualHeight,
+    edgePadding,
+  };
+};
 
 const getApproachPreemptMs = (ar) => {
   const value = clamp(Number.isFinite(ar) ? ar : 5, 0, 11);
@@ -343,12 +380,15 @@ const buildSliderPathPointsOsu = (object) => {
     return [];
   }
 
+  const stackIndex = object.stackIndex || 0;
+  const cachedPath = sliderPathCache.get(object);
   if (
-    Array.isArray(object._cachedSliderPathPoints)
-    && object._cachedSliderPathPoints.length >= 2
-    && object._cachedSliderPathStackIndex === (object.stackIndex || 0)
+    cachedPath
+    && Array.isArray(cachedPath.points)
+    && cachedPath.points.length >= 2
+    && cachedPath.stackIndex === stackIndex
   ) {
-    return object._cachedSliderPathPoints;
+    return cachedPath.points;
   }
 
   const stackOffset = getObjectStackOffset(object);
@@ -366,7 +406,7 @@ const buildSliderPathPointsOsu = (object) => {
     : dedupeAdjacentPoints(rawPoints);
 
   if (basePoints.length < 2) {
-    object._cachedSliderPathPoints = basePoints;
+    sliderPathCache.set(object, { stackIndex, points: basePoints });
     return basePoints;
   }
 
@@ -381,9 +421,9 @@ const buildSliderPathPointsOsu = (object) => {
     sampled = sampleBezierPath(basePoints);
   }
   const trimmed = trimPathToLength(sampled, object.length);
-  object._cachedSliderPathPoints = (trimmed.length >= 2) ? trimmed : sampled;
-  object._cachedSliderPathStackIndex = object.stackIndex || 0;
-  return object._cachedSliderPathPoints;
+  const points = (trimmed.length >= 2) ? trimmed : sampled;
+  sliderPathCache.set(object, { stackIndex, points });
+  return points;
 };
 
 const getSliderBallPositionOsu = (object, currentTime) => {
@@ -577,8 +617,8 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency) => {
 
   for (const object of objects) {
     object.stackIndex = 0;
-    delete object._cachedSliderPathPoints;
-    delete object._cachedSliderPathStackIndex;
+    sliderPathCache.delete(object);
+    standardSliderTickCache.delete(object);
   }
 
   for (let i = 1; i < objects.length; i += 1) {
@@ -1279,12 +1319,14 @@ export class PreviewRenderer {
       ? this.mapData.sliderTickRate
       : 1;
     const stackIndex = object.stackIndex || 0;
+    const cachedTicks = standardSliderTickCache.get(object);
     if (
-      Array.isArray(object._cachedStandardSliderTicks)
-      && object._cachedStandardSliderTickRate === sliderTickRate
-      && object._cachedStandardSliderStackIndex === stackIndex
+      cachedTicks
+      && Array.isArray(cachedTicks.ticks)
+      && cachedTicks.sliderTickRate === sliderTickRate
+      && cachedTicks.stackIndex === stackIndex
     ) {
-      return object._cachedStandardSliderTicks;
+      return cachedTicks.ticks;
     }
 
     const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
@@ -1292,12 +1334,13 @@ export class PreviewRenderer {
     const spanDuration = totalDuration / slides;
     const pathLength = Number.isFinite(object.length) && object.length > 0 ? object.length : 0;
     const ticks = [];
+    const cacheTicks = () => {
+      standardSliderTickCache.set(object, { sliderTickRate, stackIndex, ticks });
+      return ticks;
+    };
 
     if (pathLength <= 0) {
-      object._cachedStandardSliderTicks = ticks;
-      object._cachedStandardSliderTickRate = sliderTickRate;
-      object._cachedStandardSliderStackIndex = stackIndex;
-      return ticks;
+      return cacheTicks();
     }
 
     const velocity = pathLength / Math.max(1, spanDuration);
@@ -1306,10 +1349,7 @@ export class PreviewRenderer {
     const tickDistance = sliderTickRate > 0 ? (scoringDistance / sliderTickRate) : pathLength;
 
     if (!(Number.isFinite(tickDistance) && tickDistance > 0)) {
-      object._cachedStandardSliderTicks = ticks;
-      object._cachedStandardSliderTickRate = sliderTickRate;
-      object._cachedStandardSliderStackIndex = stackIndex;
-      return ticks;
+      return cacheTicks();
     }
 
     const minDistanceFromEnd = velocity * 10;
@@ -1323,10 +1363,7 @@ export class PreviewRenderer {
       totalPathLength += segLen;
     }
     if (totalPathLength <= 0 || path.length < 2) {
-      object._cachedStandardSliderTicks = ticks;
-      object._cachedStandardSliderTickRate = sliderTickRate;
-      object._cachedStandardSliderStackIndex = stackIndex;
-      return ticks;
+      return cacheTicks();
     }
 
     const positionAtProgress = (progress) => {
@@ -1365,10 +1402,7 @@ export class PreviewRenderer {
       }
     }
 
-    object._cachedStandardSliderTicks = ticks;
-    object._cachedStandardSliderTickRate = sliderTickRate;
-    object._cachedStandardSliderStackIndex = stackIndex;
-    return ticks;
+    return cacheTicks();
   }
 
   buildCatchSliderRenderObjects(object) {
@@ -2288,11 +2322,11 @@ export class PreviewRenderer {
     const padding = 14;
     const availableWidth = Math.max(10, width - (padding * 2));
     const availableHeight = Math.max(10, height - (padding * 2));
-    const scale = Math.min(availableWidth / OSU_WIDTH, availableHeight / OSU_HEIGHT);
-    const playfieldWidth = OSU_WIDTH * scale;
-    const playfieldHeight = OSU_HEIGHT * scale;
-    const playfieldX = Math.floor((width - playfieldWidth) / 2);
-    const playfieldY = Math.floor((height - playfieldHeight) / 2);
+    let scale = Math.min(availableWidth / OSU_WIDTH, availableHeight / OSU_HEIGHT);
+    let playfieldWidth = OSU_WIDTH * scale;
+    let playfieldHeight = OSU_HEIGHT * scale;
+    let playfieldX = Math.floor((width - playfieldWidth) / 2);
+    let playfieldY = Math.floor((height - playfieldHeight) / 2);
 
     ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
     ctx.fillRect(playfieldX, playfieldY, playfieldWidth, playfieldHeight);
@@ -2313,6 +2347,33 @@ export class PreviewRenderer {
       this.renderMania(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight);
       return;
     }
+
+    const standardLayout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
+    ({
+      scale,
+      playfieldX,
+      playfieldY,
+      playfieldWidth,
+      playfieldHeight,
+    } = standardLayout);
+
+    ctx.fillStyle = 'rgba(8, 8, 10, 0.85)';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
+    ctx.fillRect(
+      standardLayout.visualX,
+      standardLayout.visualY,
+      standardLayout.visualWidth,
+      standardLayout.visualHeight,
+    );
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(
+      playfieldX + 0.5,
+      playfieldY + 0.5,
+      playfieldWidth - 1,
+      playfieldHeight - 1,
+    );
 
     const toCanvas = (x, y) => ({
       x: playfieldX + ((x / OSU_WIDTH) * playfieldWidth),
@@ -2831,4 +2892,4 @@ export class PreviewRenderer {
   }
 }
 
-export { formatTime, clamp };
+export { formatTime, clamp, getCircleRadius, getStandardPlayfieldLayout };

@@ -36,10 +36,14 @@ host permissions are scoped to the services the extension actually fetches from:
 
 - `https://osu.ppy.sh/*`
 - `https://b.ppy.sh/*`
-- `https://osu.direct/*`
-- `https://api.nerinyan.moe/*`
-- `https://txy1.sayobot.cn/*`
 - `https://catboy.best/*`
+- `https://osu.direct/*`
+- `https://dl.osu.direct/*`
+- `https://api.nerinyan.moe/*`
+- `https://dl.nerinyan.moe/*`
+- `https://txy1.sayobot.cn/*`
+- `https://*.idrivee2-50.com/*`
+- `https://tc1.sayobot.cn:25225/*`
 - `https://osu.sayobot.cn/*`
 
 the extension does not inject content scripts into arbitrary pages. it runs from the popup and makes network requests only to the hosts above.

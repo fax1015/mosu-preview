@@ -31,7 +31,9 @@ import {
   storageSet,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
-import { getHistory, addToHistory, clearHistory } from './core/history.js';
+import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
+import { extractBeatmapInfoFromUrl } from './core/beatmapUrl.js';
+import { getHistory, addToHistory, clearHistory, setHistoryDebugLogger } from './core/history.js';
 import {
   state,
   resetState,
@@ -42,19 +44,22 @@ import {
   setFullAudioState,
 } from './core/state.js';
 import { createTimingController } from './core/timing.js';
-import { base64ToUint8Array } from './core/base64Payload.js';
 import {
   FULL_AUDIO_CACHE_NAME,
   getAudioMimeType,
+  clearFullAudioCache,
+  getFullAudioCacheUsage,
   normalizePath,
   pruneFullAudioCache,
   readCachedFullAudioBlob,
+  setFullAudioCacheDebugLogger,
   writeCachedFullAudioBlob,
 } from './audio/cache.js';
-import { extractFullBeatmapAudioToPayload } from './audio/fullAudioExtractionCore.js';
+import { extractFullBeatmapAudio } from './audio/fullAudioExtractionCore.js';
 import {
   getProviderDisplayName,
   getProviderSequenceForDownload,
+  loadProviderRuntimeState,
   probeArchiveSource,
   FETCH_TIMEOUT_MS,
   FETCH_TIMEOUT_FAILOVER_MS,
@@ -76,7 +81,7 @@ const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
 const versionLine = document.querySelector('#mapPreviewVersion');
 const timeLabel = document.querySelector('#mapPreviewTimeLabel');
-const togglePlaybackButton = document.querySelector('#mapPreviewPlayBtn');
+const speedButton = document.querySelector('#mapPreviewSpeedBtn');
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const timelineCanvas = document.querySelector('#mapPreviewTimeline');
 const volumeSlider = document.querySelector('#mapPreviewVolume');
@@ -109,6 +114,18 @@ const shortcutsCloseButton = document.querySelector('#mapPreviewShortcutsCloseBt
 const recentPanel = document.querySelector('#mapPreviewRecentPanel');
 const recentList = document.querySelector('#mapPreviewRecentList');
 const recentClearBtn = document.querySelector('#mapPreviewRecentClearBtn');
+
+let lastInfoFocus = null;
+let lastShortcutsFocus = null;
+
+const restoreFocus = (preferredElement, fallbackElement) => {
+  const target = preferredElement instanceof HTMLElement
+    && document.contains(preferredElement)
+    && preferredElement.offsetParent !== null
+    ? preferredElement
+    : fallbackElement;
+  target?.focus?.();
+};
 
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
 const CACHE_KEY = 'mosuPreviewCacheV1';
@@ -285,6 +302,8 @@ const {
   setOpen: setDebugPanelOpen,
   toggleOpen: toggleDebugPanelOpen,
 } = debugPanelController;
+setFullAudioCacheDebugLogger(addDebugLog);
+setHistoryDebugLogger(addDebugLog);
 
 const unsupportedViewController = createUnsupportedViewController({
   popup,
@@ -322,8 +341,17 @@ const renderInfoMenu = () => {
 };
 
 const setInfoMenuOpen = (isOpen) => {
+  if (isOpen) {
+    lastInfoFocus = document.activeElement instanceof HTMLElement ? document.activeElement : infoButton;
+  }
   setUiState({ infoMenuOpen: isOpen });
   renderInfoMenu();
+  if (isOpen) {
+    infoCloseButton?.focus();
+  } else if (lastInfoFocus) {
+    restoreFocus(lastInfoFocus, infoButton);
+    lastInfoFocus = null;
+  }
 };
 
 const openSupportLink = async (url) => {
@@ -347,10 +375,17 @@ const renderShortcutsMenu = () => {
 
 const setShortcutsMenuOpen = (isOpen) => {
   if (isOpen) {
+    lastShortcutsFocus = document.activeElement instanceof HTMLElement ? document.activeElement : shortcutsButton;
     setInfoMenuOpen(false);
   }
   setUiState({ shortcutsMenuOpen: isOpen });
   renderShortcutsMenu();
+  if (isOpen) {
+    shortcutsCloseButton?.focus();
+  } else if (lastShortcutsFocus) {
+    restoreFocus(lastShortcutsFocus, shortcutsButton);
+    lastShortcutsFocus = null;
+  }
 };
 
 const getCachedSetIds = async () => {
@@ -371,52 +406,82 @@ const getCachedSetIds = async () => {
   }
 };
 
+const formatBytes = (bytes) => {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const units = ['KB', 'MB', 'GB'];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 ? size.toFixed(1) : size.toFixed(2)} ${units[unitIndex]}`;
+};
+
+const updateRecentClearButtonCacheUsage = async () => {
+  if (!recentClearBtn) {
+    return;
+  }
+
+  const usage = await getFullAudioCacheUsage();
+  const label = `Clear cache (${formatBytes(usage.bytes)} used)`;
+  recentClearBtn.title = label;
+  recentClearBtn.setAttribute('aria-label', label);
+};
+
 const renderRecentPanel = async () => {
   if (!recentPanel || !recentList) return;
 
-  const history = await getHistory();
-  if (history.length === 0) {
+  const cachedSetIds = await getCachedSetIds();
+  if (!cachedSetIds || cachedSetIds.size === 0) {
     recentPanel.hidden = true;
     return;
   }
 
-  const cachedSetIds = await getCachedSetIds();
-  const filteredHistory = cachedSetIds
-    ? history.filter((entry) => cachedSetIds.has(entry.beatmapSetId))
-    : history;
-  if (filteredHistory.length === 0) {
-    recentPanel.hidden = true;
-    return;
-  }
+  const history = await getHistory();
+  const cachedEntries = buildCachedMapsetEntries(cachedSetIds, history);
 
   recentPanel.hidden = false;
+  void updateRecentClearButtonCacheUsage();
   recentList.innerHTML = '';
 
-  filteredHistory.forEach((entry) => {
+  cachedEntries.forEach((entry) => {
     const item = document.createElement('div');
     item.className = 'map-preview-recent-item';
     const thumbnail = document.createElement('div');
     thumbnail.className = 'map-preview-recent-thumbnail';
-    thumbnail.style.backgroundImage = `url(https://assets.ppy.sh/beatmaps/${entry.beatmapSetId}/covers/list.jpg)`;
+    const safeSetId = /^\d+$/.test(String(entry.beatmapSetId || ''))
+      ? String(entry.beatmapSetId)
+      : '';
+    if (safeSetId) {
+      thumbnail.style.backgroundImage = `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`;
+    }
 
     const info = document.createElement('div');
     info.className = 'map-preview-recent-info';
 
     const title = document.createElement('div');
     title.className = 'map-preview-recent-item-title';
-    title.textContent = entry.title;
+    title.textContent = entry.title || `Beatmap set #${safeSetId || 'unknown'}`;
 
     const meta = document.createElement('div');
     meta.className = 'map-preview-recent-item-meta';
-    meta.textContent = `${entry.artist} // ${entry.creator}`;
+    meta.textContent = entry.artist || entry.creator
+      ? `${entry.artist || 'Unknown artist'} // ${entry.creator || 'Unknown creator'}`
+      : 'Cached full audio';
 
     info.appendChild(title);
     info.appendChild(meta);
     item.appendChild(thumbnail);
     item.appendChild(info);
     item.addEventListener('click', () => {
-      const url = `https://osu.ppy.sh/beatmapsets/${entry.beatmapSetId}`;
-      createTab({ url });
+      if (!safeSetId) {
+        return;
+      }
+      createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` });
     });
     recentList.appendChild(item);
   });
@@ -558,12 +623,12 @@ const formatPlaybackSpeedLabel = (speed) => {
 };
 
 const setPlaybackSpeedButtonLabel = () => {
-  if (!togglePlaybackButton) {
+  if (!speedButton) {
     return;
   }
   const label = formatPlaybackSpeedLabel(state.playbackSpeed);
-  togglePlaybackButton.textContent = label;
-  togglePlaybackButton.title = `Playback speed (${label})`;
+  speedButton.textContent = label;
+  speedButton.title = `Playback speed (${label})`;
 };
 
 const timingController = createTimingController({
@@ -761,6 +826,85 @@ const waitForAudioSeek = () => new Promise((resolve) => {
   state.audio.addEventListener('seeked', onSeeked, { once: true });
   state.audio.addEventListener('error', onError, { once: true });
 });
+
+const waitForAudioElementReady = (audioElement, timeoutMs = 10000) => new Promise((resolve) => {
+  if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    resolve(true);
+    return;
+  }
+
+  const onReady = () => {
+    cleanup();
+    resolve(true);
+  };
+
+  const onError = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const onTimeout = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const cleanup = () => {
+    clearTimeout(timer);
+    audioElement.removeEventListener('canplay', onReady);
+    audioElement.removeEventListener('loadeddata', onReady);
+    audioElement.removeEventListener('error', onError);
+  };
+
+  const timer = registry.addTimeout(setTimeout(onTimeout, timeoutMs));
+  audioElement.addEventListener('canplay', onReady);
+  audioElement.addEventListener('loadeddata', onReady);
+  audioElement.addEventListener('error', onError);
+});
+
+const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise((resolve) => {
+  if (!audioElement?.src || audioElement.seeking === false) {
+    resolve(true);
+    return;
+  }
+
+  const onSeeked = () => {
+    cleanup();
+    resolve(true);
+  };
+
+  const onError = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const onTimeout = () => {
+    cleanup();
+    resolve(false);
+  };
+
+  const cleanup = () => {
+    clearTimeout(timer);
+    audioElement.removeEventListener('seeked', onSeeked);
+    audioElement.removeEventListener('error', onError);
+  };
+
+  const timer = registry.addTimeout(setTimeout(onTimeout, timeoutMs));
+  audioElement.addEventListener('seeked', onSeeked, { once: true });
+  audioElement.addEventListener('error', onError, { once: true });
+});
+
+const seekAudioElementToMapTime = (audioElement, mapTimeMs, anchorMapMs) => {
+  const targetSec = (mapTimeMs - anchorMapMs) / 1000;
+  if (!Number.isFinite(targetSec) || targetSec < 0) {
+    return false;
+  }
+
+  const maxDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+    ? audioElement.duration
+    : targetSec;
+  audioElement.currentTime = Math.max(0, Math.min(targetSec, maxDuration));
+  return true;
+};
 
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   state.audioSyncEnabled = Boolean(sourceUrl);
@@ -966,16 +1110,7 @@ const configureAudioPreview = (setId, previewTimeMs) => {
 };
 
 const seekAudioToMapTime = (mapTimeMs) => {
-  const targetSec = (mapTimeMs - state.audioAnchorMapMs) / 1000;
-  if (!Number.isFinite(targetSec) || targetSec < 0) {
-    return false;
-  }
-
-  const maxDuration = Number.isFinite(state.audio.duration) && state.audio.duration > 0
-    ? state.audio.duration
-    : targetSec;
-  state.audio.currentTime = Math.max(0, Math.min(targetSec, maxDuration));
-  return true;
+  return seekAudioElementToMapTime(state.audio, mapTimeMs, state.audioAnchorMapMs);
 };
 
 const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, providerLabel = '') => {
@@ -986,32 +1121,76 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
   addDebugLog(`audio: hotswap start (${sourceAudioFilename}, ${Math.round(audioBlob.size / 1024)} KB)`);
   const swapMapTimeMs = state.currentTimeMs;
   const wasPlaying = state.isPlaying;
+  const fullAudioUrl = URL.createObjectURL(audioBlob);
+
+  try {
+    const testAudio = new Audio();
+    const releaseTestAudio = () => {
+      testAudio.removeAttribute('src');
+      testAudio.load();
+    };
+    testAudio.preload = 'auto';
+    testAudio.src = fullAudioUrl;
+    testAudio.load();
+
+    const ready = await waitForAudioElementReady(testAudio);
+    if (!ready || jobId !== state.fullAudioJobId) {
+      addDebugLog('audio: hotswap failed, media element not ready');
+      releaseTestAudio();
+      URL.revokeObjectURL(fullAudioUrl);
+      return false;
+    }
+
+    let testSeekOk = false;
+    try {
+      testSeekOk = seekAudioElementToMapTime(testAudio, swapMapTimeMs, 0);
+    } catch {
+      testSeekOk = false;
+    }
+
+    if (!testSeekOk) {
+      addDebugLog('audio: hotswap failed, preflight seek rejected');
+      releaseTestAudio();
+      URL.revokeObjectURL(fullAudioUrl);
+      return false;
+    }
+
+    const testSeekSettled = await waitForAudioElementSeek(testAudio);
+    releaseTestAudio();
+    if (!testSeekSettled || jobId !== state.fullAudioJobId) {
+      addDebugLog('audio: hotswap failed, preflight seek did not settle');
+      URL.revokeObjectURL(fullAudioUrl);
+      return false;
+    }
+  } catch (error) {
+    addDebugLog(`audio: hotswap preflight failed (${error?.message || 'unknown error'})`);
+    URL.revokeObjectURL(fullAudioUrl);
+    return false;
+  }
 
   if (state.audio && !state.audio.paused) {
     state.audio.pause();
   }
 
-  setFullAudioObjectUrl(null);
+  const previousAudioState = {
+    src: state.audio?.src || '',
+    anchorMapMs: state.audioAnchorMapMs,
+    syncEnabled: state.audioSyncEnabled,
+    fullAudioObjectUrl: state.fullAudioObjectUrl,
+  };
+  const rollbackCommittedSwap = () => {
+    URL.revokeObjectURL(fullAudioUrl);
+    state.fullAudioObjectUrl = previousAudioState.fullAudioObjectUrl || null;
+    setAudioElementSource(previousAudioState.src, previousAudioState.anchorMapMs);
+    state.audioSyncEnabled = previousAudioState.syncEnabled;
+  };
 
-  const fullAudioUrl = URL.createObjectURL(audioBlob);
-  setFullAudioObjectUrl(fullAudioUrl);
-  setFullAudioState({
-    fullAudioSetId: String(setId),
-    fullAudioStatus: 'ready',
-    fullAudioCacheKey: `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`,
-    fullAudioError: '',
-  });
-  setAudioBadgeWithProvider(
-    'ready',
-    'Full audio ready',
-    providerLabel,
-    `Using full audio: ${sourceAudioFilename}`,
-  );
+  state.fullAudioObjectUrl = fullAudioUrl;
   const sourceChanged = setAudioElementSource(fullAudioUrl, 0);
-
-  const ready = await waitForAudioReady({ requireFreshEvent: sourceChanged });
-  if (!ready || jobId !== state.fullAudioJobId) {
-    addDebugLog('audio: hotswap failed, media element not ready');
+  const realReady = await waitForAudioReady({ requireFreshEvent: sourceChanged });
+  if (!realReady || jobId !== state.fullAudioJobId) {
+    addDebugLog('audio: hotswap failed, media element not ready after commit');
+    rollbackCommittedSwap();
     return false;
   }
 
@@ -1025,15 +1204,34 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
   }
 
   if (!hasSyncedSeek) {
-    addDebugLog('audio: hotswap failed, seek sync rejected');
+    addDebugLog('audio: hotswap failed, seek sync rejected after commit');
+    rollbackCommittedSwap();
     return false;
   }
 
   const seekSettled = await waitForAudioSeek();
   if (!seekSettled || jobId !== state.fullAudioJobId) {
-    addDebugLog('audio: hotswap failed, seek did not settle');
+    addDebugLog('audio: hotswap failed, seek did not settle after commit');
+    rollbackCommittedSwap();
     return false;
   }
+
+  if (previousAudioState.fullAudioObjectUrl && previousAudioState.fullAudioObjectUrl !== fullAudioUrl) {
+    URL.revokeObjectURL(previousAudioState.fullAudioObjectUrl);
+  }
+
+  setFullAudioState({
+    fullAudioSetId: String(setId),
+    fullAudioStatus: 'ready',
+    fullAudioCacheKey: `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`,
+    fullAudioError: '',
+  });
+  setAudioBadgeWithProvider(
+    'ready',
+    'Full audio ready',
+    providerLabel,
+    `Using full audio: ${sourceAudioFilename}`,
+  );
 
   const shouldResumePlayback = wasPlaying || state.isPlaying;
   clearCurrentRaf();
@@ -1140,7 +1338,7 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
 
     if (!extractionResult?.ok) {
       addDebugLog(`audio: worker path failed (${extractionResult?.error || 'unknown'}); retry download in popup`);
-      extractionResult = await extractFullBeatmapAudioToPayload({
+      extractionResult = await extractFullBeatmapAudio({
         setId,
         audioFilename: audioFileName,
         providerOverride: state.providerOverride,
@@ -1172,32 +1370,31 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
       normalizedPickedAudioFilename,
       normalizedRequestedAudioFilename,
       mime,
+      byteLength: cachedByteLength,
     } = extractionResult;
 
     setProviderState({ currentArchiveProviderLabel: sourceLabel });
     setAudioBadgeWithProvider('loading', 'Loading full audio', sourceLabel, `Downloading from ${sourceLabel}`);
 
-    const audioBytesFromPayload = extractionResult.audioBase64
-      ? base64ToUint8Array(extractionResult.audioBase64)
-      : (
-        extractionResult.audioBuffer instanceof ArrayBuffer
-          ? new Uint8Array(extractionResult.audioBuffer)
-          : new Uint8Array(0)
-      );
-    const byteLength = audioBytesFromPayload.byteLength;
-    addDebugLog(`audio: archive extracted in worker from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
+    let audioBlob = await readCachedFullAudioBlob(setId, audioFileName);
+    let byteLength = Number.isFinite(cachedByteLength) ? cachedByteLength : (audioBlob?.size || 0);
+    if (audioBlob) {
+      addDebugLog(`audio: archive extracted in worker from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
+    } else if (extractionResult.audioBytes instanceof Uint8Array && extractionResult.audioBytes.byteLength > 0) {
+      audioBlob = new Blob([extractionResult.audioBytes], { type: mime || getAudioMimeType(pickedAudioFilename) });
+      byteLength = extractionResult.audioBytes.byteLength;
+      addDebugLog(`audio: archive extracted in popup from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
+      await writeCachedFullAudioBlob(setId, audioFileName, audioBlob);
+    }
 
-    if (byteLength <= 0) {
-      throw new Error('Background extraction returned empty audio payload.');
+    if (!audioBlob || byteLength <= 0) {
+      throw new Error('Full-audio extraction returned no cached audio payload.');
     }
     addDebugLog(`audio: selected entry ${pickedAudioFilename}`);
 
-    const audioBlob = new Blob([audioBytesFromPayload], { type: mime || getAudioMimeType(pickedAudioFilename) });
-    await writeCachedFullAudioBlob(setId, audioFileName, audioBlob);
     if (normalizedPickedAudioFilename !== normalizedRequestedAudioFilename) {
-      await writeCachedFullAudioBlob(setId, pickedAudioFilename, audioBlob);
+      addDebugLog('audio: cache stored under requested metadata filename');
     }
-    addDebugLog('audio: cache write attempted');
     await hotswapToFullAudio(audioBlob, setId, pickedAudioFilename, jobId, sourceLabel);
   } catch (error) {
     if (jobId === state.fullAudioJobId) {
@@ -1229,7 +1426,12 @@ const runAudioFetchProbe = async () => {
     return;
   }
 
-  const sources = getProviderSequenceForDownload(state.providerOverride, state.providerPriority);
+  const sources = getProviderSequenceForDownload(
+    state.providerOverride,
+    state.providerPriority,
+    state.disabledProviders,
+    state.autoFallback,
+  );
   if (!sources.length) {
     addDebugLog('probe: no providers available');
     return;
@@ -1251,64 +1453,6 @@ const runAudioFetchProbe = async () => {
     }
   }
   addDebugLog('probe: complete');
-};
-
-const extractBeatmapInfoFromUrl = (rawUrl) => {
-  let url;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    return { valid: false, reason: 'Active tab URL is not valid.' };
-  }
-
-  if (!/^osu\.ppy\.sh$/i.test(url.hostname)) {
-    return {
-      valid: false,
-      reason: 'unsupported website :(',
-      unsupportedSite: true,
-    };
-  }
-
-  const beatmapMatch = url.pathname.match(/^\/beatmaps\/(\d+)/i);
-  if (beatmapMatch) {
-    return {
-      valid: true,
-      beatmapId: beatmapMatch[1],
-      setId: null,
-      sourceUrl: url.toString(),
-    };
-  }
-
-  const beatmapSetMatch = url.pathname.match(/^\/beatmapsets\/(\d+)/i);
-  if (!beatmapSetMatch) {
-    return { valid: false, reason: 'Open a beatmap URL like /beatmapsets/... or /beatmaps/....' };
-  }
-
-  const hash = (url.hash || '').replace(/^#/, '');
-  const hashBeatmapMatch = hash.match(/(?:osu|taiko|fruits|mania)\/(\d+)/i);
-  if (hashBeatmapMatch) {
-    return {
-      valid: true,
-      beatmapId: hashBeatmapMatch[1],
-      setId: beatmapSetMatch[1],
-      sourceUrl: url.toString(),
-    };
-  }
-
-  const queryBeatmapId = url.searchParams.get('b');
-  if (queryBeatmapId && /^\d+$/.test(queryBeatmapId)) {
-    return {
-      valid: true,
-      beatmapId: queryBeatmapId,
-      setId: beatmapSetMatch[1],
-      sourceUrl: url.toString(),
-    };
-  }
-
-  return {
-    valid: false,
-    reason: 'Beatmap set page found, but no beatmap difficulty ID in the URL hash.',
-  };
 };
 
 const queryActiveTab = async () => {
@@ -1371,7 +1515,7 @@ const writeCachedPreview = async (value) => {
 const initializePreviewForCurrentTab = async () => {
   stopTimelineDurationAnimation();
   stopPlayback();
-  togglePlaybackButton.disabled = true;
+  speedButton.disabled = true;
   popup?.classList.add('is-open');
   setUnsupportedMode(false);
   void pruneFullAudioCache();
@@ -1383,6 +1527,7 @@ const initializePreviewForCurrentTab = async () => {
   addDebugLog('init: popup opened');
 
   setProviderState({ providerOverride: await readProviderOverrideSetting() });
+  await loadProviderRuntimeState();
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
   applyAudioVolume(await readAudioVolumeSetting());
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
@@ -1496,7 +1641,7 @@ const initializePreviewForCurrentTab = async () => {
     });
     renderFrame();
 
-    togglePlaybackButton.disabled = false;
+    speedButton.disabled = false;
 
     if (resolvedSetId && metadata.audio) {
       void upgradeToFullAudioIfPossible(resolvedSetId, metadata.audio);
@@ -1518,7 +1663,7 @@ const initializePreviewForCurrentTab = async () => {
     setUnsupportedMode(false);
     addDebugLog(`init: failed -> ${error?.message || 'unknown error'}`);
     stopPlayback();
-    togglePlaybackButton.disabled = true;
+    speedButton.disabled = true;
     titleLine.textContent = 'Preview unavailable';
     versionLine.textContent = '';
     versionLine.title = '';
@@ -1533,11 +1678,12 @@ const initializePreviewForCurrentTab = async () => {
 
 bindPopupUiEvents({
   elements: {
-    togglePlaybackButton,
+    speedButton,
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
     infoButton,
+    infoModal,
     infoBackdrop,
     infoCloseButton,
     infoOptionsButton,
@@ -1549,6 +1695,7 @@ bindPopupUiEvents({
     volumeSlider,
     timeLabel,
     shortcutsButton,
+    shortcutsModal,
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
@@ -1579,7 +1726,10 @@ bindPopupUiEvents({
     toggleMute,
     setShortcutsMenuOpen,
     clearHistory: async () => {
+      await clearFullAudioCache();
       await clearHistory();
+      await updateRecentClearButtonCacheUsage();
+      showPopupToast('Cache cleared');
       void renderRecentPanel();
     },
   },

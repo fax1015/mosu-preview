@@ -932,7 +932,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     line-height: 1;
 }
 
-.map-preview-play-btn {
+.map-preview-speed-btn {
     min-width: 64px;
     height: var(--map-preview-control-height);
     padding: 0 0.6rem;
@@ -1152,6 +1152,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 0.32rem;
     background: transparent;
     border: none;
     color: var(--text-secondary);
@@ -1159,6 +1160,9 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     opacity: 0.45;
     transition: opacity 0.2s ease, color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
     padding: 0.25rem;
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 700;
 }
 
 .map-preview-recent-clear-btn:hover {

@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "mosu! preview",
-  "version": "0.4.0",
+  "version": "0.4.1",
+  "minimum_chrome_version": "121",
   "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
   "permissions": [
     "activeTab",
@@ -62,6 +63,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src https://osu.ppy.sh https://b.ppy.sh https://catboy.best https://osu.direct https://api.nerinyan.moe https://dl.nerinyan.moe https://txy1.sayobot.cn https://tc1.sayobot.cn:25225 https://osu.sayobot.cn https://*.idrivee2-50.com; font-src 'self';"
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src https://osu.ppy.sh https://b.ppy.sh https://catboy.best https://osu.direct https://dl.osu.direct https://api.nerinyan.moe https://dl.nerinyan.moe https://txy1.sayobot.cn https://tc1.sayobot.cn:25225 https://osu.sayobot.cn https://*.idrivee2-50.com; font-src 'self';"
   }
 }

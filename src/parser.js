@@ -68,13 +68,14 @@ export const parseMapPreviewData = (content, options = {}) => {
     : 8000;
 
   const timingPoints = [];
+  const hitObjectLines = [];
   const objects = [];
 
   let section = '';
   let sliderMultiplier = 1.0;
   let sliderTickRate = 1.0;
   let circleSize = 5;
-  let approachRate = 5;
+  let approachRate = null;
   let overallDifficulty = 5;
   let stackLeniency = 0.7;
   let mode = 0;
@@ -179,15 +180,19 @@ export const parseMapPreviewData = (content, options = {}) => {
       continue;
     }
 
-    if (section !== 'hitobjects') {
-      continue;
+    if (section === 'hitobjects') {
+      hitObjectLines.push(trimmed);
     }
+  }
 
+  timingPoints.sort((a, b) => a.time - b.time);
+
+  for (const hitObjectLine of hitObjectLines) {
     if (objects.length >= maxObjects) {
-      continue;
+      break;
     }
 
-    const parts = trimmed.split(',');
+    const parts = hitObjectLine.split(',');
     if (parts.length < 5) {
       continue;
     }

@@ -490,10 +490,6 @@ const downloadBeatmapArchive = async (
       throw new Error('download cancelled');
     }
 
-    if (providerOverride === 'auto' && isProviderInCooldown(source.id)) {
-      continue;
-    }
-
     onTryingSource?.(source.label);
 
     const reportProgress = createThrottledArchiveProgressReporter(

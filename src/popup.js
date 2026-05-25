@@ -1563,10 +1563,6 @@ const initializePreviewForCurrentTab = async () => {
         titleLine.textContent = 'Preview unavailable';
         setStatus(info.reason, true);
       }
-      if (recentPanel) {
-        const history = await getHistory();
-        recentPanel.hidden = history.length === 0;
-      }
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();

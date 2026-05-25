@@ -218,6 +218,22 @@ const emitArchiveBodyProgress = (onProgress, loaded, totalGuess) => {
   onProgress({ loaded: Math.floor(loaded), total });
 };
 
+const withTimeout = async (promise, timeoutMs) => {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs, onProgress) => {
   const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
   const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
@@ -239,14 +255,7 @@ const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs, 
       emitArchiveBodyProgress(onProgress, fallbackBuffer.byteLength, totalHint ?? fallbackBuffer.byteLength);
       return fallbackBuffer;
     }
-    const fallbackBuffer = await Promise.race([
-      response.arrayBuffer(),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, bodyBudgetMs);
-      }),
-    ]);
+    const fallbackBuffer = await withTimeout(response.arrayBuffer(), bodyBudgetMs);
     if (fallbackBuffer.byteLength > cap) {
       throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
     }
@@ -311,14 +320,7 @@ const readResponseArrayBufferLimitedWithInitialZipProbe = async (
   const totalHint = Number.isFinite(contentLength) && contentLength > 0 ? Math.min(contentLength, cap) : null;
 
   if (!response.body) {
-    const fallbackBuffer = await Promise.race([
-      response.arrayBuffer(),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, archiveBodyBudgetMs);
-      }),
-    ]);
+    const fallbackBuffer = await withTimeout(response.arrayBuffer(), archiveBodyBudgetMs);
     if (fallbackBuffer.byteLength > cap) {
       throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
     }

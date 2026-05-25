@@ -26,6 +26,25 @@ const getHistory = async () => {
   }
 };
 
+const buildNextHistory = (history, entry, now = Date.now()) => {
+  if (!entry || !entry.beatmapId) {
+    return Array.isArray(history) ? history : [];
+  }
+
+  const nextEntry = {
+    ...entry,
+    viewedAt: now,
+  };
+  const normalizedSetId = String(entry.beatmapSetId || '').trim();
+  const filtered = (Array.isArray(history) ? history : []).filter((item) => (
+    normalizedSetId
+      ? String(item?.beatmapSetId || '').trim() !== normalizedSetId
+      : item.beatmapId !== entry.beatmapId
+  ));
+
+  return [nextEntry, ...filtered].slice(0, HISTORY_LIMIT);
+};
+
 const addToHistory = async (entry) => {
   if (!entry || !entry.beatmapId) {
     return;
@@ -33,14 +52,7 @@ const addToHistory = async (entry) => {
 
   try {
     const history = await getHistory();
-    const nextEntry = {
-      ...entry,
-      viewedAt: Date.now(),
-    };
-
-    // Remove existing entry for the same beatmapId to move it to the top
-    const filtered = history.filter((item) => item.beatmapId !== entry.beatmapId);
-    const nextHistory = [nextEntry, ...filtered].slice(0, HISTORY_LIMIT);
+    const nextHistory = buildNextHistory(history, entry);
 
     await storageSet('local', { [HISTORY_KEY]: nextHistory });
   } catch (error) {
@@ -56,4 +68,4 @@ const clearHistory = async () => {
   }
 };
 
-export { getHistory, addToHistory, clearHistory, setHistoryDebugLogger };
+export { getHistory, addToHistory, clearHistory, setHistoryDebugLogger, buildNextHistory };

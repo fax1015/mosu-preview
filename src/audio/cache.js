@@ -109,6 +109,43 @@ const writeFullAudioCacheAliases = async (aliases) => {
   }
 };
 
+const removeFullAudioAliasesForCacheKeys = (aliases, cacheKeys) => {
+  const deletedKeys = new Set([...cacheKeys || []].map((key) => String(key || '')));
+  if (!aliases || typeof aliases !== 'object' || deletedKeys.size === 0) {
+    return aliases && typeof aliases === 'object' ? { ...aliases } : {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(aliases)
+      .filter(([aliasKey, primaryKey]) => !deletedKeys.has(aliasKey) && !deletedKeys.has(primaryKey)),
+  );
+};
+
+const compactFullAudioAliasesForCacheKeys = (aliases, cacheKeys) => {
+  const liveKeys = new Set([...cacheKeys || []].map((key) => String(key || '')));
+  if (!aliases || typeof aliases !== 'object' || liveKeys.size === 0) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(aliases)
+      .filter(([aliasKey, primaryKey]) => liveKeys.has(aliasKey) || liveKeys.has(primaryKey)),
+  );
+};
+
+const pruneFullAudioCacheAliasesForDeletedKeys = async (deletedKeys) => {
+  if (!hasStorageArea('local') || !deletedKeys || deletedKeys.size === 0) {
+    return false;
+  }
+
+  const aliases = await readFullAudioCacheAliases();
+  const nextAliases = removeFullAudioAliasesForCacheKeys(aliases, deletedKeys);
+  if (Object.keys(nextAliases).length === Object.keys(aliases).length) {
+    return false;
+  }
+  return writeFullAudioCacheAliases(nextAliases);
+};
+
 const getFullAudioCacheUsage = async () => {
   if (!('caches' in globalThis)) {
     return { bytes: 0, entries: 0 };
@@ -235,6 +272,7 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
     const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
     const requests = await cache.keys();
     if (!Array.isArray(requests) || requests.length === 0) {
+      await writeFullAudioCacheAliases({});
       await writeLastFullAudioPruneTime(now);
       return;
     }
@@ -285,7 +323,22 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
         }
         if (await cache.delete(entry.request)) {
           totalBytes -= entry.size;
+          deletedRequests.add(entry.request.url);
         }
+      }
+    }
+
+    if (hasStorageArea('local')) {
+      const liveUrls = new Set(
+        entries
+          .map((entry) => entry.request.url)
+          .filter((url) => !deletedRequests.has(url)),
+      );
+      const aliases = await readFullAudioCacheAliases();
+      const aliasesWithoutDeletedKeys = removeFullAudioAliasesForCacheKeys(aliases, deletedRequests);
+      const compactAliases = compactFullAudioAliasesForCacheKeys(aliasesWithoutDeletedKeys, liveUrls);
+      if (JSON.stringify(compactAliases) !== JSON.stringify(aliases)) {
+        await writeFullAudioCacheAliases(compactAliases);
       }
     }
   } catch (error) {
@@ -304,14 +357,23 @@ const readCachedFullAudioBlob = async (setId, audioFilename) => {
     const now = Date.now();
     const aliases = await readFullAudioCacheAliases();
     for (const key of getFullAudioCacheKeyCandidates(setId, audioFilename)) {
-      const response = await cache.match(key) || (aliases[key] ? await cache.match(aliases[key]) : null);
+      let matchedKey = key;
+      let response = await cache.match(key);
+      if (!response && aliases[key]) {
+        matchedKey = aliases[key];
+        response = await cache.match(matchedKey);
+      }
       if (response?.ok) {
         const cachedAtMs = parseCachedAtMs(response);
         if (cachedAtMs > 0 && (now - cachedAtMs) > FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS) {
-          await cache.delete(key);
+          const deletedKeys = new Set([key, matchedKey]);
+          await cache.delete(matchedKey);
+          await pruneFullAudioCacheAliasesForDeletedKeys(deletedKeys);
           continue;
         }
         return await response.blob();
+      } else if (aliases[key]) {
+        await pruneFullAudioCacheAliasesForDeletedKeys(new Set([key]));
       }
     }
     return null;
@@ -368,6 +430,8 @@ export {
   getFullAudioCacheKeyCandidates,
   getFullAudioCacheAliasEntries,
   getPrimaryFullAudioCacheKey,
+  removeFullAudioAliasesForCacheKeys,
+  compactFullAudioAliasesForCacheKeys,
   getFullAudioCacheUsage,
   clearFullAudioCache,
   pruneFullAudioCache,

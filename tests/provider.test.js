@@ -54,6 +54,24 @@ test('autoFallback false only returns the best currently enabled provider', () =
   assert.equal(sequence[0].id, 'mino');
 });
 
+test('auto mode returns cooled down providers only when every enabled provider is cooling down', () => {
+  resetProviderRuntimeState();
+  const cooldownUntil = Date.now() + 60_000;
+  providerCooldowns.mino = cooldownUntil;
+  providerCooldowns.osu_direct = cooldownUntil;
+  providerCooldowns.nerinyan = cooldownUntil;
+  providerCooldowns.sayobot = cooldownUntil;
+
+  const sequence = getProviderSequenceForDownload(
+    'auto',
+    ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
+    [],
+    true,
+  );
+
+  assert.deepEqual(sequence.map((source) => source.id), ['mino', 'osu_direct', 'nerinyan', 'sayobot']);
+});
+
 test('forced provider override returns that provider', () => {
   resetProviderRuntimeState();
   const sequence = getProviderSequenceForDownload('nerinyan');

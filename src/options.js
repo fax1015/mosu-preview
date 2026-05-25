@@ -35,7 +35,9 @@ const standardSliderEndCircles = document.querySelector('#standardSliderEndCircl
 const autoFallbackToggle = document.querySelector('#autoFallback');
 const providerPriorityList = document.querySelector('#providerPriorityList');
 const saveStatus = document.querySelector('#saveStatus');
-const isMobileOptionsLayout = globalThis.matchMedia?.('(max-width: 640px)')?.matches ?? false;
+const mobileWidthQuery = globalThis.matchMedia?.('(max-width: 640px)') ?? null;
+const coarsePointerQuery = globalThis.matchMedia?.('(hover: none), (pointer: coarse)') ?? null;
+let isMobileOptionsLayout = Boolean(mobileWidthQuery?.matches || coarsePointerQuery?.matches);
 let saveStatusHideTimeout = null;
 let saveStatusClearTimeout = null;
 
@@ -400,6 +402,18 @@ const renderProviderPriority = () => {
   });
 };
 
+const refreshProviderPriorityInteractionMode = () => {
+  const nextIsMobileOptionsLayout = Boolean(mobileWidthQuery?.matches || coarsePointerQuery?.matches);
+  if (nextIsMobileOptionsLayout === isMobileOptionsLayout) {
+    return;
+  }
+  isMobileOptionsLayout = nextIsMobileOptionsLayout;
+  activePointerDrag = null;
+  providerPriorityList?.classList.remove('is-dragging-active');
+  clearProviderPriorityDragStyles();
+  renderProviderPriority();
+};
+
 const moveProvider = async (id, direction) => {
   const allIds = ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
   if (currentProviderPriority.length === 0) {
@@ -614,3 +628,6 @@ const initialize = async () => {
 };
 
 initialize();
+
+mobileWidthQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);
+coarsePointerQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);

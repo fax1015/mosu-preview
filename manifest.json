@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "mosu! preview",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "minimum_chrome_version": "121",
   "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
   "permissions": [

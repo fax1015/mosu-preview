@@ -959,7 +959,7 @@ body {
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 640px), (hover: none), (pointer: coarse) {
   .priority-handle {
     display: none;
   }

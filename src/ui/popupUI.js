@@ -11,7 +11,7 @@ const bindPopupUiEvents = ({
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
-    infoButton,
+    infoButtons = [],
     infoModal,
     infoBackdrop,
     infoCloseButton,
@@ -353,8 +353,10 @@ const bindPopupUiEvents = ({
     toggleDebugPanelOpen();
   });
 
-  infoButton?.addEventListener('click', () => {
-    setInfoMenuOpen(!state.infoMenuOpen);
+  infoButtons.forEach((infoButton) => {
+    infoButton.addEventListener('click', () => {
+      setInfoMenuOpen(!state.infoMenuOpen);
+    });
   });
 
   infoBackdrop?.addEventListener('click', () => {

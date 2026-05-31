@@ -99,7 +99,8 @@ const debugLog = document.querySelector('#mapPreviewDebugLog');
 const debugRunButton = document.querySelector('#mapPreviewDebugRunBtn');
 const debugClearButton = document.querySelector('#mapPreviewDebugClearBtn');
 const debugCloseButton = document.querySelector('#mapPreviewDebugCloseBtn');
-const infoButton = document.querySelector('#mapPreviewInfoBtn');
+const infoButtons = [...document.querySelectorAll('.js-map-preview-info-btn')];
+const infoButton = infoButtons[0] || null;
 const infoModal = document.querySelector('#mapPreviewInfoModal');
 const infoBackdrop = document.querySelector('#mapPreviewInfoBackdrop');
 const infoCloseButton = document.querySelector('#mapPreviewInfoCloseBtn');
@@ -368,9 +369,9 @@ const renderInfoMenu = () => {
     infoModal.classList.toggle('is-background-menu', state.shortcutsMenuOpen);
   }
 
-  if (infoButton) {
-    infoButton.setAttribute('aria-expanded', (state.infoMenuOpen || state.shortcutsMenuOpen) ? 'true' : 'false');
-  }
+  infoButtons.forEach((button) => {
+    button.setAttribute('aria-expanded', (state.infoMenuOpen || state.shortcutsMenuOpen) ? 'true' : 'false');
+  });
 };
 
 const setInfoMenuOpen = (isOpen) => {
@@ -1714,7 +1715,7 @@ bindPopupUiEvents({
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
-    infoButton,
+    infoButtons,
     infoModal,
     infoBackdrop,
     infoCloseButton,

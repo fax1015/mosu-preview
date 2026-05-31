@@ -64,8 +64,9 @@
         </div>
       </div>
       <div class="map-preview-header-actions">
-        <button type="button" class="map-preview-info-btn" id="mapPreviewInfoBtn" aria-haspopup="dialog"
-          aria-expanded="false" aria-controls="mapPreviewInfoModal" title="Menu">
+        <button type="button" class="map-preview-info-btn js-map-preview-info-btn" id="mapPreviewHeaderInfoBtn"
+          aria-haspopup="dialog" aria-expanded="false" aria-controls="mapPreviewInfoModal" title="Menu"
+          aria-label="Open options menu">
           <svg viewBox="0 0 448 512" width="12" height="12" fill="currentColor">
             <path
               d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z" />
@@ -118,28 +119,23 @@
       <div class="map-preview-info-modal" role="dialog" aria-modal="true" aria-labelledby="mapPreviewInfoTitle">
         <div class="map-preview-info-header">
           <p class="map-preview-info-title" id="mapPreviewInfoTitle">Options</p>
-          <button type="button" class="map-preview-info-close" id="mapPreviewInfoCloseBtn"
-            aria-label="Close options menu">×</button>
-        </div>
-        <div class="map-preview-info-section">
-          <p class="map-preview-info-section-title">Quick help</p>
-          <div class="map-preview-info-actions">
-            <button type="button" class="map-preview-info-link" id="mapPreviewHelpBtn">
-              <span class="map-preview-info-link-icon" aria-hidden="true">
-                <svg viewBox="0 0 576 512">
+          <div class="map-preview-info-header-actions">
+            <button type="button" class="map-preview-info-icon-btn" id="mapPreviewHelpBtn" aria-label="Open shortcuts"
+              title="Shortcuts">
+                <svg viewBox="0 0 640 640">
                   <path
-                    d="M64 64C28.7 64 0 92.7 0 128V384c0 35.3 28.7 64 64 64H512c35.3 0 64-28.7 64-64V128c0-35.3-28.7-64-64-64H64zM96 160c0-17.7 14.3-32 32-32H160c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32zm128 0c0-17.7 14.3-32 32-32H288c17.7 0 32 14.3 32 32s-14.3 32-32 32H256c-17.7 0-32-14.3-32-32zm128 0c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H384c-17.7 0-32-14.3-32-32zM96 256c0-17.7 14.3-32 32-32H448c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32zM128 320H448c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32s14.3-32 32-32z" />
+                    d="M96 128C60.7 128 32 156.7 32 192L32 448C32 483.3 60.7 512 96 512L544 512C579.3 512 608 483.3 608 448L608 192C608 156.7 579.3 128 544 128L96 128zM112 192L144 192C152.8 192 160 199.2 160 208L160 240C160 248.8 152.8 256 144 256L112 256C103.2 256 96 248.8 96 240L96 208C96 199.2 103.2 192 112 192zM96 304C96 295.2 103.2 288 112 288L144 288C152.8 288 160 295.2 160 304L160 336C160 344.8 152.8 352 144 352L112 352C103.2 352 96 344.8 96 336L96 304zM208 192L240 192C248.8 192 256 199.2 256 208L256 240C256 248.8 248.8 256 240 256L208 256C199.2 256 192 248.8 192 240L192 208C192 199.2 199.2 192 208 192zM192 304C192 295.2 199.2 288 208 288L240 288C248.8 288 256 295.2 256 304L256 336C256 344.8 248.8 352 240 352L208 352C199.2 352 192 344.8 192 336L192 304zM208 384L432 384C440.8 384 448 391.2 448 400L448 432C448 440.8 440.8 448 432 448L208 448C199.2 448 192 440.8 192 432L192 400C192 391.2 199.2 384 208 384zM288 208C288 199.2 295.2 192 304 192L336 192C344.8 192 352 199.2 352 208L352 240C352 248.8 344.8 256 336 256L304 256C295.2 256 288 248.8 288 240L288 208zM304 288L336 288C344.8 288 352 295.2 352 304L352 336C352 344.8 344.8 352 336 352L304 352C295.2 352 288 344.8 288 336L288 304C288 295.2 295.2 288 304 288zM384 208C384 199.2 391.2 192 400 192L432 192C440.8 192 448 199.2 448 208L448 240C448 248.8 440.8 256 432 256L400 256C391.2 256 384 248.8 384 240L384 208zM400 288L432 288C440.8 288 448 295.2 448 304L448 336C448 344.8 440.8 352 432 352L400 352C391.2 352 384 344.8 384 336L384 304C384 295.2 391.2 288 400 288zM480 208C480 199.2 487.2 192 496 192L528 192C536.8 192 544 199.2 544 208L544 240C544 248.8 536.8 256 528 256L496 256C487.2 256 480 248.8 480 240L480 208zM496 288L528 288C536.8 288 544 295.2 544 304L544 336C544 344.8 536.8 352 528 352L496 352C487.2 352 480 344.8 480 336L480 304C480 295.2 487.2 288 496 288z" />
                 </svg>
-              </span>
-              <span>Shortcuts</span>
             </button>
+            <button type="button" class="map-preview-info-close" id="mapPreviewInfoCloseBtn"
+              aria-label="Close options menu">×</button>
           </div>
         </div>
         <div class="map-preview-info-section">
           <p class="map-preview-info-section-title">Report a problem</p>
           <div class="map-preview-info-actions">
             <button type="button" class="map-preview-info-link" id="mapPreviewInfoIssueBtn">
-              <span class="map-preview-info-link-icon" aria-hidden="true">
+              <span class="map-preview-info-link-icon map-preview-info-link-icon--issue" aria-hidden="true">
                 <svg viewBox="0 0 512 512">
                   <path
                     d="M256 48C141.1 48 48 141.1 48 256s93.1 208 208 208 208-93.1 208-208S370.9 48 256 48zm0 320a24 24 0 1 1 0-48 24 24 0 1 1 0 48zm24-96c0 13.3-10.7 24-24 24s-24-10.7-24-24V160c0-13.3 10.7-24 24-24s24 10.7 24 24V272z" />
@@ -148,7 +144,7 @@
               <span>Open an issue</span>
             </button>
             <button type="button" class="map-preview-info-link" id="mapPreviewInfoOsuBtn">
-              <span class="map-preview-info-link-icon" aria-hidden="true">
+              <span class="map-preview-info-link-icon map-preview-info-link-icon--settings" aria-hidden="true">
                 <svg viewBox="0 0 512 512">
                   <path
                     d="M256 32C114.6 32 0 125.1 0 240c0 49.6 21.4 95.1 57 130.8-8.6 30.1-27.8 57.4-28.1 57.7-3.6 5-4.1 11.6-1.3 17.1S35.7 454 42 454c40.6 0 72.7-15.3 94.1-30.2 35.5 15.5 76.3 24.2 119.9 24.2 141.4 0 256-93.1 256-208S397.4 32 256 32zm-96 240a32 32 0 1 1 0-64 32 32 0 1 1 0 64zm96 0a32 32 0 1 1 0-64 32 32 0 1 1 0 64zm96 0a32 32 0 1 1 0-64 32 32 0 1 1 0 64z" />
@@ -220,13 +216,23 @@
     <div class="map-preview-recent-panel" id="mapPreviewRecentPanel" hidden>
       <div class="map-preview-recent-header">
         <p class="map-preview-recent-title">Cached mapsets</p>
-        <button type="button" class="map-preview-recent-clear-btn" id="mapPreviewRecentClearBtn"
-          title="Clear cache" aria-label="Clear cache">
-          <svg viewBox="0 0 448 512" width="14" height="14" fill="currentColor">
-            <path
-              d="M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 17.7L320 32h96c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 32 32 32h96l7.2-14.3zM32 128H416V448c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V128zm96 80v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16zm96 0v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16zm96 0v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16z" />
-          </svg>
-        </button>
+        <div class="map-preview-recent-actions">
+          <button type="button" class="map-preview-recent-action-btn js-map-preview-info-btn"
+            id="mapPreviewRecentInfoBtn" aria-haspopup="dialog" aria-expanded="false"
+            aria-controls="mapPreviewInfoModal" title="Menu" aria-label="Open options menu">
+            <svg viewBox="0 0 448 512" fill="currentColor">
+              <path
+                d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z" />
+            </svg>
+          </button>
+          <button type="button" class="map-preview-recent-action-btn map-preview-recent-clear-btn"
+            id="mapPreviewRecentClearBtn" title="Clear cache" aria-label="Clear cache">
+            <svg viewBox="0 0 448 512" fill="currentColor">
+              <path
+                d="M135.2 17.7C140.6 6.8 151.7 0 163.8 0H284.2c12.1 0 23.2 6.8 28.6 17.7L320 32h96c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 96 0 81.7 0 64S14.3 32 32 32h96l7.2-14.3zM32 128H416V448c0 35.3-28.7 64-64 64H96c-35.3 0-64-28.7-64-64V128zm96 80v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16zm96 0v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16zm96 0v192c0 8.8 7.2 16 16 16s16-7.2 16-16V208c0-8.8-7.2-16-16-16s-16 7.2-16 16z" />
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="map-preview-recent-list" id="mapPreviewRecentList">
         <!-- Recent entries will be injected here -->

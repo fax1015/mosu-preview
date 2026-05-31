@@ -11,10 +11,10 @@ const createUnsupportedViewController = ({
   config,
 }) => {
   const getUnsupportedAsciiGridSize = () => {
-    const width = Math.max(140, unsupportedPanel?.clientWidth || 0);
-    const height = Math.max(120, unsupportedPanel?.clientHeight || 0);
-    const cols = Math.max(26, Math.min(120, Math.ceil(width / config.charWidthPx) + 1));
-    const rows = Math.max(12, Math.min(40, Math.ceil(height / config.charHeightPx) + 1));
+    const width = Math.max(140, unsupportedAscii?.clientWidth || unsupportedPanel?.clientWidth || 0);
+    const height = Math.max(120, unsupportedAscii?.clientHeight || unsupportedPanel?.clientHeight || 0);
+    const cols = Math.max(26, Math.min(120, Math.floor(width / config.charWidthPx) - 1));
+    const rows = Math.max(12, Math.min(40, Math.floor(height / config.charHeightPx) - 1));
     return { cols, rows };
   };
 

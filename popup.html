@@ -112,22 +112,65 @@
     </div>
     <div class="map-preview-info-modal-shell" id="mapPreviewInfoModal" hidden>
       <button type="button" class="map-preview-info-backdrop" id="mapPreviewInfoBackdrop"
-        aria-label="Close report menu"></button>
+        aria-label="Close options menu"></button>
       <div class="map-preview-info-banner" aria-hidden="true">like the extension? please share the word! <span
           class="map-preview-info-banner-heart">&lt;3</span></div>
       <div class="map-preview-info-modal" role="dialog" aria-modal="true" aria-labelledby="mapPreviewInfoTitle">
         <div class="map-preview-info-header">
-          <p class="map-preview-info-title" id="mapPreviewInfoTitle">Report a problem</p>
+          <p class="map-preview-info-title" id="mapPreviewInfoTitle">Options</p>
           <button type="button" class="map-preview-info-close" id="mapPreviewInfoCloseBtn"
-            aria-label="Close report menu">×</button>
+            aria-label="Close options menu">×</button>
         </div>
-        <div class="map-preview-info-actions">
-          <button type="button" class="map-preview-info-link" id="mapPreviewHelpBtn">Shortcuts</button>
-          <button type="button" class="map-preview-info-link" id="mapPreviewInfoIssueBtn">Open an issue</button>
-          <button type="button" class="map-preview-info-link" id="mapPreviewInfoOsuBtn">DM me on osu!</button>
+        <div class="map-preview-info-section">
+          <p class="map-preview-info-section-title">Quick help</p>
+          <div class="map-preview-info-actions">
+            <button type="button" class="map-preview-info-link" id="mapPreviewHelpBtn">
+              <span class="map-preview-info-link-icon" aria-hidden="true">
+                <svg viewBox="0 0 576 512">
+                  <path
+                    d="M64 64C28.7 64 0 92.7 0 128V384c0 35.3 28.7 64 64 64H512c35.3 0 64-28.7 64-64V128c0-35.3-28.7-64-64-64H64zM96 160c0-17.7 14.3-32 32-32H160c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32zm128 0c0-17.7 14.3-32 32-32H288c17.7 0 32 14.3 32 32s-14.3 32-32 32H256c-17.7 0-32-14.3-32-32zm128 0c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H384c-17.7 0-32-14.3-32-32zM96 256c0-17.7 14.3-32 32-32H448c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32zM128 320H448c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32s14.3-32 32-32z" />
+                </svg>
+              </span>
+              <span>Shortcuts</span>
+            </button>
+          </div>
         </div>
-        <div class="map-preview-info-footer">
-          <button type="button" class="map-preview-info-link" id="mapPreviewInfoOptionsBtn">Open settings</button>
+        <div class="map-preview-info-section">
+          <p class="map-preview-info-section-title">Report a problem</p>
+          <div class="map-preview-info-actions">
+            <button type="button" class="map-preview-info-link" id="mapPreviewInfoIssueBtn">
+              <span class="map-preview-info-link-icon" aria-hidden="true">
+                <svg viewBox="0 0 512 512">
+                  <path
+                    d="M256 48C141.1 48 48 141.1 48 256s93.1 208 208 208 208-93.1 208-208S370.9 48 256 48zm0 320a24 24 0 1 1 0-48 24 24 0 1 1 0 48zm24-96c0 13.3-10.7 24-24 24s-24-10.7-24-24V160c0-13.3 10.7-24 24-24s24 10.7 24 24V272z" />
+                </svg>
+              </span>
+              <span>Open an issue</span>
+            </button>
+            <button type="button" class="map-preview-info-link" id="mapPreviewInfoOsuBtn">
+              <span class="map-preview-info-link-icon" aria-hidden="true">
+                <svg viewBox="0 0 512 512">
+                  <path
+                    d="M256 32C114.6 32 0 125.1 0 240c0 49.6 21.4 95.1 57 130.8-8.6 30.1-27.8 57.4-28.1 57.7-3.6 5-4.1 11.6-1.3 17.1S35.7 454 42 454c40.6 0 72.7-15.3 94.1-30.2 35.5 15.5 76.3 24.2 119.9 24.2 141.4 0 256-93.1 256-208S397.4 32 256 32zm-96 240a32 32 0 1 1 0-64 32 32 0 1 1 0 64zm96 0a32 32 0 1 1 0-64 32 32 0 1 1 0 64zm96 0a32 32 0 1 1 0-64 32 32 0 1 1 0 64z" />
+                </svg>
+              </span>
+              <span>DM me on osu!</span>
+            </button>
+          </div>
+        </div>
+        <div class="map-preview-info-section">
+          <p class="map-preview-info-section-title">Preferences</p>
+          <div class="map-preview-info-actions">
+            <button type="button" class="map-preview-info-link" id="mapPreviewInfoOptionsBtn">
+              <span class="map-preview-info-link-icon" aria-hidden="true">
+                <svg viewBox="0 0 512 512">
+                  <path
+                    d="M495.9 166.6c3.2 8.7.5 18.4-6.4 24.6l-43.3 39.4c1.1 8.3 1.7 16.8 1.7 25.4s-.6 17.1-1.7 25.4l43.3 39.4c6.9 6.2 9.6 15.9 6.4 24.6-4.4 11.9-9.7 23.3-15.8 34.3l-4.7 8.1c-6.6 11-14 21.4-22.1 31.2-5.9 7.2-15.7 9.6-24.5 6.8l-55.7-17.7c-13.4 10.3-28.2 18.9-44 25.4L316.7 491c-1.9 9.1-9.2 16.1-18.4 17.8-13.9 2.6-28.1 4-42.3 4s-28.4-1.3-42.3-4c-9.2-1.7-16.5-8.7-18.4-17.8l-12.4-57.5c-15.8-6.5-30.6-15.1-44-25.4L83.1 425.9c-8.8 2.8-18.6.3-24.5-6.8-8.1-9.8-15.5-20.2-22.1-31.2l-4.7-8.1c-6.1-11-11.4-22.4-15.8-34.3-3.2-8.7-.5-18.4 6.4-24.6l43.3-39.4C64.6 273.1 64 264.6 64 256s.6-17.1 1.7-25.4L22.4 191.2c-6.9-6.2-9.6-15.9-6.4-24.6 4.4-11.9 9.7-23.3 15.8-34.3l4.7-8.1c6.6-11 14-21.4 22.1-31.2 5.9-7.2 15.7-9.6 24.5-6.8l55.7 17.7c13.4-10.3 28.2-18.9 44-25.4L195.3 21c1.9-9.1 9.2-16.1 18.4-17.8C227.6.6 241.8-.8 256-.8s28.4 1.3 42.3 4c9.2 1.7 16.5 8.7 18.4 17.8l12.4 57.5c15.8 6.5 30.6 15.1 44 25.4l55.7-17.7c8.8-2.8 18.6-.3 24.5 6.8 8.1 9.8 15.5 20.2 22.1 31.2l4.7 8.1c6.1 11 11.4 22.4 15.8 34.3zM256 336a80 80 0 1 0 0-160 80 80 0 1 0 0 160z" />
+                </svg>
+              </span>
+              <span>Open settings</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

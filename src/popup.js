@@ -117,6 +117,8 @@ const recentClearBtn = document.querySelector('#mapPreviewRecentClearBtn');
 
 let lastInfoFocus = null;
 let lastShortcutsFocus = null;
+const MODAL_TRANSITION_MS = 180;
+const modalHideTimers = new WeakMap();
 
 const restoreFocus = (preferredElement, fallbackElement) => {
   const target = preferredElement instanceof HTMLElement
@@ -125,6 +127,36 @@ const restoreFocus = (preferredElement, fallbackElement) => {
     ? preferredElement
     : fallbackElement;
   target?.focus?.();
+};
+
+const setModalShellVisible = (modalShell, isVisible) => {
+  if (!modalShell) {
+    return;
+  }
+
+  const hideTimer = modalHideTimers.get(modalShell);
+  if (hideTimer) {
+    clearTimeout(hideTimer);
+    modalHideTimers.delete(modalShell);
+  }
+
+  if (isVisible) {
+    modalShell.hidden = false;
+    modalShell.classList.remove('is-closing');
+    modalShell.classList.add('is-visible');
+    void modalShell.offsetWidth;
+    modalShell.classList.add('is-open');
+    return;
+  }
+
+  modalShell.classList.remove('is-open');
+  modalShell.classList.add('is-closing');
+  const nextHideTimer = registry.addTimeout(setTimeout(() => {
+    modalShell.hidden = true;
+    modalShell.classList.remove('is-visible', 'is-closing');
+    modalHideTimers.delete(modalShell);
+  }, MODAL_TRANSITION_MS));
+  modalHideTimers.set(modalShell, nextHideTimer);
 };
 
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
@@ -332,11 +364,12 @@ const {
 
 const renderInfoMenu = () => {
   if (infoModal) {
-    infoModal.hidden = !state.infoMenuOpen;
+    setModalShellVisible(infoModal, state.infoMenuOpen || state.shortcutsMenuOpen);
+    infoModal.classList.toggle('is-background-menu', state.shortcutsMenuOpen);
   }
 
   if (infoButton) {
-    infoButton.setAttribute('aria-expanded', state.infoMenuOpen ? 'true' : 'false');
+    infoButton.setAttribute('aria-expanded', (state.infoMenuOpen || state.shortcutsMenuOpen) ? 'true' : 'false');
   }
 };
 
@@ -344,8 +377,9 @@ const setInfoMenuOpen = (isOpen) => {
   if (isOpen) {
     lastInfoFocus = document.activeElement instanceof HTMLElement ? document.activeElement : infoButton;
   }
-  setUiState({ infoMenuOpen: isOpen });
+  setUiState({ infoMenuOpen: isOpen, shortcutsMenuOpen: isOpen ? state.shortcutsMenuOpen : false });
   renderInfoMenu();
+  renderShortcutsMenu();
   if (isOpen) {
     infoCloseButton?.focus();
   } else if (lastInfoFocus) {
@@ -369,16 +403,18 @@ const openSupportLink = async (url) => {
 
 const renderShortcutsMenu = () => {
   if (shortcutsModal) {
-    shortcutsModal.hidden = !state.shortcutsMenuOpen;
+    setModalShellVisible(shortcutsModal, state.shortcutsMenuOpen);
   }
 };
 
 const setShortcutsMenuOpen = (isOpen) => {
   if (isOpen) {
     lastShortcutsFocus = document.activeElement instanceof HTMLElement ? document.activeElement : shortcutsButton;
-    setInfoMenuOpen(false);
+    setUiState({ infoMenuOpen: true, shortcutsMenuOpen: true });
+  } else {
+    setUiState({ infoMenuOpen: true, shortcutsMenuOpen: false });
   }
-  setUiState({ shortcutsMenuOpen: isOpen });
+  renderInfoMenu();
   renderShortcutsMenu();
   if (isOpen) {
     shortcutsCloseButton?.focus();

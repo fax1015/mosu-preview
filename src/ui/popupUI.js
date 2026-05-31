@@ -420,12 +420,12 @@ const bindPopupUiEvents = ({
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
-      if (state.infoMenuOpen) {
-        setInfoMenuOpen(false);
-        return;
-      }
       if (state.shortcutsMenuOpen) {
         setShortcutsMenuOpen(false);
+        return;
+      }
+      if (state.infoMenuOpen) {
+        setInfoMenuOpen(false);
         return;
       }
       window.close();

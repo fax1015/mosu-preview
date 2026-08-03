@@ -90,12 +90,40 @@ const formatTime = (ms) => {
 
 const withAlpha = (rgb, alpha) => `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${clamp(alpha, 0, 1)})`;
 
+const drawRoundedRect = (ctx, x, y, width, height, radius, stroke = false) => {
+  const safeRadius = Math.max(0, Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2));
+  if (safeRadius <= 0 || typeof ctx.roundRect !== 'function') {
+    if (stroke) ctx.strokeRect(x, y, width, height);
+    else ctx.fillRect(x, y, width, height);
+    return;
+  }
+
+  ctx.beginPath();
+  ctx.roundRect(x, y, width, height, safeRadius);
+  if (stroke) ctx.stroke();
+  else ctx.fill();
+};
+
+// Matches osu!lazer's default legacy combo colours.
 const DEFAULT_COLOURS = [
-  { r: 255, g: 102, b: 171 },
-  { r: 92, g: 197, b: 255 },
-  { r: 132, g: 255, b: 128 },
-  { r: 255, g: 218, b: 89 },
+  { r: 255, g: 192, b: 0 },
+  { r: 0, g: 202, b: 0 },
+  { r: 18, g: 124, b: 255 },
+  { r: 242, g: 24, b: 57 },
 ];
+
+const getComboColourIndex = (object) => {
+  const oneBasedIndex = Number.isFinite(object?.comboIndexWithOffsets)
+    ? object.comboIndexWithOffsets
+    : (Number.isFinite(object?.comboIndex) ? object.comboIndex : 1);
+  return Math.max(0, oneBasedIndex - 1);
+};
+
+const getComboColour = (colours, object) => {
+  const palette = (Array.isArray(colours) && colours.length > 0) ? colours : DEFAULT_COLOURS;
+  const colourIndex = ((getComboColourIndex(object) % palette.length) + palette.length) % palette.length;
+  return palette[colourIndex] || DEFAULT_COLOURS[0];
+};
 
 const pointsEqual = (a, b, epsilon = 0.001) => (
   Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon
@@ -375,13 +403,13 @@ const samplePerfectCirclePath = (pathPoints) => {
   return dedupeAdjacentPoints(sampled);
 };
 
-const buildSliderPathPointsOsu = (object) => {
+const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   if (!object || object.kind !== 'slider') {
     return [];
   }
 
-  const stackIndex = object.stackIndex || 0;
-  const cachedPath = sliderPathCache.get(object);
+  const stackIndex = useStackOffset ? (object.stackIndex || 0) : 0;
+  const cachedPath = useStackOffset ? sliderPathCache.get(object) : null;
   if (
     cachedPath
     && Array.isArray(cachedPath.points)
@@ -391,7 +419,7 @@ const buildSliderPathPointsOsu = (object) => {
     return cachedPath.points;
   }
 
-  const stackOffset = getObjectStackOffset(object);
+  const stackOffset = useStackOffset ? getObjectStackOffset(object) : { x: 0, y: 0 };
   const rawPoints = [
     { x: object.x + stackOffset.x, y: object.y + stackOffset.y },
     ...(Array.isArray(object.sliderPoints) ? object.sliderPoints : []).map((point) => ({
@@ -406,7 +434,7 @@ const buildSliderPathPointsOsu = (object) => {
     : dedupeAdjacentPoints(rawPoints);
 
   if (basePoints.length < 2) {
-    sliderPathCache.set(object, { stackIndex, points: basePoints });
+    if (useStackOffset) sliderPathCache.set(object, { stackIndex, points: basePoints });
     return basePoints;
   }
 
@@ -422,7 +450,7 @@ const buildSliderPathPointsOsu = (object) => {
   }
   const trimmed = trimPathToLength(sampled, object.length);
   const points = (trimmed.length >= 2) ? trimmed : sampled;
-  sliderPathCache.set(object, { stackIndex, points });
+  if (useStackOffset) sliderPathCache.set(object, { stackIndex, points });
   return points;
 };
 
@@ -490,13 +518,30 @@ const getObjectStackOffset = (object) => {
     return { x: 0, y: 0 };
   }
 
-  const stackIndex = Math.max(0, Number(object.stackIndex) || 0);
-  if (stackIndex <= 0) {
+  const stackIndex = Number.isFinite(Number(object.stackIndex)) ? Number(object.stackIndex) : 0;
+  if (stackIndex === 0) {
     return { x: 0, y: 0 };
   }
 
-  const offset = stackIndex * STACK_OFFSET_OSU;
+  // osu!lazer's StackOffset is negative: positive stack heights move the
+  // earlier objects up/left, while the slider-tail correction can move later
+  // circles down/right with a negative stack height.
+  const offset = -stackIndex * STACK_OFFSET_OSU;
   return { x: offset, y: offset };
+};
+
+const getRawObjectStartPositionOsu = (object) => ({
+  x: Number(object?.x) || 0,
+  y: Number(object?.y) || 0,
+});
+
+const getRawObjectEndPositionOsu = (object) => {
+  if (!object || object.kind !== 'slider') {
+    return getRawObjectStartPositionOsu(object);
+  }
+
+  const path = buildSliderPathPointsOsu(object, false);
+  return path.at(-1) || getRawObjectStartPositionOsu(object);
 };
 
 const getObjectStartPositionOsu = (object) => {
@@ -588,32 +633,216 @@ const deterministicUnitValue = (seed) => {
   return x - Math.floor(x);
 };
 
-const assignComboIndices = (objects, comboColours = DEFAULT_COLOURS) => {
-  const colours = (comboColours && comboColours.length) ? comboColours : DEFAULT_COLOURS;
-  const colourCount = Math.max(1, colours.length);
+const assignComboIndices = (objects, mode = 0) => {
   let comboIndex = 0;
+  let comboIndexWithOffsets = 0;
   let comboNumber = 1;
+  let previousObject = null;
 
   for (let i = 0; i < objects.length; i += 1) {
-    if (i > 0 && objects[i].newCombo) {
-      comboIndex = (comboIndex + 1 + (objects[i].comboSkip || 0)) % colourCount;
+    const object = objects[i];
+    const isComboBarrier = (mode === 0 || mode === 2) && object.kind === 'spinner';
+    const startsCombo = !isComboBarrier && (
+      i === 0
+      || Boolean(object.newCombo)
+      || previousObject?.kind === 'spinner'
+    );
+
+    if (startsCombo) {
+      comboIndex += 1;
+      // Combo offsets are only meaningful when the beatmap explicitly marks
+      // the object as a new combo. The forced combo after a spinner/banana
+      // shower has no offset, matching osu!lazer's legacy decoder.
+      const comboOffset = object.newCombo && !isComboBarrier
+        ? Math.max(0, Number(object.comboSkip) || 0)
+        : 0;
+      comboIndexWithOffsets += 1 + comboOffset;
       comboNumber = 1;
     } else if (i > 0) {
       comboNumber += 1;
     }
-    objects[i].comboIndex = comboIndex;
-    objects[i].comboNumber = comboNumber;
+
+    object.comboIndex = comboIndex;
+    object.comboIndexWithOffsets = comboIndexWithOffsets;
+    object.comboNumber = comboNumber;
+    previousObject = object;
   }
 };
 
-const applyPreviewStacking = (objects, approachRate, stackLeniency) => {
+const calculatePreviewStackThreshold = (approachRate, stackLeniency) => (
+  Math.trunc(getApproachPreemptMs(approachRate)) * (
+    Number.isFinite(Number(stackLeniency)) ? Number(stackLeniency) : 0.7
+  )
+);
+
+const distanceBetweenOsuPositions = (first, second) => Math.hypot(
+  (first?.x || 0) - (second?.x || 0),
+  (first?.y || 0) - (second?.y || 0),
+);
+
+const applyPreviewStackingOld = (objects, approachRate, stackLeniency) => {
+  const stackThreshold = calculatePreviewStackThreshold(approachRate, stackLeniency);
+
+  for (let i = 0; i < objects.length; i += 1) {
+    const current = objects[i];
+    if ((current.stackIndex || 0) !== 0 && current.kind !== 'slider') {
+      continue;
+    }
+
+    let startTime = Number(current.endTime) || current.time;
+    let sliderStack = 0;
+    for (let j = i + 1; j < objects.length; j += 1) {
+      const next = objects[j];
+      if ((next.time - stackThreshold) > startTime) {
+        break;
+      }
+
+      const currentStart = getRawObjectStartPositionOsu(current);
+      const currentEnd = current.kind === 'slider'
+        ? getRawObjectEndPositionOsu(current)
+        : currentStart;
+      const nextStart = getRawObjectStartPositionOsu(next);
+
+      if (distanceBetweenOsuPositions(nextStart, currentStart) < 3) {
+        current.stackIndex = (current.stackIndex || 0) + 1;
+        startTime = next.time;
+      } else if (distanceBetweenOsuPositions(nextStart, currentEnd) < 3) {
+        sliderStack += 1;
+        next.stackIndex -= sliderStack;
+        startTime = next.time;
+      }
+    }
+  }
+};
+
+const applyPreviewStackingModern = (objects, approachRate, stackLeniency) => {
+  const stackThreshold = calculatePreviewStackThreshold(approachRate, stackLeniency);
+  const stackDistance = 3;
+  let extendedEndIndex = objects.length - 1;
+
+  // Extend the range when a stack continues beyond the caller-provided end.
+  // The preview processes the whole map, but retaining this pass mirrors lazer's
+  // handling of partial update ranges and keeps the dependency explicit.
+  for (let i = objects.length - 1; i >= 0; i -= 1) {
+    let stackBaseIndex = i;
+    for (let n = stackBaseIndex + 1; n < objects.length; n += 1) {
+      const stackBaseObject = objects[stackBaseIndex];
+      const objectN = objects[n];
+      if (stackBaseObject.kind === 'spinner') {
+        break;
+      }
+      if (objectN.kind === 'spinner') {
+        continue;
+      }
+
+      const stackBaseEndTime = Number(stackBaseObject.endTime) || stackBaseObject.time;
+      if (objectN.time - stackBaseEndTime > stackThreshold) {
+        break;
+      }
+
+      const stackedOnStart = getRawObjectStartPositionOsu(objectN);
+      if (
+        distanceBetweenOsuPositions(getRawObjectStartPositionOsu(stackBaseObject), stackedOnStart) < stackDistance
+        || (
+          stackBaseObject.kind === 'slider'
+          && distanceBetweenOsuPositions(getRawObjectEndPositionOsu(stackBaseObject), stackedOnStart) < stackDistance
+        )
+      ) {
+        stackBaseIndex = n;
+        objectN.stackIndex = 0;
+      }
+    }
+
+    if (stackBaseIndex > extendedEndIndex) {
+      extendedEndIndex = stackBaseIndex;
+    }
+  }
+
+  let extendedStartIndex = 0;
+  for (let i = extendedEndIndex; i > 0; i -= 1) {
+    let n = i;
+    let objectI = objects[i];
+    if ((objectI.stackIndex || 0) !== 0 || objectI.kind === 'spinner') {
+      continue;
+    }
+
+    if (objectI.kind !== 'slider') {
+      while (--n >= 0) {
+        const objectN = objects[n];
+        if (objectN.kind === 'spinner') {
+          continue;
+        }
+
+        const objectIEndTime = Number(objectN.endTime) || objectN.time;
+        if ((Math.trunc(objectI.time) - Math.trunc(objectIEndTime)) > stackThreshold) {
+          break;
+        }
+
+        if (n < extendedStartIndex) {
+          objectN.stackIndex = 0;
+          extendedStartIndex = n;
+        }
+
+        if (
+          objectN.kind === 'slider'
+          && distanceBetweenOsuPositions(
+            getRawObjectEndPositionOsu(objectN),
+            getRawObjectStartPositionOsu(objectI),
+          ) < stackDistance
+        ) {
+          const offset = (objectI.stackIndex || 0) - (objectN.stackIndex || 0) + 1;
+          for (let j = n + 1; j <= i; j += 1) {
+            const objectJ = objects[j];
+            if (
+              distanceBetweenOsuPositions(
+                getRawObjectEndPositionOsu(objectN),
+                getRawObjectStartPositionOsu(objectJ),
+              ) < stackDistance
+            ) {
+              objectJ.stackIndex -= offset;
+            }
+          }
+          break;
+        }
+
+        if (
+          distanceBetweenOsuPositions(
+            getRawObjectStartPositionOsu(objectN),
+            getRawObjectStartPositionOsu(objectI),
+          ) < stackDistance
+        ) {
+          objectN.stackIndex = (objectI.stackIndex || 0) + 1;
+          objectI = objectN;
+        }
+      }
+    } else {
+      while (--n >= 0) {
+        const objectN = objects[n];
+        if (objectN.kind === 'spinner') {
+          continue;
+        }
+        if (objectI.time - objectN.time > stackThreshold) {
+          break;
+        }
+
+        if (
+          distanceBetweenOsuPositions(
+            getRawObjectEndPositionOsu(objectN),
+            getRawObjectStartPositionOsu(objectI),
+          ) < stackDistance
+        ) {
+          objectN.stackIndex = (objectI.stackIndex || 0) + 1;
+          objectI = objectN;
+        }
+      }
+    }
+  }
+};
+
+const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersion = 14) => {
   if (!Array.isArray(objects) || objects.length === 0) {
     return;
   }
-
-  const leniency = clamp(Number.isFinite(stackLeniency) ? stackLeniency : 0.7, 0, 2);
-  const stackTimeThreshold = getApproachPreemptMs(approachRate) * leniency;
-  const stackDistanceThreshold = 3;
 
   for (const object of objects) {
     object.stackIndex = 0;
@@ -621,32 +850,10 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency) => {
     standardSliderTickCache.delete(object);
   }
 
-  for (let i = 1; i < objects.length; i += 1) {
-    const object = objects[i];
-    if (!object || object.kind === 'spinner') {
-      continue;
-    }
-
-    let bestStack = 0;
-    for (let j = i - 1; j >= 0; j -= 1) {
-      const previous = objects[j];
-      if (!previous || previous.kind === 'spinner') {
-        continue;
-      }
-
-      const dt = object.time - previous.time;
-      if (dt > stackTimeThreshold) {
-        break;
-      }
-
-      const dx = object.x - previous.x;
-      const dy = object.y - previous.y;
-      if (Math.hypot(dx, dy) <= stackDistanceThreshold) {
-        bestStack = Math.max(bestStack, (previous.stackIndex || 0) + 1);
-      }
-    }
-
-    object.stackIndex = bestStack;
+  if (Number(beatmapVersion) < 6) {
+    applyPreviewStackingOld(objects, approachRate, stackLeniency);
+  } else {
+    applyPreviewStackingModern(objects, approachRate, stackLeniency);
   }
 };
 
@@ -832,10 +1039,24 @@ export class PreviewRenderer {
       : DEFAULT_COLOURS;
 
     if (Array.isArray(this.mapData?.objects)) {
-      assignComboIndices(this.mapData.objects, this.comboColours);
+      assignComboIndices(this.mapData.objects, this.mapData.mode ?? 0);
       this.catchRenderObjects = null;
+      if ((this.mapData.mode ?? 0) === 2 && Array.isArray(this.mapData.catchObjects)) {
+        for (const catchObject of this.mapData.catchObjects) {
+          const sourceObject = this.mapData.objects[catchObject.sourceObjectIndex];
+          if (sourceObject) {
+            catchObject.comboIndex = sourceObject.comboIndex;
+            catchObject.comboIndexWithOffsets = sourceObject.comboIndexWithOffsets;
+          }
+        }
+      }
       if ((this.mapData.mode ?? 0) === 0) {
-        applyPreviewStacking(this.mapData.objects, this.mapData.approachRate, this.mapData.stackLeniency);
+        applyPreviewStacking(
+          this.mapData.objects,
+          this.mapData.approachRate,
+          this.mapData.stackLeniency,
+          this.mapData.beatmapVersion,
+        );
       } else {
         this.catcherRenderX = Number.NaN;
         this.catcherRenderTime = Number.NaN;
@@ -1059,6 +1280,8 @@ export class PreviewRenderer {
 
   getManiaTimingState(time) {
     const controlPoints = this.getManiaTimingControlPoints();
+    const applyInheritedSv = !(this.mapData?.conversion?.sourceMode === 0
+      && this.mapData?.conversion?.targetMode === 3);
     let beatLength = 60000 / 120;
     let svMultiplier = 1;
     let sectionStart = 0;
@@ -1072,7 +1295,7 @@ export class PreviewRenderer {
         beatLength = point.beatLength;
         svMultiplier = 1;
         sectionStart = point.time;
-      } else if (!point.uninherited && point.svMultiplier > 0) {
+      } else if (applyInheritedSv && !point.uninherited && point.svMultiplier > 0) {
         svMultiplier = point.svMultiplier;
       }
     }
@@ -1423,7 +1646,7 @@ export class PreviewRenderer {
         time,
         x: position.x,
         type,
-        comboIndex: object.comboIndex || 0,
+        comboIndexWithOffsets: getComboColourIndex(object),
       });
     };
 
@@ -1455,7 +1678,7 @@ export class PreviewRenderer {
             time: tinyTime,
             x: position.x,
             type: 'tinyDroplet',
-            comboIndex: object.comboIndex || 0,
+            comboIndexWithOffsets: getComboColourIndex(object),
           });
         }
       }
@@ -1479,7 +1702,7 @@ export class PreviewRenderer {
         time,
         x,
         type: 'banana',
-        comboIndex: object.comboIndex || 0,
+        comboIndexWithOffsets: getComboColourIndex(object),
       });
     }
 
@@ -1491,6 +1714,13 @@ export class PreviewRenderer {
       return this.catchRenderObjects;
     }
 
+    if (Array.isArray(this.mapData?.catchObjects)) {
+      this.catchRenderObjects = this.mapData.catchObjects
+        .map((object, index) => ({ ...object, renderId: Number.isInteger(object.renderId) ? object.renderId : index }))
+        .sort((a, b) => a.time - b.time || a.renderId - b.renderId);
+      return this.catchRenderObjects;
+    }
+
     const built = [];
     const objects = Array.isArray(this.mapData?.objects) ? this.mapData.objects : [];
     for (const object of objects) {
@@ -1498,7 +1728,7 @@ export class PreviewRenderer {
         continue;
       }
 
-      if (object.kind === 'spinner') {
+      if (object.kind === 'spinner' || object.taikoType === 'swell') {
         built.push(...this.buildCatchSpinnerRenderObjects(object));
       } else if (object.kind === 'slider') {
         built.push(...this.buildCatchSliderRenderObjects(object));
@@ -1507,7 +1737,7 @@ export class PreviewRenderer {
           time: object.time,
           x: object.x,
           type: 'fruit',
-          comboIndex: object.comboIndex || 0,
+          comboIndexWithOffsets: getComboColourIndex(object),
         });
       }
     }
@@ -1691,7 +1921,7 @@ export class PreviewRenderer {
         continue;
       }
 
-      if (object.kind === 'slider' || object.kind === 'hold') {
+      if (object.kind === 'slider' || object.kind === 'hold' || object.taikoType === 'drumroll') {
         const headX = taikoPositionAt(object.time, object.time);
         const tailX = taikoPositionAt(object.endTime, object.time);
         const leftX = Math.max(judgeX, Math.min(headX, tailX));
@@ -1759,8 +1989,9 @@ export class PreviewRenderer {
       }
 
       const hitSound = Number.isFinite(object.hitSound) ? object.hitSound : 0;
-      const isKat = (hitSound & (2 | 8)) !== 0;
-      const isFinish = (hitSound & 4) !== 0;
+      const isKat = object.taikoType === 'kat' || object.taikoType === 'rim'
+        || ((object.taikoType !== 'don') && (hitSound & (2 | 8)) !== 0);
+      const isFinish = Boolean(object.taikoStrong) || ((hitSound & 4) !== 0);
       const noteColor = isKat ? katColor : donColor;
       const baseRadius = Math.max(6, laneHeight * 0.28);
       const radius = baseRadius * (isFinish ? 1.38 : 1);
@@ -2065,7 +2296,7 @@ export class PreviewRenderer {
         continue;
       }
 
-      let color = comboColours[object.comboIndex % comboColours.length] || DEFAULT_COLOURS[0];
+      let color = getComboColour(comboColours, object);
       let radius = fruitRadius;
       if (object.type === 'droplet') {
         color = dropletColor;
@@ -2103,7 +2334,11 @@ export class PreviewRenderer {
     const objects = this.mapData.objects;
     const currentTime = this.currentTimeMs;
     const circleSize = this.mapData.circleSize;
-    const keys = clamp(Math.round(circleSize || 4), 1, 10);
+    const keys = clamp(
+      Math.round(this.mapData?.mania?.totalColumns || circleSize || 4),
+      1,
+      20,
+    );
     const laneAreaWidth = playfieldWidth * 0.62;
     const laneAreaX = playfieldX + ((playfieldWidth - laneAreaWidth) / 2);
     const laneWidth = laneAreaWidth / keys;
@@ -2175,10 +2410,6 @@ export class PreviewRenderer {
       if (object.endTime < visibleStart) {
         continue;
       }
-      if (object.kind === 'spinner') {
-        continue;
-      }
-
       const isHoldNote = object.kind === 'hold' || object.endTime > object.time;
       const dt = object.time - currentTime;
       const holdEndClampTime = object.endTime + postJudgeDelayMs;
@@ -2202,7 +2433,9 @@ export class PreviewRenderer {
       }
 
       const lane = clamp(
-        Math.floor((clamp(object.x, 0, OSU_WIDTH - 0.001) / OSU_WIDTH) * keys),
+        Number.isInteger(object.column)
+          ? object.column
+          : Math.floor((clamp(object.x, 0, OSU_WIDTH - 0.001) / OSU_WIDTH) * keys),
         0,
         keys - 1,
       );
@@ -2288,7 +2521,14 @@ export class PreviewRenderer {
           } else {
             ctx.fillStyle = withAlpha(noteFillColour, bodyAlpha);
           }
-          ctx.fillRect(noteX + (noteWidth * 0.2), bodyTop, noteWidth * 0.6, bodyHeight);
+          drawRoundedRect(
+            ctx,
+            noteX + (noteWidth * 0.2),
+            bodyTop,
+            noteWidth * 0.6,
+            bodyHeight,
+            Math.min(3, noteHeight * 0.28),
+          );
         }
       }
 
@@ -2297,10 +2537,18 @@ export class PreviewRenderer {
       }
 
       ctx.fillStyle = withAlpha(noteFillColour, alpha);
-      ctx.fillRect(noteX, headY, noteWidth, noteHeight);
+      drawRoundedRect(ctx, noteX, headY, noteWidth, noteHeight, Math.min(3, noteHeight * 0.28));
       ctx.strokeStyle = `rgba(255,255,255,${clamp(alpha * 0.8, 0, 1)})`;
       ctx.lineWidth = 1;
-      ctx.strokeRect(noteX + 0.5, headY + 0.5, noteWidth - 1, noteHeight - 1);
+      drawRoundedRect(
+        ctx,
+        noteX + 0.5,
+        headY + 0.5,
+        noteWidth - 1,
+        noteHeight - 1,
+        Math.min(2.5, noteHeight * 0.25),
+        true,
+      );
     }
   }
 
@@ -2410,7 +2658,7 @@ export class PreviewRenderer {
     visibleObjects.sort((a, b) => b.time - a.time);
 
     for (const object of visibleObjects) {
-      const combo = this.comboColours[object.comboIndex % this.comboColours.length] || DEFAULT_COLOURS[0];
+      const combo = getComboColour(this.comboColours, object);
       let sliderReverseIndicators = [];
       let sliderHeadCanvasPoint = null;
       let sliderTailCanvasPoint = null;
@@ -2892,4 +3140,13 @@ export class PreviewRenderer {
   }
 }
 
-export { formatTime, clamp, getCircleRadius, getStandardPlayfieldLayout };
+export {
+  DEFAULT_COLOURS,
+  assignComboIndices,
+  applyPreviewStacking,
+  formatTime,
+  clamp,
+  getComboColour,
+  getCircleRadius,
+  getStandardPlayfieldLayout,
+};

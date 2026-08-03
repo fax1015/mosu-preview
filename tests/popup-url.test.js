@@ -9,6 +9,7 @@ test('parses direct beatmap URLs', () => {
       valid: true,
       beatmapId: '456',
       setId: null,
+      mode: null,
       sourceUrl: 'https://osu.ppy.sh/beatmaps/456',
     },
   );
@@ -21,6 +22,7 @@ test('parses beatmapset hash URLs', () => {
       valid: true,
       beatmapId: '456',
       setId: '123',
+      mode: 3,
       sourceUrl: 'https://osu.ppy.sh/beatmapsets/123#mania/456',
     },
   );
@@ -33,7 +35,21 @@ test('parses beatmapset query difficulty URLs', () => {
       valid: true,
       beatmapId: '456',
       setId: '123',
+      mode: null,
       sourceUrl: 'https://osu.ppy.sh/beatmapsets/123?b=456',
+    },
+  );
+});
+
+test('parses target mode query parameters', () => {
+  assert.deepEqual(
+    extractBeatmapInfoFromUrl('https://osu.ppy.sh/beatmaps/456?mode=taiko'),
+    {
+      valid: true,
+      beatmapId: '456',
+      setId: null,
+      mode: 1,
+      sourceUrl: 'https://osu.ppy.sh/beatmaps/456?mode=taiko',
     },
   );
 });

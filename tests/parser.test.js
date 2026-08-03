@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBreakPeriods, parseMapPreviewData } from '../src/parser.js';
+import { parseBreakPeriods, parseColours, parseMapPreviewData } from '../src/parser.js';
+
+test('parses up to eight osu combo colours and ignores optional alpha', () => {
+  const colours = parseColours(`
+[Colours]
+Combo1: 255, 192, 0, 12 // alpha is ignored for beatmap colours
+Combo2: 0,202,0
+Combo9: 255,0,0
+combo3: 1,2,3
+Combo3: 18,124,255
+`);
+
+  assert.deepEqual(colours, [
+    { r: 255, g: 192, b: 0 },
+    { r: 0, g: 202, b: 0 },
+    { r: 18, g: 124, b: 255 },
+  ]);
+});
 
 test('missing ApproachRate falls back to OverallDifficulty', () => {
   const map = parseMapPreviewData(`
@@ -14,6 +31,31 @@ OverallDifficulty:8
 `);
 
   assert.equal(map.approachRate, 8);
+});
+
+test('parses HP drain and hit sample metadata', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+HPDrainRate:7
+OverallDifficulty:6
+
+[HitObjects]
+256,192,1000,1,5,2:3:4:80:hit.wav
+256,192,1500,2,0,B|356:192,2,200,2|4,2:3|3:4,1:2:0:60:slider.wav
+`);
+
+  assert.equal(map.hpDrainRate, 7);
+  assert.equal(map.objects[0].sampleSet, 2);
+  assert.equal(map.objects[0].additionSet, 3);
+  assert.equal(map.objects[0].customIndex, 4);
+  assert.equal(map.objects[0].sampleVolume, 80);
+  assert.equal(map.objects[0].sampleFilename, 'hit.wav');
+  assert.deepEqual(map.objects[1].nodeSamples, [
+    { normalSet: 2, additionSet: 3, edgeIndex: 0 },
+    { normalSet: 3, additionSet: 4, edgeIndex: 1 },
+  ]);
 });
 
 test('timing points are sorted before slider duration is calculated', () => {

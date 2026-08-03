@@ -33,6 +33,7 @@ import {
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
 import { extractBeatmapInfoFromUrl } from './core/beatmapUrl.js';
+import { convertMapForMode } from './core/beatmapConversion.js';
 import { getHistory, addToHistory, clearHistory, setHistoryDebugLogger } from './core/history.js';
 import {
   state,
@@ -1639,7 +1640,17 @@ const initializePreviewForCurrentTab = async () => {
     }
 
     const metadata = parseMetadata(osuContent);
-    const mapData = parseMapPreviewData(osuContent, { maxObjects: 12000 });
+    const parsedMapData = parseMapPreviewData(osuContent, { maxObjects: 12000 });
+    const requestedMode = Number.isInteger(info.mode) ? info.mode : parsedMapData.mode;
+    const mapData = convertMapForMode(parsedMapData, requestedMode);
+    const modeNames = ['osu!', 'taiko', 'catch', 'mania'];
+    if (mapData.mode !== parsedMapData.mode) {
+      addDebugLog(
+        `init: converted ${modeNames[parsedMapData.mode] || 'unknown'} -> ${modeNames[mapData.mode] || 'unknown'}`,
+      );
+    } else {
+      addDebugLog(`init: using ${modeNames[mapData.mode] || 'unknown'} ruleset`);
+    }
     const breaks = parseBreakPeriods(osuContent);
     const resolvedSetId = info.setId || extractSetIdFromMetadata(metadata.beatmapSetID);
     addDebugLog(`init: resolved set id ${resolvedSetId || 'none'}`);

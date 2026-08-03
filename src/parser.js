@@ -77,8 +77,10 @@ export const parseMapPreviewData = (content, options = {}) => {
   let circleSize = 5;
   let approachRate = null;
   let overallDifficulty = 5;
+  let hpDrainRate = 5;
   let stackLeniency = 0.7;
   let mode = 0;
+  let beatmapVersion = 14;
 
   const lines = content.split(/\r?\n/);
 
@@ -105,6 +107,12 @@ export const parseMapPreviewData = (content, options = {}) => {
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('//')) {
+      continue;
+    }
+
+    const formatMatch = trimmed.match(/^osu file format v(\d+)$/i);
+    if (formatMatch) {
+      beatmapVersion = Number.parseInt(formatMatch[1], 10) || beatmapVersion;
       continue;
     }
 
@@ -154,6 +162,8 @@ export const parseMapPreviewData = (content, options = {}) => {
         approachRate = value;
       } else if (key === 'overalldifficulty') {
         overallDifficulty = value;
+      } else if (key === 'hpdrainrate') {
+        hpDrainRate = value;
       }
       continue;
     }
@@ -187,6 +197,22 @@ export const parseMapPreviewData = (content, options = {}) => {
 
   timingPoints.sort((a, b) => a.time - b.time);
 
+  const parseSampleData = (sampleString) => {
+    const parts = String(sampleString || '').split(':');
+    const parseSet = (value) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    return {
+      normalSet: parseSet(parts[0]),
+      additionSet: parseSet(parts[1]),
+      customIndex: parseSet(parts[2]),
+      volume: parseSet(parts[3]),
+      filename: parts.slice(4).join(':') || '',
+    };
+  };
+
   for (const hitObjectLine of hitObjectLines) {
     if (objects.length >= maxObjects) {
       break;
@@ -217,6 +243,9 @@ export const parseMapPreviewData = (content, options = {}) => {
     let sliderCurveType = 'B';
     let slides = 1;
     let length = 0;
+    let sliderEdgeSounds = [];
+    let sliderEdgeSets = [];
+    let sampleData = parseSampleData('');
 
     if (isSlider) {
       if (parts.length >= 8) {
@@ -225,6 +254,15 @@ export const parseMapPreviewData = (content, options = {}) => {
         sliderCurveType = firstToken.trim().charAt(0).toUpperCase() || 'B';
         slides = parseInt(parts[6], 10) || 1;
         length = parseFloat(parts[7]) || 0;
+        sliderEdgeSounds = (parts[8] || '')
+          .split('|')
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isFinite(value));
+        sliderEdgeSets = (parts[9] || '')
+          .split('|')
+          .map((value) => value.split(':').map((component) => Number.parseInt(component, 10)))
+          .filter((set) => set.length >= 2 && set.every((component) => Number.isFinite(component)));
+        sampleData = parseSampleData(parts[10]);
 
         const timing = getTiming(time);
         const duration = (length / (sliderMultiplier * 100 * timing.sv)) * timing.beatLength * slides;
@@ -235,10 +273,22 @@ export const parseMapPreviewData = (content, options = {}) => {
       }
     } else if (isSpinner) {
       endTime = parseInt(parts[5], 10) || time;
+      sampleData = parseSampleData(parts[6]);
     } else if (isHold) {
       const holdData = parts[5] || '';
       endTime = parseInt(holdData.split(':')[0], 10) || time;
+      sampleData = parseSampleData(holdData);
+    } else {
+      sampleData = parseSampleData(parts[5]);
     }
+
+    const sampleSets = [sampleData.normalSet, sampleData.additionSet]
+      .filter((set) => Number.isFinite(set) && set > 0);
+    const nodeSamples = sliderEdgeSets.map((set, index) => ({
+      normalSet: Number.isFinite(set?.[0]) ? set[0] : sampleData.normalSet,
+      additionSet: Number.isFinite(set?.[1]) ? set[1] : sampleData.additionSet,
+      edgeIndex: index,
+    }));
 
     objects.push({
       x,
@@ -246,11 +296,22 @@ export const parseMapPreviewData = (content, options = {}) => {
       time,
       endTime: Math.max(time, endTime),
       kind,
+      type,
+      sourceType: type,
       hitSound: Number.isFinite(hitSound) ? hitSound : 0,
+      sampleSet: sampleData.normalSet,
+      additionSet: sampleData.additionSet,
+      customIndex: sampleData.customIndex,
+      sampleVolume: sampleData.volume,
+      sampleFilename: sampleData.filename,
+      sampleSets,
+      nodeSamples,
       sliderPoints,
       sliderCurveType,
       slides,
       length,
+      sliderEdgeSounds,
+      sliderEdgeSets,
       newCombo: (type & 4) !== 0,
       comboSkip: (type >> 4) & 0b111,
     });
@@ -302,8 +363,10 @@ export const parseMapPreviewData = (content, options = {}) => {
     circleSize: Number.isFinite(circleSize) ? circleSize : 5,
     approachRate: Number.isFinite(approachRate) ? approachRate : (Number.isFinite(overallDifficulty) ? overallDifficulty : 5),
     overallDifficulty: Number.isFinite(overallDifficulty) ? overallDifficulty : 5,
+    hpDrainRate: Number.isFinite(hpDrainRate) ? hpDrainRate : 5,
     stackLeniency: Number.isFinite(stackLeniency) ? stackLeniency : 0.7,
     mode: Number.isFinite(mode) ? Math.min(Math.max(mode, 0), 3) : 0,
+    beatmapVersion: Number.isFinite(beatmapVersion) ? beatmapVersion : 14,
     sliderMultiplier: Number.isFinite(sliderMultiplier) ? sliderMultiplier : 1.0,
     sliderTickRate: Number.isFinite(sliderTickRate) ? sliderTickRate : 1.0,
     bpmMin,
@@ -390,7 +453,8 @@ export const parseColours = (content) => {
   const lines = content.split(/\r?\n/);
 
   for (const line of lines) {
-    const trimmed = line.trim();
+    const commentIndex = line.indexOf('//');
+    const trimmed = (commentIndex >= 0 ? line.slice(0, commentIndex) : line).trim();
     if (!trimmed || trimmed.startsWith('//')) continue;
 
     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
@@ -400,14 +464,29 @@ export const parseColours = (content) => {
 
     if (!inColours) continue;
 
-    const match = trimmed.match(/^(Combo\d+)\s*:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)$/i);
-    if (match) {
-      colours.push({
-        r: parseInt(match[2], 10),
-        g: parseInt(match[3], 10),
-        b: parseInt(match[4], 10),
-      });
+    const match = trimmed.match(/^Combo(\d+)\s*:\s*(.*)$/);
+    if (!match) continue;
+
+    const comboNumber = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(comboNumber) || comboNumber < 1 || comboNumber > 8) continue;
+
+    const components = match[2].split(',').map((component) => component.trim());
+    if (components.length !== 3 && components.length !== 4) continue;
+
+    const rgb = components.slice(0, 3).map((component) => Number.parseInt(component, 10));
+    if (rgb.some((component, index) => (
+      !/^\d+$/.test(components[index]) || component < 0 || component > 255
+    ))) {
+      continue;
     }
+
+    // osu!lazer accepts an optional fourth component in beatmap colours but
+    // ignores it, matching osu!stable's [Colours] behavior.
+    if (components.length === 4 && (!/^\d+$/.test(components[3]) || Number.parseInt(components[3], 10) > 255)) {
+      continue;
+    }
+
+    colours.push({ r: rgb[0], g: rgb[1], b: rgb[2] });
   }
 
   return colours;

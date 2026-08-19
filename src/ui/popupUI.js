@@ -1,3 +1,5 @@
+import { formatTime } from '../renderer.js';
+
 const bindPopupUiEvents = ({
   elements,
   state,
@@ -19,6 +21,7 @@ const bindPopupUiEvents = ({
     infoBackdrop,
     infoCloseButton,
     infoOptionsButton,
+    infoCachedButton,
     infoIssueButton,
     infoOsuButton,
     debugRunButton,
@@ -31,7 +34,11 @@ const bindPopupUiEvents = ({
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
+    recentPanel,
     popupToast,
+    detachButton,
+    followButton,
+    timelineTooltip,
   } = elements;
 
   const {
@@ -56,7 +63,16 @@ const bindPopupUiEvents = ({
     toggleMute,
     setShortcutsMenuOpen,
     clearHistory,
+    openDetachedWindow,
+    toggleFollowEnabled,
+    toggleCachedMapsetsPanel,
+    closeCachedMapsetsPanel,
   } = actions;
+
+  // One frame at 60fps: fine enough to step through a stack, coarse enough that
+  // holding the key still moves visibly.
+  const FRAME_STEP_MS = 1000 / 60;
+  const SPEED_NUDGE_STEP = 0.05;
 
   let isCtrlTimelineZoomActive = false;
   let lastTimelinePointerEvent = null;
@@ -199,8 +215,14 @@ const bindPopupUiEvents = ({
     }
 
     // Prevention of browser scrolling for specific keys
-    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(key)) {
+    if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
       event.preventDefault();
+    }
+
+    // Digits jump to a percentage of the map: 0 is the start, 9 is 90%.
+    if (!shiftKey && /^[0-9]$/.test(key) && state.durationMs > 0) {
+      seekTo((Number(key) / 10) * state.durationMs);
+      return;
     }
 
     switch (key.toLowerCase()) {
@@ -233,6 +255,33 @@ const bindPopupUiEvents = ({
       case 'r':
         restartPreview();
         break;
+      case 'home':
+        seekTo(0);
+        break;
+      case 'end':
+        // A hair inside the end, so the clock does not immediately trip the
+        // end-of-map stop and reset to zero.
+        if (state.durationMs > 0) {
+          seekTo(Math.max(0, state.durationMs - 1));
+        }
+        break;
+      case ',':
+      case '.': {
+        // Stepping a frame only means anything on a paused preview: at normal
+        // speed playback covers the step before the next frame is drawn.
+        if (state.isPlaying) {
+          await togglePlayback();
+          showCanvasToggleFeedback('pause');
+        }
+        seekRelative(key === ',' ? -FRAME_STEP_MS : FRAME_STEP_MS);
+        break;
+      }
+      case '[':
+        applyPlaybackSpeed(state.playbackSpeed - SPEED_NUDGE_STEP);
+        break;
+      case ']':
+        applyPlaybackSpeed(state.playbackSpeed + SPEED_NUDGE_STEP);
+        break;
       case '?':
       case '/':
         if (key === '?' || (key === '/' && shiftKey)) {
@@ -259,6 +308,45 @@ const bindPopupUiEvents = ({
     };
   });
 
+  const hideTimelineTooltip = () => {
+    if (timelineTooltip && !timelineTooltip.hidden) {
+      timelineTooltip.hidden = true;
+    }
+  };
+
+  const updateTimelineTooltip = (event) => {
+    if (!timelineTooltip || !timelineCanvas) {
+      return;
+    }
+    if (!state.mapData || state.durationMs <= 0) {
+      hideTimelineTooltip();
+      return;
+    }
+
+    const rect = timelineCanvas.getBoundingClientRect();
+    if (rect.width <= 0) {
+      hideTimelineTooltip();
+      return;
+    }
+
+    timelineTooltip.textContent = formatTime(renderer.timeFromTimelineEvent(event));
+    timelineTooltip.hidden = false;
+
+    // Positioned against the controls row, then held inside it so the label
+    // stays readable at both ends instead of hanging off the edge.
+    const parentRect = timelineTooltip.offsetParent?.getBoundingClientRect() || rect;
+    const half = timelineTooltip.offsetWidth / 2;
+    const rawLeft = event.clientX - parentRect.left;
+    const minLeft = (rect.left - parentRect.left) + half;
+    const maxLeft = (rect.right - parentRect.left) - half;
+    timelineTooltip.style.left = `${Math.min(Math.max(rawLeft, minLeft), maxLeft)}px`;
+  };
+
+  timelineCanvas?.addEventListener('mousemove', updateTimelineTooltip);
+  timelineCanvas?.addEventListener('mouseleave', hideTimelineTooltip);
+  // A tooltip stranded over a map that is no longer loaded would be lying.
+  window.addEventListener('blur', hideTimelineTooltip);
+
   shortcutsButton?.addEventListener('click', () => {
     setShortcutsMenuOpen(!state.shortcutsMenuOpen);
   });
@@ -273,6 +361,18 @@ const bindPopupUiEvents = ({
 
   recentClearBtn?.addEventListener('click', () => {
     void clearHistory();
+  });
+
+  detachButton?.addEventListener('click', () => {
+    void openDetachedWindow?.();
+  });
+
+  followButton?.addEventListener('click', () => {
+    toggleFollowEnabled?.();
+  });
+
+  infoCachedButton?.addEventListener('click', () => {
+    void toggleCachedMapsetsPanel?.();
   });
 
   // The speed popover opens and closes on click alone: hover-to-open has no
@@ -318,6 +418,18 @@ const bindPopupUiEvents = ({
       return;
     }
     setSpeedPopoverOpen(false);
+  });
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!recentPanel || recentPanel.hidden || recentPanel.contains(event.target)) {
+      return;
+    }
+    // The button that opened it owns its own toggle: closing here first would
+    // let the click that follows immediately reopen the panel.
+    if (infoCachedButton?.contains(event.target)) {
+      return;
+    }
+    closeCachedMapsetsPanel?.();
   });
 
   timeLabel?.addEventListener('click', () => {

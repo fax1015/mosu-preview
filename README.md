@@ -11,6 +11,38 @@ an extension popup that previews osu! beatmaps directly from the active tab.
 
 the extension only works on valid osu beatmap URLs.
 
+## detached window
+
+the header's detach button reopens the current preview in its own resizable window, so it stays put instead of closing the moment you click elsewhere. the window remembers its last size and position, and clicking detach again focuses the existing window rather than opening a second one.
+
+clicking the toolbar icon while the window is open closes it, so two previews never play over each other.
+
+the preview picks up from wherever the popup left off, and stays paused if it was paused. because a resume point sits past what the short b.ppy.sh preview clip covers, the window runs the timeline silently until the full track arrives rather than snapping back to the preview point. switching to another map afterwards starts at that map's own preview point.
+
+the detached window then follows along as you browse: open another beatmap, or click a different difficulty on a beatmapset page, and the preview switches to it. you only detach once. the eye button in its header pins the window to the current map if you would rather it stayed put; clicking it again resumes following and jumps to whatever you are looking at now.
+
+if no osu! beatmap page is open, the window keeps showing the last map rather than blanking.
+
+the detached window cannot read the active tab, so the popup passes the beatmap and set ids in the page URL, and following reads tab URLs through the existing `https://osu.ppy.sh/*` host permission. no extra permission is needed. on firefox for android, where there is no window management, the preview opens in a tab instead.
+
+## preview
+
+hitsounds are available as an experimental option, off by default. every node of a slider sounds, not just its head: the tail and each reverse use their own `edgeSounds` entry from the beatmap, and spinners sound when they finish. the sounds themselves are generated in the browser rather than read from the beatmap's own samples, so custom hitsounds are not reproduced; volume is adjustable in settings.
+
+the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open.
+
+### shortcuts
+
+- `space` play / pause
+- `left` / `right` seek 5s, with `shift` 15s
+- `up` / `down` volume
+- `home` / `end` jump to start / end
+- `0`-`9` jump to 0-90% of the map
+- `,` / `.` pause and step one frame
+- `[` / `]` nudge playback speed
+- `s` cycle speed, `m` mute, `r` restart
+- hovering the timeline shows the timestamp under the cursor
+
 ## permissions
 
 the manifest requests only two extension permissions:
@@ -23,12 +55,14 @@ the manifest requests only two extension permissions:
 ### cache limits
 
 - preview metadata cache max age: `12 hours`
-- full audio per-entry limit: `35 MiB`
-- full audio total cache limit: `64 MiB`
+- full audio per-entry limit: `150 MiB`
+- full audio total cache limit: `256 MiB`
 - full audio max age per entry: `7 days`
 - prune interval: `30 minutes`
 
 full audio cache eviction removes expired entries first, then removes the oldest remaining entries until the total size is back under the cap.
+
+each cached audio entry also stores its mapset's title, artist and creator, so the cached mapsets list can name a set for as long as its audio is kept. the view history is a 20-entry recency list and ages out much sooner than the audio does.
 
 ## host permissions
 

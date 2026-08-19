@@ -107,6 +107,105 @@ export const createTab = async (createProperties) => {
   });
 };
 
+export const hasWindowsApi = () => Boolean(extensionApi?.windows?.create);
+
+export const getExtensionUrl = (path) => (
+  extensionApi?.runtime?.getURL ? extensionApi.runtime.getURL(path) : path
+);
+
+export const createWindow = async (createData) => {
+  if (!extensionApi?.windows?.create) {
+    throw new Error('Windows API is unavailable.');
+  }
+
+  if (usesPromiseApi) {
+    return extensionApi.windows.create(createData);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.windows.create(createData, (createdWindow) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to create window.'));
+        return;
+      }
+      resolve(createdWindow || null);
+    });
+  });
+};
+
+/**
+ * Resolves null instead of rejecting when the window is gone: the stored id of a
+ * detached window that the user already closed is the expected case, not an error.
+ */
+export const getWindow = async (windowId) => {
+  if (!extensionApi?.windows?.get) {
+    return null;
+  }
+
+  if (usesPromiseApi) {
+    try {
+      return await extensionApi.windows.get(windowId);
+    } catch {
+      return null;
+    }
+  }
+
+  return new Promise((resolve) => {
+    extensionApi.windows.get(windowId, (existingWindow) => {
+      // Reading lastError marks it as handled; skipping this logs a spurious
+      // "Unchecked runtime.lastError" every time a stale id is probed.
+      const error = chromeApi?.runtime?.lastError;
+      resolve(error ? null : (existingWindow || null));
+    });
+  });
+};
+
+/** Resolves false rather than rejecting when the window is already gone. */
+export const removeWindow = async (windowId) => {
+  if (!extensionApi?.windows?.remove) {
+    return false;
+  }
+
+  if (usesPromiseApi) {
+    try {
+      await extensionApi.windows.remove(windowId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return new Promise((resolve) => {
+    extensionApi.windows.remove(windowId, () => {
+      // Read to mark it handled, otherwise a stale id logs an unchecked error.
+      const error = chromeApi?.runtime?.lastError;
+      resolve(!error);
+    });
+  });
+};
+
+export const updateWindow = async (windowId, updateInfo) => {
+  if (!extensionApi?.windows?.update) {
+    throw new Error('Windows API is unavailable.');
+  }
+
+  if (usesPromiseApi) {
+    return extensionApi.windows.update(windowId, updateInfo);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.windows.update(windowId, updateInfo, (updatedWindow) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to update window.'));
+        return;
+      }
+      resolve(updatedWindow || null);
+    });
+  });
+};
+
 export const openOptionsPage = async () => {
   if (!extensionApi?.runtime?.openOptionsPage) {
     throw new Error('Runtime options page API is unavailable.');
@@ -126,6 +225,25 @@ export const openOptionsPage = async () => {
       resolve();
     });
   });
+};
+
+// `windows.WINDOW_ID_NONE` reports that focus left the browser entirely.
+export const WINDOW_ID_NONE = -1;
+
+export const addTabsUpdatedListener = (listener) => {
+  extensionApi?.tabs?.onUpdated?.addListener?.(listener);
+};
+
+export const addTabsActivatedListener = (listener) => {
+  extensionApi?.tabs?.onActivated?.addListener?.(listener);
+};
+
+export const addTabsRemovedListener = (listener) => {
+  extensionApi?.tabs?.onRemoved?.addListener?.(listener);
+};
+
+export const addWindowsFocusChangedListener = (listener) => {
+  extensionApi?.windows?.onFocusChanged?.addListener?.(listener);
 };
 
 export const addStorageChangedListener = (listener) => {

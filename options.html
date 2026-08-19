@@ -49,7 +49,31 @@
           </select>
         </div>
         <p class="settings-help">
-          Changes the popup width on both desktop and mobile layouts.
+          Changes the popup width.
+        </p>
+      </div>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">hitsounds <span class="settings-experimental-tag">experimental</span></h2>
+        <label for="hitsounds" class="settings-toggle-card">
+          <input id="hitsounds" type="checkbox" />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Play hitsounds</span>
+            <span class="settings-toggle-description">Synthesised claps, whistles and finishes.</span>
+          </span>
+        </label>
+        <div class="settings-slider-card settings-slider-card--single">
+          <label for="hitsoundVolume" class="settings-slider-copy">
+            <span class="settings-slider-title">Hitsound volume</span>
+            <span class="settings-slider-value"><span id="hitsoundVolumeValue">50%</span></span>
+          </label>
+          <div class="settings-slider-controls">
+            <input id="hitsoundVolume" class="settings-range" type="range" min="0" max="100" step="5" value="50" />
+          </div>
+        </div>
+        <p class="settings-help">
+          Hitsounds are generated in browser so custom hitsounds are not supported right now.
         </p>
       </div>
 
@@ -60,7 +84,7 @@
           <span class="settings-toggle-mark" aria-hidden="true"></span>
           <span class="settings-toggle-copy">
             <span class="settings-toggle-title">Snake sliders in</span>
-            <span class="settings-toggle-description">Animate slider bodies in during fade-in.</span>
+            <span class="settings-toggle-description">Animate slider bodies in.</span>
           </span>
         </label>
         <label for="standardSliderSnakeOut" class="settings-toggle-card">
@@ -68,7 +92,7 @@
           <span class="settings-toggle-mark" aria-hidden="true"></span>
           <span class="settings-toggle-copy">
             <span class="settings-toggle-title">Snake sliders out</span>
-            <span class="settings-toggle-description">Trim slider bodies behind the slider ball while active.</span>
+            <span class="settings-toggle-description">Trim slider bodies out.</span>
           </span>
         </label>
         <label for="standardSliderEndCircles" class="settings-toggle-card">
@@ -76,7 +100,7 @@
           <span class="settings-toggle-mark" aria-hidden="true"></span>
           <span class="settings-toggle-copy">
             <span class="settings-toggle-title">Show slider end circles</span>
-            <span class="settings-toggle-description">Keep a separate tail circle visible at the slider endpoint.</span>
+            <span class="settings-toggle-description">Keep a circle at the end of sliders.</span>
           </span>
         </label>
       </div>
@@ -97,7 +121,6 @@
               value="28" aria-label="Mania scroll speed" />
           </div>
         </div>
-        <br>
         <label for="maniaScrollDirection" class="settings-label">Scroll direction</label>
         <div class="settings-select-wrap">
           <select id="maniaScrollDirection" class="settings-select">
@@ -108,7 +131,6 @@
           Swap the direction of note travel.
         </p>
         </div>
-        <br>
         <label for="maniaScrollScaleWithBpm" class="settings-toggle-card">
           <input id="maniaScrollScaleWithBpm" type="checkbox" />
           <span class="settings-toggle-mark" aria-hidden="true"></span>

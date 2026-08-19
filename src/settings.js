@@ -11,6 +11,8 @@ export const POPUP_SIZE_KEY = 'popupSize';
 export const PROVIDER_PRIORITY_KEY = 'providerPriority';
 export const DISABLED_PROVIDERS_KEY = 'disabledProviders';
 export const AUTO_FALLBACK_KEY = 'autoFallback';
+export const HITSOUNDS_KEY = 'hitsounds';
+export const HITSOUND_VOLUME_KEY = 'hitsoundVolume';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
 export const MIN_MANIA_SCROLL_SPEED = 1;
@@ -25,6 +27,8 @@ export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
 export const DEFAULT_POPUP_SIZE = 'default';
 export const DEFAULT_DISABLED_PROVIDERS = [];
 export const DEFAULT_AUTO_FALLBACK = true;
+export const DEFAULT_HITSOUNDS = false;
+export const DEFAULT_HITSOUND_VOLUME = 0.5;
 
 export const PROVIDER_PRIORITY_TIERS = Object.freeze({
   PRIMARY: 'primary',
@@ -106,6 +110,26 @@ export const ALLOWED_PROVIDER_OVERRIDES = Object.freeze(
 export const LEGACY_PROVIDER_OVERRIDE_ALIASES = Object.freeze({
   catboy: 'mino',
 });
+
+// Every key normalizePreviewSettings understands, in one place. Both readers
+// used to keep their own hand-written copy of this list, so a setting added to
+// the normalizer but forgotten in a list was silently read as absent -- which is
+// exactly how the hitsound toggle came back off on every popup open.
+export const PREVIEW_SETTING_KEYS = Object.freeze([
+  MANIA_SCROLL_SPEED_KEY,
+  MANIA_SCROLL_SCALE_WITH_BPM_KEY,
+  MANIA_SCROLL_DIRECTION_KEY,
+  MANIA_TIMING_NOTE_COLOURS_KEY,
+  STANDARD_SNAKING_SLIDERS_KEY,
+  STANDARD_SLIDER_SNAKE_OUT_KEY,
+  STANDARD_SLIDER_END_CIRCLES_KEY,
+  POPUP_SIZE_KEY,
+  PROVIDER_PRIORITY_KEY,
+  DISABLED_PROVIDERS_KEY,
+  AUTO_FALLBACK_KEY,
+  HITSOUNDS_KEY,
+  HITSOUND_VOLUME_KEY,
+]);
 
 export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
   staticWeight: 0.10,
@@ -233,6 +257,25 @@ export const normalizeAutoFallback = (value) => (
   value === undefined || value === null ? DEFAULT_AUTO_FALLBACK : Boolean(value)
 );
 
+const normalizeBooleanSetting = (value, fallback) => {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  return value === true || value === 'true' || value === 1 || value === '1';
+};
+
+const normalizeUnitRange = (value, fallback) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return clampSetting(Math.round(numeric * 100) / 100, 0, 1);
+};
+
+export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFAULT_HITSOUNDS);
+
+export const normalizeHitsoundVolume = (value) => normalizeUnitRange(value, DEFAULT_HITSOUND_VOLUME);
+
 export const normalizeProviderPriority = (value) => {
   if (!Array.isArray(value)) {
     return ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
@@ -273,6 +316,8 @@ export const normalizePreviewSettings = (items = {}) => ({
     items?.[DISABLED_PROVIDERS_KEY] ?? items?.disabledProviders,
   ),
   autoFallback: normalizeAutoFallback(items?.[AUTO_FALLBACK_KEY] ?? items?.autoFallback),
+  hitsounds: normalizeHitsounds(items?.[HITSOUNDS_KEY] ?? items?.hitsounds),
+  hitsoundVolume: normalizeHitsoundVolume(items?.[HITSOUND_VOLUME_KEY] ?? items?.hitsoundVolume),
 });
 
 export const toPreviewSettingsStorage = (settings = {}) => {
@@ -289,6 +334,8 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [PROVIDER_PRIORITY_KEY]: normalized.providerPriority,
     [DISABLED_PROVIDERS_KEY]: normalized.disabledProviders,
     [AUTO_FALLBACK_KEY]: normalized.autoFallback,
+    [HITSOUNDS_KEY]: normalized.hitsounds,
+    [HITSOUND_VOLUME_KEY]: normalized.hitsoundVolume,
   };
 };
 

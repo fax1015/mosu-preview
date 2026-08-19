@@ -37,6 +37,10 @@ const MAX_CANVAS_DPR = 2;
 const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
 const canvasContextCache = new WeakMap();
 const sliderPathCache = new WeakMap();
+// Unstacked slider endpoints, keyed by object. Separate from sliderPathCache
+// because that one is keyed on the stack offset, which is exactly what the
+// stacking algorithm has not decided yet when it asks for these.
+const rawSliderEndCache = new WeakMap();
 const standardSliderTickCache = new WeakMap();
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -266,8 +270,20 @@ const getRawObjectEndPositionOsu = (object) => {
     return getRawObjectStartPositionOsu(object);
   }
 
+  // Rebuilding the curve here is what made stacking the slowest part of loading
+  // a map: buildSliderPathPointsOsu skips its own cache when asked for unstacked
+  // points, and the stacking passes call this from nested loops. The raw path
+  // depends only on the control points, which never change after parsing, so the
+  // endpoint can simply be remembered.
+  const cachedEnd = rawSliderEndCache.get(object);
+  if (cachedEnd) {
+    return cachedEnd;
+  }
+
   const path = buildSliderPathPointsOsu(object, false);
-  return path.at(-1) || getRawObjectStartPositionOsu(object);
+  const endPosition = path.at(-1) || getRawObjectStartPositionOsu(object);
+  rawSliderEndCache.set(object, endPosition);
+  return endPosition;
 };
 
 const getObjectStartPositionOsu = (object) => {
@@ -757,6 +773,7 @@ export class PreviewRenderer {
     this.maniaScaleScrollSpeedWithBpm = DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM;
     this.maniaScrollDirection = 'down';
     this.maniaTimingNoteColours = false;
+    this.visibleObjectsScratch = [];
     this.standardSnakingSliders = false;
     this.standardSliderSnakeOut = false;
     this.standardSliderEndCircles = true;
@@ -2403,7 +2420,10 @@ export class PreviewRenderer {
       scale,
     });
 
-    const visibleObjects = [];
+    // Reused across frames: this is rebuilt every frame and discarded, and at
+    // 60fps the throwaway arrays were a steady source of GC pressure.
+    const visibleObjects = this.visibleObjectsScratch;
+    visibleObjects.length = 0;
     for (
       let i = findFirstIndexAtOrAfter(this.mapData.objects, minVisibleTime - this.maxObjectDurationMs);
       i < this.mapData.objects.length;
@@ -2881,11 +2901,13 @@ export class PreviewRenderer {
       const barWidth = width / density.length;
       const usableHeight = Math.max(4, height * 0.56);
       const baselineY = Math.round((height + usableHeight) / 2);
+      const barWidthDrawn = Math.max(1, barWidth - 0.5);
+      // One fill colour for every bar: setting it inside the loop cost a canvas
+      // state change per bar, 150 of them on every frame.
+      ctx.fillStyle = 'rgb(63, 155, 106)';
       for (let i = 0; i < density.length; i += 1) {
-        const v = density[i];
-        const h = Math.max(1, v * usableHeight);
-        ctx.fillStyle = 'rgb(63, 155, 106)';
-        ctx.fillRect(i * barWidth, baselineY - h, Math.max(1, barWidth - 0.5), h);
+        const h = Math.max(1, density[i] * usableHeight);
+        ctx.fillRect(i * barWidth, baselineY - h, barWidthDrawn, h);
       }
     }
 

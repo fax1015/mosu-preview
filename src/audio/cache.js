@@ -23,6 +23,59 @@ const debugFullAudioCache = (message) => {
   }
 };
 
+// Mapset names live on the cache entry itself rather than being looked up in the
+// view history. History is a 20-item recency list while this cache holds several
+// times that, so anything past the 20 most recent previews kept its audio but
+// lost its name. Storing both together means they are written and evicted as one.
+const MAPSET_INFO_HEADERS = Object.freeze({
+  title: 'x-mosu-title',
+  artist: 'x-mosu-artist',
+  creator: 'x-mosu-creator',
+});
+// Header values are ByteString. Assigning a Japanese title directly throws and
+// would fail the whole cache write, so values are percent-encoded to stay ASCII.
+const MAPSET_INFO_MAX_FIELD_LENGTH = 200;
+const CACHE_KEY_SET_ID_PATTERN = /beatmapsets\/(\d+)\/audio\//;
+
+const encodeMapsetInfoValue = (value) => {
+  const text = String(value ?? '').trim().slice(0, MAPSET_INFO_MAX_FIELD_LENGTH);
+  return text ? encodeURIComponent(text) : '';
+};
+
+const decodeMapsetInfoValue = (value) => {
+  const raw = String(value ?? '').trim();
+  if (!raw) {
+    return '';
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    // A malformed escape must not cost us the entry it is attached to.
+    return '';
+  }
+};
+
+const buildMapsetInfoHeaders = (mapsetInfo = {}) => {
+  const headers = {};
+  for (const [field, headerName] of Object.entries(MAPSET_INFO_HEADERS)) {
+    const encoded = encodeMapsetInfoValue(mapsetInfo?.[field]);
+    if (encoded) {
+      headers[headerName] = encoded;
+    }
+  }
+  return headers;
+};
+
+const parseCachedMapsetInfo = (response) => {
+  const info = { title: '', artist: '', creator: '' };
+  for (const [field, headerName] of Object.entries(MAPSET_INFO_HEADERS)) {
+    info[field] = decodeMapsetInfoValue(response?.headers?.get?.(headerName));
+  }
+  return info;
+};
+
+const hasMapsetInfo = (info) => Boolean(info?.title || info?.artist || info?.creator);
+
 const getAudioMimeType = (filename) => {
   if (!filename || typeof filename !== 'string') {
     return 'audio/mpeg';
@@ -397,7 +450,101 @@ const readCachedFullAudioBlob = async (setId, audioFilename) => {
   }
 };
 
-const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
+/**
+ * Lists one record per cached mapset, carrying whatever name was stored with it.
+ * Entries written before names were cached come back with empty fields, which
+ * the caller fills from history where it still has them.
+ */
+const getCachedMapsetSummaries = async () => {
+  if (!('caches' in globalThis)) {
+    return [];
+  }
+
+  try {
+    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
+    const requests = await cache.keys();
+    const summaries = new Map();
+
+    for (const request of requests) {
+      const match = request.url.match(CACHE_KEY_SET_ID_PATTERN);
+      if (!match) {
+        continue;
+      }
+
+      const setId = match[1];
+      // A set can hold several audio entries; the first one carrying a name wins.
+      if (hasMapsetInfo(summaries.get(setId))) {
+        continue;
+      }
+
+      let info = { title: '', artist: '', creator: '' };
+      try {
+        const response = await cache.match(request);
+        if (response) {
+          info = parseCachedMapsetInfo(response);
+        }
+      } catch (error) {
+        // Keep the set listed even when its entry cannot be read: the id alone
+        // still renders a usable row.
+        debugFullAudioCache(`cache: unreadable summary entry (${error?.message || error})`);
+      }
+
+      summaries.set(setId, { setId, ...info });
+    }
+
+    return [...summaries.values()];
+  } catch (error) {
+    debugFullAudioCache(`cache: summary read failed (${error?.message || error})`);
+    return [];
+  }
+};
+
+/**
+ * Attaches a name to an entry that predates name caching, reusing the blob that
+ * was just read so nothing is re-downloaded. Cache hits are the only chance to
+ * upgrade an old entry, since the write path never runs for them.
+ */
+const ensureCachedMapsetInfo = async (setId, audioFilename, mapsetInfo, blob) => {
+  if (!setId || !audioFilename || !blob || !('caches' in globalThis) || !hasMapsetInfo(mapsetInfo)) {
+    return false;
+  }
+
+  try {
+    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
+    const aliases = await readFullAudioCacheAliases();
+
+    for (const key of getFullAudioCacheKeyCandidates(setId, audioFilename)) {
+      const matchedKey = (await cache.match(key)) ? key : (aliases[key] || '');
+      if (!matchedKey) {
+        continue;
+      }
+
+      const response = await cache.match(matchedKey);
+      if (!response || hasMapsetInfo(parseCachedMapsetInfo(response))) {
+        return false;
+      }
+
+      // Preserve the original timestamp: rewriting it would restart the entry's
+      // 7-day life and let a revisited map outlive the eviction policy.
+      await cache.put(matchedKey, new Response(blob, {
+        headers: {
+          'content-type': response.headers.get('content-type') || getAudioMimeType(audioFilename),
+          'x-mosu-cached-at': response.headers.get('x-mosu-cached-at') || String(Date.now()),
+          'x-mosu-size': response.headers.get('x-mosu-size') || String(blob.size),
+          ...buildMapsetInfoHeaders(mapsetInfo),
+        },
+      }));
+      debugFullAudioCache(`cache: backfilled mapset name for set ${setId}`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    debugFullAudioCache(`cache: name backfill failed (${error?.message || error})`);
+    return false;
+  }
+};
+
+const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo = null) => {
   if (
     !setId
     || !audioFilename
@@ -423,6 +570,7 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
           'content-type': blob.type || getAudioMimeType(audioFilename),
           'x-mosu-cached-at': String(Date.now()),
           'x-mosu-size': String(blob.size),
+          ...buildMapsetInfoHeaders(mapsetInfo),
         },
       }),
     );
@@ -442,6 +590,11 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
 
 export {
   FULL_AUDIO_CACHE_NAME,
+  MAPSET_INFO_HEADERS,
+  buildMapsetInfoHeaders,
+  parseCachedMapsetInfo,
+  getCachedMapsetSummaries,
+  ensureCachedMapsetInfo,
   getAudioMimeType,
   normalizePath,
   getPathBaseName,

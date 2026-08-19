@@ -138,6 +138,9 @@ body {
 }
 
 .settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
   margin-top: 0.95rem;
   padding: 1rem;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
@@ -273,6 +276,7 @@ body {
   max-width: none;
   appearance: none;
   -webkit-appearance: none;
+  cursor: pointer;
   border-radius: var(--border-radius-small);
   border: 0;
   outline: 2px solid var(--bg-quaternary);
@@ -963,4 +967,79 @@ body {
   .priority-handle {
     display: none;
   }
+}
+
+.settings-experimental-tag {
+  margin-left: 0.45rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(239, 196, 95, 0.35);
+  background: rgba(239, 196, 95, 0.12);
+  color: rgb(239, 196, 95);
+  font-size: 0.6rem;
+  font-weight: 700;
+  /* The section heading sets wide tracking for its own uppercase run; the badge
+     is already uppercase and short, so it sets its own rather than inheriting. */
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* A slider card with no companion number input. The shared layout keeps an 88px
+   column free for that input and stacks the readout under its own label at a
+   larger size than the label itself, which left this card with dead space on the
+   right and a value that outweighed everything around it. */
+.settings-slider-card--single .settings-slider-copy {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.settings-slider-card--single .settings-slider-value {
+  justify-content: flex-end;
+  font-size: 0.95rem;
+}
+
+.settings-slider-card--single .settings-slider-controls {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* The range thumb stands proud of its track and carries a 4px glow ring, so the
+   card's symmetric padding leaves the bottom looking tighter than the top. Only
+   this variant needs it: the mania card's number input makes that row taller,
+   which already gives the thumb room. */
+.settings-slider-card--single {
+  padding-bottom: 1.3rem;
+}
+
+/* Spacing inside a group comes from its gap alone. The children used to carry
+   their own margins -- margin-top on some, margin-bottom on others -- which left
+   gaps that varied by which pair of controls happened to be adjacent, and <br>
+   tags patching the places where neither side contributed one. Scoped with `>`
+   so these classes keep their own spacing anywhere else they are used. */
+.settings-group > .settings-section-title {
+  margin-bottom: 0.1rem;
+}
+
+.settings-group > .settings-label {
+  margin-bottom: 0;
+}
+
+.settings-group > .settings-toggle-card {
+  margin-top: 0;
+}
+
+.settings-group > .settings-slider-card {
+  margin-bottom: 0;
+}
+
+/* Help text belongs to the control above it, so it sits a little closer than the
+   gap between two separate controls. */
+.settings-group > .settings-help {
+  margin-top: -0.2rem;
+}
+
+.settings-group > .settings-priority-header {
+  margin: 0;
 }

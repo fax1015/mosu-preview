@@ -15,6 +15,9 @@ import {
   PROVIDER_PRIORITY_KEY,
   DISABLED_PROVIDERS_KEY,
   AUTO_FALLBACK_KEY,
+  PREVIEW_SETTING_KEYS,
+  HITSOUNDS_KEY,
+  HITSOUND_VOLUME_KEY,
   POPUP_SIZE_PRESETS,
   normalizeProviderOverride,
   normalizePreviewSettings,
@@ -23,16 +26,37 @@ import {
   addRuntimeMessageListener,
   addStorageChangedListener,
   createTab,
+  createWindow,
+  getExtensionUrl,
+  getWindow,
   hasStorageArea,
+  hasWindowsApi,
   openOptionsPage,
   queryTabs,
+  removeWindow,
   sendRuntimeMessage,
   storageGet,
   storageSet,
+  updateWindow,
+  WINDOW_ID_NONE,
+  addTabsActivatedListener,
+  addTabsUpdatedListener,
+  addWindowsFocusChangedListener,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
 import { extractBeatmapInfoFromUrl } from './core/beatmapUrl.js';
+import {
+  DETACHED_WINDOW_BOUNDS_KEY,
+  DETACHED_WINDOW_ID_KEY,
+  MIN_DETACHED_HEIGHT,
+  MIN_DETACHED_WIDTH,
+  buildBeatmapSourceUrl,
+  buildDetachedPageUrl,
+  normalizeDetachedBounds,
+  readDetachedParams,
+} from './core/detachedWindow.js';
+import { isSameFollowTarget, pickBeatmapTabInfo, toFollowTarget } from './core/tabFollow.js';
 import { convertMapForMode } from './core/beatmapConversion.js';
 import { getHistory, addToHistory, clearHistory, setHistoryDebugLogger } from './core/history.js';
 import {
@@ -46,7 +70,8 @@ import {
 } from './core/state.js';
 import { createTimingController } from './core/timing.js';
 import {
-  FULL_AUDIO_CACHE_NAME,
+  ensureCachedMapsetInfo,
+  getCachedMapsetSummaries,
   getAudioMimeType,
   clearFullAudioCache,
   getFullAudioCacheUsage,
@@ -67,9 +92,33 @@ import {
   FETCH_TIMEOUT_FAILOVER_MS,
 } from './audio/provider.js';
 import { createPlaybackController } from './audio/playback.js';
+import { buildHitsoundEvents, createHitsoundPlayer } from './audio/hitsounds.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { bindPopupUiEvents } from './ui/popupUI.js';
 import { createUnsupportedViewController } from './ui/unsupportedView.js';
+
+// Resolved and applied before anything else renders: the detached flag decides
+// whether the document is sized as a toolbar popup or as a window, and a late
+// class flip would repaint the shell at the wrong width.
+const detachedParams = readDetachedParams(globalThis.location?.search || '');
+const IS_DETACHED_WINDOW = detachedParams.isDetached;
+
+// Applies to the map the window opened with, and only that one. Following on to
+// a different map afterwards should start at that map's own preview point, not
+// at a timestamp inherited from the map before it.
+let pendingResume = IS_DETACHED_WINDOW && detachedParams.resumeTimeMs >= 0
+  ? { timeMs: detachedParams.resumeTimeMs, paused: detachedParams.resumePaused }
+  : null;
+
+const takePendingResume = () => {
+  const resume = pendingResume;
+  pendingResume = null;
+  return resume;
+};
+
+if (IS_DETACHED_WINDOW) {
+  document.documentElement.classList.add('is-detached-window');
+}
 
 if (/firefox/i.test(globalThis.navigator?.userAgent || '')) {
   document.body?.classList.add('is-firefox-popup');
@@ -89,6 +138,7 @@ const speedSlider = document.querySelector('#mapPreviewSpeedSlider');
 const speedResetButton = document.querySelector('#mapPreviewSpeedResetBtn');
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const timelineCanvas = document.querySelector('#mapPreviewTimeline');
+const timelineTooltip = document.querySelector('#mapPreviewTimelineTooltip');
 const volumeSlider = document.querySelector('#mapPreviewVolume');
 const volumeLabel = document.querySelector('#mapPreviewVolumeLabel');
 const toggleIndicator = document.querySelector('#mapPreviewToggleIndicator');
@@ -102,12 +152,15 @@ const debugLog = document.querySelector('#mapPreviewDebugLog');
 const debugRunButton = document.querySelector('#mapPreviewDebugRunBtn');
 const debugClearButton = document.querySelector('#mapPreviewDebugClearBtn');
 const debugCloseButton = document.querySelector('#mapPreviewDebugCloseBtn');
+const detachButton = document.querySelector('#mapPreviewDetachBtn');
+const followButton = document.querySelector('#mapPreviewFollowBtn');
 const infoButtons = [...document.querySelectorAll('.js-map-preview-info-btn')];
 const infoButton = infoButtons[0] || null;
 const infoModal = document.querySelector('#mapPreviewInfoModal');
 const infoBackdrop = document.querySelector('#mapPreviewInfoBackdrop');
 const infoCloseButton = document.querySelector('#mapPreviewInfoCloseBtn');
 const infoOptionsButton = document.querySelector('#mapPreviewInfoOptionsBtn');
+const infoCachedButton = document.querySelector('#mapPreviewInfoCachedBtn');
 const infoIssueButton = document.querySelector('#mapPreviewInfoIssueBtn');
 const infoOsuButton = document.querySelector('#mapPreviewInfoOsuBtn');
 const shortcutsButton = document.querySelector('#mapPreviewHelpBtn');
@@ -180,6 +233,9 @@ const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
 // 20k). Parsing all of them costs ~40MB and ~300ms, and rendering is windowed,
 // so the old cap only served to cut the timeline short.
 const MAX_PREVIEW_OBJECTS = 40000;
+// Long enough to collapse a burst of hash rewrites, short enough that clicking a
+// difficulty feels like it loads immediately.
+const FOLLOW_SYNC_DEBOUNCE_MS = 250;
 const AUDIO_VISUAL_SYNC_INTERVAL_MS = 240;
 const AUDIO_VISUAL_SYNC_THRESHOLD_MS = 90;
 const SUPPORT_LINKS = {
@@ -450,23 +506,13 @@ const setShortcutsMenuOpen = (isOpen) => {
   }
 };
 
-const getCachedSetIds = async () => {
-  if (!('caches' in globalThis)) return null;
-  try {
-    const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
-    const requests = await cache.keys();
-    const setIds = new Set();
-    for (const req of requests) {
-      const match = req.url.match(/beatmapsets\/(\d+)\/audio\//);
-      if (match) {
-        setIds.add(match[1]);
-      }
-    }
-    return setIds.size > 0 ? setIds : null;
-  } catch {
-    return null;
-  }
-};
+// Stored alongside the cached audio so the cached-mapsets list can name a set
+// long after it has aged out of the 20-entry view history.
+const getCurrentMapsetInfo = () => ({
+  title: state.metadata?.title || '',
+  artist: state.metadata?.artist || '',
+  creator: state.metadata?.creator || '',
+});
 
 const formatBytes = (bytes) => {
   const value = Math.max(0, Number(bytes) || 0);
@@ -497,14 +543,14 @@ const updateRecentClearButtonCacheUsage = async () => {
 const renderRecentPanel = async () => {
   if (!recentPanel || !recentList) return;
 
-  const cachedSetIds = await getCachedSetIds();
-  if (!cachedSetIds || cachedSetIds.size === 0) {
+  const cachedMapsets = await getCachedMapsetSummaries();
+  if (!cachedMapsets || cachedMapsets.length === 0) {
     recentPanel.hidden = true;
     return;
   }
 
   const history = await getHistory();
-  const cachedEntries = buildCachedMapsetEntries(cachedSetIds, history);
+  const cachedEntries = buildCachedMapsetEntries(cachedMapsets, history);
 
   recentPanel.hidden = false;
   void updateRecentClearButtonCacheUsage();
@@ -549,6 +595,49 @@ const renderRecentPanel = async () => {
   });
 };
 
+/**
+ * The cached list used to be reachable only from the "unsupported page" view,
+ * which meant it was invisible exactly when you were browsing beatmaps.
+ */
+const toggleCachedMapsetsPanel = async () => {
+  if (!recentPanel) {
+    return;
+  }
+
+  setInfoMenuOpen(false);
+
+  // The unsupported view shows the list as its main content, so there is nothing
+  // to toggle back to. The button is hidden there; this keeps a keyboard route
+  // from stranding the view on an empty title card anyway.
+  if (popup?.classList.contains('is-unsupported')) {
+    return;
+  }
+
+  if (!recentPanel.hidden) {
+    recentPanel.hidden = true;
+    return;
+  }
+
+  await renderRecentPanel();
+  // renderRecentPanel leaves the panel hidden when nothing is cached, so say so
+  // rather than letting the menu entry look broken.
+  if (recentPanel.hidden) {
+    showPopupToast('No cached mapsets yet');
+  }
+};
+
+/**
+ * Dismisses the floating cached list. Deliberately does nothing on the
+ * unsupported view: there the list is not an overlay over a preview, it is the
+ * whole page, so closing it would leave an empty popup with no way back.
+ */
+const closeCachedMapsetsPanel = () => {
+  if (!recentPanel || recentPanel.hidden || popup?.classList.contains('is-unsupported')) {
+    return;
+  }
+  recentPanel.hidden = true;
+};
+
 const openExtensionOptions = async () => {
   try {
     await openOptionsPage();
@@ -559,6 +648,269 @@ const openExtensionOptions = async () => {
   if (IS_FIREFOX && IS_MOBILE_VIEW) {
     showPopupToast('settings page opened, exit this view to see settings');
   }
+};
+
+const setDetachContext = ({ beatmapId, setId, mode } = {}) => {
+  state.detachContext = {
+    beatmapId: String(beatmapId || ''),
+    setId: String(setId || ''),
+    mode: Number.isInteger(mode) ? mode : null,
+  };
+
+  if (detachButton) {
+    detachButton.disabled = !state.detachContext.beatmapId;
+  }
+};
+
+const readStoredDetachedWindowId = async () => {
+  try {
+    const items = await storageGet('session', [DETACHED_WINDOW_ID_KEY], { fallbackAreaName: 'local' });
+    const windowId = Number(items?.[DETACHED_WINDOW_ID_KEY]);
+    return Number.isInteger(windowId) ? windowId : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeStoredDetachedWindowId = async (windowId) => {
+  try {
+    await storageSet('session', { [DETACHED_WINDOW_ID_KEY]: windowId ?? null }, { fallbackAreaName: 'local' });
+  } catch (error) {
+    addDebugLog(`detach: could not persist window id (${error?.message || error})`);
+  }
+};
+
+const readDetachedBounds = async () => {
+  try {
+    const items = await storageGet('local', [DETACHED_WINDOW_BOUNDS_KEY]);
+    return normalizeDetachedBounds(items?.[DETACHED_WINDOW_BOUNDS_KEY] || {});
+  } catch {
+    return normalizeDetachedBounds({});
+  }
+};
+
+/**
+ * Focuses the previously opened detached window if it is still around, so the
+ * button never leaves the user with two windows fighting over the same audio.
+ */
+const focusExistingDetachedWindow = async () => {
+  const windowId = await readStoredDetachedWindowId();
+  if (windowId === null) {
+    return false;
+  }
+
+  const existingWindow = await getWindow(windowId);
+  if (!existingWindow) {
+    await writeStoredDetachedWindowId(null);
+    return false;
+  }
+
+  try {
+    // `drawAttention` is deliberately omitted: Firefox ignores it on a window
+    // that is being focused in the same call.
+    await updateWindow(windowId, { focused: true });
+    return true;
+  } catch {
+    await writeStoredDetachedWindowId(null);
+    return false;
+  }
+};
+
+/**
+ * Opening the toolbar popup while a detached window is up closes that window.
+ * The action has a `default_popup`, so clicking the icon always opens this page;
+ * without this the two previews would play over each other.
+ */
+const closeDetachedWindowIfOpen = async () => {
+  try {
+    const windowId = await readStoredDetachedWindowId();
+    if (windowId === null) {
+      return false;
+    }
+
+    const existingWindow = await getWindow(windowId);
+    if (!existingWindow) {
+      await writeStoredDetachedWindowId(null);
+      return false;
+    }
+
+    const closed = await removeWindow(windowId);
+    await writeStoredDetachedWindowId(null);
+    if (closed) {
+      addDebugLog('detach: closed the detached window on popup open');
+    }
+    return closed;
+  } catch (error) {
+    addDebugLog(`detach: could not close detached window (${error?.message || error})`);
+    return false;
+  }
+};
+
+const openDetachedWindow = async () => {
+  const pagePath = buildDetachedPageUrl({
+    beatmapId: state.detachContext.beatmapId,
+    setId: state.detachContext.setId,
+    mode: state.detachContext.mode,
+    // Hand over the playhead so the window picks up where the popup left off.
+    resumeTimeMs: state.mapData ? state.currentTimeMs : -1,
+    resumePaused: !state.isPlaying,
+  });
+
+  if (!pagePath) {
+    showPopupToast('No beatmap to detach yet');
+    return;
+  }
+
+  const pageUrl = getExtensionUrl(pagePath);
+
+  // Firefox for Android has no window management, so the preview opens as a tab
+  // there instead of failing outright.
+  if (!hasWindowsApi()) {
+    try {
+      await createTab({ url: pageUrl });
+      window.close();
+    } catch (error) {
+      addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
+      showPopupToast('Could not open a separate view');
+    }
+    return;
+  }
+
+  try {
+    if (await focusExistingDetachedWindow()) {
+      window.close();
+      return;
+    }
+
+    const bounds = await readDetachedBounds();
+    const createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...bounds });
+    await writeStoredDetachedWindowId(createdWindow?.id ?? null);
+    window.close();
+  } catch (error) {
+    addDebugLog(`detach: failed (${error?.message || error})`);
+    showPopupToast('Could not open a separate window');
+  }
+};
+
+const setFollowEnabled = (isEnabled) => {
+  state.followEnabled = Boolean(isEnabled);
+
+  if (followButton) {
+    followButton.classList.toggle('is-following', state.followEnabled);
+    followButton.setAttribute('aria-pressed', state.followEnabled ? 'true' : 'false');
+    const label = state.followEnabled
+      ? 'Following the browser — click to pin this map'
+      : 'Pinned to this map — click to follow the browser';
+    followButton.title = label;
+    followButton.setAttribute('aria-label', label);
+  }
+};
+
+const toggleFollowEnabled = () => {
+  setFollowEnabled(!state.followEnabled);
+  showPopupToast(state.followEnabled ? 'Following the browser' : 'Pinned to this map');
+
+  // Catch up immediately: the user may have browsed elsewhere while pinned.
+  if (state.followEnabled) {
+    void syncPreviewWithBrowsingTabs();
+  }
+};
+
+/**
+ * Loads whichever beatmap the user is looking at in a normal browsing window.
+ * Staying put when no beatmap tab is open is deliberate: browsing away to an
+ * unrelated page should leave the current preview alone rather than blank it.
+ */
+const syncPreviewWithBrowsingTabs = async () => {
+  if (!state.followEnabled) {
+    return;
+  }
+
+  let tabs = [];
+  try {
+    // Extension popup windows report as type 'popup', so this cannot match the
+    // detached window itself.
+    tabs = await queryTabs({ active: true, windowType: 'normal' });
+  } catch (error) {
+    addDebugLog(`follow: tab query failed (${error?.message || error})`);
+    return;
+  }
+
+  const picked = pickBeatmapTabInfo(tabs, {
+    preferredWindowId: state.lastFocusedBrowsingWindowId,
+    excludeWindowId: state.detachedWindowId,
+  });
+
+  if (!picked) {
+    return;
+  }
+
+  if (isSameFollowTarget(state.followTarget, toFollowTarget(picked.info))) {
+    return;
+  }
+
+  addDebugLog(`follow: switching to beatmap ${picked.info.beatmapId}`);
+  await initializePreviewForCurrentTab({ sourceUrlOverride: picked.tab.url });
+};
+
+const scheduleFollowSync = () => {
+  // Difficulty clicks rewrite the hash in bursts; the debounce collapses those
+  // into the one map the user actually settled on.
+  state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
+  state.followSyncTimer = registry.addTimeout(setTimeout(() => {
+    void syncPreviewWithBrowsingTabs();
+  }, FOLLOW_SYNC_DEBOUNCE_MS));
+};
+
+const startFollowingBrowsingTabs = () => {
+  setFollowEnabled(true);
+
+  // Needed to exclude this window from the tab scan, and harmless if it fails.
+  void (async () => {
+    try {
+      state.detachedWindowId = await readStoredDetachedWindowId();
+    } catch {
+      state.detachedWindowId = null;
+    }
+  })();
+
+  addTabsUpdatedListener((_tabId, changeInfo) => {
+    // Fires for hash changes too, which is how in-page difficulty switching on a
+    // beatmapset page reaches us.
+    if (changeInfo?.url || changeInfo?.status === 'complete') {
+      scheduleFollowSync();
+    }
+  });
+
+  addTabsActivatedListener(() => {
+    scheduleFollowSync();
+  });
+
+  addWindowsFocusChangedListener((windowId) => {
+    if (windowId === WINDOW_ID_NONE) {
+      return;
+    }
+    if (windowId !== state.detachedWindowId) {
+      state.lastFocusedBrowsingWindowId = windowId;
+    }
+    // Syncing on focus of either window is the safety net: if a hash change ever
+    // fails to raise onUpdated, clicking back to the preview still picks it up.
+    scheduleFollowSync();
+  });
+};
+
+const persistDetachedBounds = () => {
+  state.detachedBoundsTimer = registry.clearTimeout(state.detachedBoundsTimer);
+  state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
+  state.detachedBoundsTimer = registry.addTimeout(setTimeout(() => {
+    const bounds = normalizeDetachedBounds({
+      width: window.outerWidth,
+      height: window.outerHeight,
+      left: window.screenX,
+      top: window.screenY,
+    });
+    void storageSet('local', { [DETACHED_WINDOW_BOUNDS_KEY]: bounds }).catch(() => {});
+  }, 400));
 };
 
 const showPopupToast = (message, hideDelayMs = 3500) => {
@@ -601,19 +953,7 @@ const readAudioVolumeSetting = async () => {
 
 const readPreviewSettings = async () => {
   try {
-    const items = await storageGet('sync', [
-      MANIA_SCROLL_SPEED_KEY,
-      MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-      MANIA_SCROLL_DIRECTION_KEY,
-      MANIA_TIMING_NOTE_COLOURS_KEY,
-      STANDARD_SNAKING_SLIDERS_KEY,
-      STANDARD_SLIDER_SNAKE_OUT_KEY,
-      STANDARD_SLIDER_END_CIRCLES_KEY,
-      POPUP_SIZE_KEY,
-      PROVIDER_PRIORITY_KEY,
-      DISABLED_PROVIDERS_KEY,
-      AUTO_FALLBACK_KEY,
-    ]);
+    const items = await storageGet('sync', [...PREVIEW_SETTING_KEYS]);
     return normalizePreviewSettings(items);
   } catch {
     return normalizePreviewSettings();
@@ -666,6 +1006,10 @@ const applyPreviewSettings = (settings = {}) => {
   state.providerPriority = normalized.providerPriority;
   state.disabledProviders = normalized.disabledProviders;
   state.autoFallback = normalized.autoFallback;
+  state.hitsounds = normalized.hitsounds;
+  state.hitsoundVolume = normalized.hitsoundVolume;
+  hitsoundPlayer.setEnabled(normalized.hitsounds);
+  hitsoundPlayer.setVolume(normalized.hitsoundVolume);
   applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
@@ -738,10 +1082,20 @@ const timingController = createTimingController({
 });
 const {
   getCurrentManualMapTime,
-  syncVisualClockToMapTime,
+  syncVisualClockToMapTime: syncVisualClockToMapTimeRaw,
   getAudioMappedTimeMs,
   resyncVisualPlaybackToAudio,
 } = timingController;
+
+const hitsoundPlayer = createHitsoundPlayer();
+
+// Every jump in the clock -- a scrub, a restart, an audio resync -- funnels
+// through here, so it is the one place the hitsound cursor has to catch up.
+// Without it a seek would replay every object between the old and new position.
+const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs) => {
+  syncVisualClockToMapTimeRaw(mapTimeMs, nowPerfMs);
+  hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
+};
 
 const applyPlaybackSpeed = (nextSpeed) => {
   const normalized = normalizePlaybackSpeed(nextSpeed);
@@ -795,6 +1149,19 @@ const setAudioBadge = (stateName, label, tooltip = '') => {
     }, AUDIO_BADGE_AUTO_HIDE_DELAY_MS));
   }
 
+  renderDebugPanel();
+};
+
+// For states with nothing true to say: no map loaded, or the load failed. An
+// optimistic "Preview audio" label over silence is worse than no label at all.
+const hideAudioBadge = () => {
+  if (!audioStatusBadge) {
+    return;
+  }
+
+  state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
+  audioStatusBadge.classList.add('is-hidden');
+  audioStatusBadge.classList.remove('is-spinning');
   renderDebugPanel();
 };
 
@@ -952,10 +1319,23 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   return false;
 };
 
+let lastTimeLabelText = '';
+
 const renderFrame = () => {
+  // Only while playing: a paused scrub should show the map, not sound it.
+  if (state.isPlaying) {
+    hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs);
+  }
   renderer.setTime(state.currentTimeMs);
   renderer.render();
-  timeLabel.textContent = `${renderer.getCurrentLabel()} / ${renderer.getDurationLabel()}`;
+
+  // The label only changes once a second, but writing it every frame dirtied
+  // layout, which the next frame's canvas size read then had to resolve.
+  const nextTimeLabel = `${renderer.getCurrentLabel()} / ${renderer.getDurationLabel()}`;
+  if (nextTimeLabel !== lastTimeLabelText) {
+    lastTimeLabelText = nextTimeLabel;
+    timeLabel.textContent = nextTimeLabel;
+  }
 };
 
 const {
@@ -1051,7 +1431,7 @@ const extractSetIdFromMetadata = (beatmapSetID) => {
   return match ? match[1] : null;
 };
 
-const configureAudioPreview = (setId, previewTimeMs) => {
+const configureAudioPreview = (setId, previewTimeMs, { skipPreviewClip = false } = {}) => {
   setFullAudioState({
     previewSetId: null,
     activeSetId: null,
@@ -1068,6 +1448,7 @@ const configureAudioPreview = (setId, previewTimeMs) => {
 
   if (!setId || !/^\d+$/.test(String(setId))) {
     setAudioElementSource('', 0);
+    hideAudioBadge();
     return;
   }
 
@@ -1077,19 +1458,50 @@ const configureAudioPreview = (setId, previewTimeMs) => {
     activeSetId: normalizedSetId,
   });
 
+  // PreviewTime is only known once the .osu file has been fetched and parsed, so
+  // the first call of a load passes null. Reporting a verdict about the preview
+  // point here would be guessing, and on a slow connection that guess stays on
+  // screen for the whole download.
+  if (previewTimeMs === null || previewTimeMs === undefined) {
+    setAudioElementSource('', 0);
+    setFullAudioLoading(true);
+    setAudioBadge('loading', 'Loading audio', 'Reading the beatmap to line the audio up.');
+    return;
+  }
+
+  // Resuming lands mid-map, and the b.ppy.sh clip only spans ~10s around the
+  // beatmap's preview point, so it essentially never covers that position.
+  // Attaching it anyway was actively harmful: the clip's duration is still
+  // unknown when playback starts, so the seek out to the resume point is
+  // accepted unvalidated, the element clamps to the end of the clip, and the
+  // forced resync then reports that clamped position back as the playhead --
+  // landing the preview seconds into the map instead of where it left off.
+  if (skipPreviewClip) {
+    setAudioElementSource('', 0);
+    setAudioBadge(
+      'loading',
+      'Waiting for full audio',
+      'Picking the preview up mid-map, past what the short preview clip covers. Waiting for the full track.',
+    );
+    return;
+  }
+
   // The b.ppy.sh clip is a ~10s excerpt with a 100ms lead-in before the
   // beatmap's PreviewTime. When PreviewTime is -1 (or absent) osu! generates the
   // clip from ~40% into the track instead, and that offset is not derivable from
   // the .osu file. Anchoring it at 0 anyway played the middle of the song over
   // the start of the map — a large, constant desync. Better to stay silent until
   // full audio arrives.
+  //
+  // Named for what happens next rather than for the missing metadata: the full
+  // track is already on its way, and the b.ppy.sh clip being unusable is a
+  // detail, not a failure the user has to act on.
   if (!isPreviewClipAnchorable(previewTimeMs)) {
     setAudioElementSource('', 0);
-    setAudioBadgeWithProvider(
-      'preview',
-      'No preview point',
-      PREVIEW_AUDIO_PROVIDER_LABEL,
-      'This beatmap has no preview point, so the short preview clip cannot be lined up with the map. Waiting for full audio.',
+    setAudioBadge(
+      'loading',
+      'Waiting for full audio',
+      'This beatmap has no preview point, so the short preview clip cannot be lined up with the map. Waiting for the full track.',
     );
     return;
   }
@@ -1310,10 +1722,27 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
 
   try {
     const cachedBlob = await readCachedFullAudioBlob(setId, audioFileName);
-    if (cachedBlob && jobId === state.fullAudioJobId) {
+
+    // Staleness is checked on its own, before the cache result is interpreted.
+    // Folding the two together meant a superseded job that had *found* its audio
+    // fell through to the download path and reported a cache miss: the entry was
+    // there, it just belonged to a job nobody was waiting for any more. Worse,
+    // the service worker aborts whatever extraction is in flight when a new
+    // request arrives, so a stale job reaching that path cancels the download
+    // the live job is waiting on. The newer job does its own cache read, so
+    // there is nothing to hand over here.
+    if (jobId !== state.fullAudioJobId) {
+      addDebugLog('audio: full-load superseded before it could start');
+      return;
+    }
+
+    if (cachedBlob) {
       setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
       setAudioBadgeWithProvider('loading', 'Loading full audio', CACHE_AUDIO_PROVIDER_LABEL, 'Using cached full audio');
       addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB)`);
+      // Entries cached before names were stored only ever get one chance to pick
+      // theirs up, since the write path is skipped for a hit.
+      void ensureCachedMapsetInfo(setId, audioFileName, getCurrentMapsetInfo(), cachedBlob);
       await hotswapToFullAudio(cachedBlob, setId, audioFileName, jobId, CACHE_AUDIO_PROVIDER_LABEL);
       return;
     }
@@ -1326,6 +1755,7 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
         jobId,
         setId,
         audioFilename: audioFileName,
+        mapsetInfo: getCurrentMapsetInfo(),
         providerOverride: state.providerOverride,
         providerPriority: state.providerPriority,
         disabledProviders: state.disabledProviders,
@@ -1384,7 +1814,7 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
       audioBlob = new Blob([extractionResult.audioBytes], { type: mime || getAudioMimeType(pickedAudioFilename) });
       byteLength = extractionResult.audioBytes.byteLength;
       addDebugLog(`audio: archive extracted in popup from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
-      await writeCachedFullAudioBlob(setId, audioFileName, audioBlob);
+      await writeCachedFullAudioBlob(setId, audioFileName, audioBlob, getCurrentMapsetInfo());
     }
 
     if (!audioBlob || byteLength <= 0) {
@@ -1513,7 +1943,15 @@ const writeCachedPreview = async (value) => {
   }
 };
 
-const initializePreviewForCurrentTab = async () => {
+// Bumped by every load so an older, slower one cannot overwrite the newer map's
+// state when the user switches difficulties faster than a fetch completes.
+let previewLoadToken = 0;
+
+const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) => {
+  previewLoadToken += 1;
+  const loadToken = previewLoadToken;
+  const isStaleLoad = () => loadToken !== previewLoadToken;
+
   stopTimelineDurationAnimation();
   stopPlayback();
   setPlaybackSpeedControlEnabled(false);
@@ -1538,20 +1976,37 @@ const initializePreviewForCurrentTab = async () => {
     + (state.maniaScaleScrollSpeedWithBpm ? ' (scaled with BPM)' : ' (fixed)'),
   );
 
-  try {
-    setStatus('Checking current tab...');
-    const activeTab = await queryActiveTab();
+  if (isStaleLoad()) {
+    return;
+  }
 
-    if (!activeTab?.url) {
-      throw new Error('No active tab URL found.');
+  try {
+    let sourceUrl = '';
+    if (sourceUrlOverride) {
+      // A followed tab already resolved to a beatmap URL.
+      sourceUrl = sourceUrlOverride;
+    } else if (IS_DETACHED_WINDOW) {
+      // The ids arrived in the page URL; rebuilding a canonical beatmap URL from
+      // them keeps both entry points on the same validation path below.
+      setStatus('Loading detached preview...');
+      sourceUrl = buildBeatmapSourceUrl(detachedParams);
+      addDebugLog(`init: detached window for beatmap ${detachedParams.beatmapId}`);
+    } else {
+      setStatus('Checking current tab...');
+      const activeTab = await queryActiveTab();
+
+      if (!activeTab?.url) {
+        throw new Error('No active tab URL found.');
+      }
+      sourceUrl = activeTab.url;
     }
 
-    const info = extractBeatmapInfoFromUrl(activeTab.url);
+    const info = extractBeatmapInfoFromUrl(sourceUrl);
     if (!info.valid) {
       addDebugLog(`init: invalid tab url (${info.reason})`);
       versionLine.textContent = '';
       versionLine.title = '';
-      configureAudioPreview(null, 0);
+      configureAudioPreview(null, null);
       if (unsupportedAscii) {
         if (unsupportedPanel && !info.unsupportedSite) {
           const titleEl = unsupportedPanel.querySelector('.map-preview-unsupported-title');
@@ -1570,9 +2025,15 @@ const initializePreviewForCurrentTab = async () => {
       return;
     }
 
+    // Set before the fetch so detaching works while the map is still loading.
+    setDetachContext({ beatmapId: info.beatmapId, setId: info.setId, mode: info.mode });
+    // Recorded from the URL's own request, not the resolved ruleset, so the
+    // follow check compares like with like.
+    state.followTarget = toFollowTarget(info);
+
     if (info.setId) {
       addDebugLog(`init: active set id ${info.setId}`);
-      configureAudioPreview(info.setId, 0);
+      configureAudioPreview(info.setId, null);
     }
 
     let osuContent = '';
@@ -1593,6 +2054,9 @@ const initializePreviewForCurrentTab = async () => {
     } else {
       setStatus(`Fetching beatmap #${info.beatmapId}...`);
       osuContent = await fetchBeatmapFile(info.beatmapId);
+      if (isStaleLoad()) {
+        return;
+      }
       await writeCachedPreview({
         version: 1,
         beatmapId: info.beatmapId,
@@ -1600,6 +2064,10 @@ const initializePreviewForCurrentTab = async () => {
         savedAt: Date.now(),
         osuContent,
       });
+    }
+
+    if (isStaleLoad()) {
+      return;
     }
 
     const metadata = parseMetadata(osuContent);
@@ -1626,6 +2094,10 @@ const initializePreviewForCurrentTab = async () => {
     const resolvedSetId = info.setId || extractSetIdFromMetadata(metadata.beatmapSetID);
     addDebugLog(`init: resolved set id ${resolvedSetId || 'none'}`);
 
+    // Re-pin with the resolved set id and post-conversion mode so a detached
+    // window reproduces this exact ruleset and can reach the full audio.
+    setDetachContext({ beatmapId: info.beatmapId, setId: resolvedSetId, mode: mapData.mode });
+
     if (!Array.isArray(mapData.objects) || mapData.objects.length === 0) {
       throw new Error('Beatmap has no readable hit objects.');
     }
@@ -1636,14 +2108,26 @@ const initializePreviewForCurrentTab = async () => {
     state.mapData = mapData;
     state.breaks = breaks;
     state.mappedDurationMs = durationMs;
+    const resume = takePendingResume();
+    const startTimeMs = resume
+      ? clamp(resume.timeMs, 0, durationMs)
+      : clamp(metadata.previewTime > 0 ? metadata.previewTime : 0, 0, durationMs);
+    if (resume) {
+      addDebugLog(`init: resuming at ${formatTime(startTimeMs)}${resume.paused ? ' (paused)' : ''}`);
+    }
     setTimelineState({
       durationMs,
-      currentTimeMs: clamp(metadata.previewTime > 0 ? metadata.previewTime : 0, 0, durationMs),
+      currentTimeMs: startTimeMs,
     });
-    configureAudioPreview(resolvedSetId, metadata.previewTime);
+    configureAudioPreview(resolvedSetId, metadata.previewTime, { skipPreviewClip: Boolean(resume) });
 
 
     renderer.setBeatmap(mapData, breaks, durationMs);
+    // Flattened once per map: sliders contribute a sound per node, so this is
+    // longer than the object list and has its own ordering.
+    state.hitsoundEvents = buildHitsoundEvents(mapData.objects);
+    addDebugLog(`hitsounds: ${state.hitsoundEvents.length} events from ${mapData.objects.length} objects`);
+    hitsoundPlayer.syncTo(state.hitsoundEvents, startTimeMs);
     syncPlaybackDuration();
     setMetadataText();
 
@@ -1662,23 +2146,46 @@ const initializePreviewForCurrentTab = async () => {
     // paths use the same HTMLAudioElement; starting them together lets the
     // slower promise overwrite the other's seek/play state, which presents as
     // a map-specific audio delay when the full track is already cached.
-    if (!state.hasAutoStarted) {
+    if (!state.hasAutoStarted && !isStaleLoad()) {
       state.hasAutoStarted = true;
-      await togglePlayback();
+      // A preview that was paused when it popped out stays paused; auto-playing
+      // would be its own discontinuity.
+      if (!resume?.paused) {
+        await togglePlayback();
+      }
+    }
+
+    if (isStaleLoad()) {
+      return;
     }
 
     if (resolvedSetId && metadata.audio) {
       void upgradeToFullAudioIfPossible(resolvedSetId, metadata.audio);
     } else {
-      setAudioBadgeWithProvider(
-        'preview',
-        'Preview audio',
-        PREVIEW_AUDIO_PROVIDER_LABEL,
-        'Full audio not available for this beatmap',
-      );
+      setFullAudioLoading(false);
+      if (isPreviewClipAnchorable(metadata.previewTime)) {
+        setAudioBadgeWithProvider(
+          'preview',
+          'Preview audio',
+          PREVIEW_AUDIO_PROVIDER_LABEL,
+          'Full audio not available for this beatmap',
+        );
+      } else {
+        // Nothing is playing and nothing is coming: the earlier "waiting" badge
+        // would otherwise sit there forever.
+        setAudioBadge(
+          'preview',
+          'No audio available',
+          'This beatmap has no preview point and no downloadable audio, so the preview runs silently.',
+        );
+      }
       addDebugLog('audio: metadata has no AudioFilename or set id');
     }
   } catch (error) {
+    // A superseded load's failure must not wipe the map that replaced it.
+    if (isStaleLoad()) {
+      return;
+    }
     setUnsupportedMode(false);
     addDebugLog(`init: failed -> ${error?.message || 'unknown error'}`);
     stopPlayback();
@@ -1686,7 +2193,7 @@ const initializePreviewForCurrentTab = async () => {
     titleLine.textContent = 'Preview unavailable';
     versionLine.textContent = '';
     versionLine.title = '';
-    configureAudioPreview(null, 0);
+    configureAudioPreview(null, null);
     setStatus(error?.message || 'Failed to load beatmap preview.', true);
     renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
     state.mappedDurationMs = 1;
@@ -1710,6 +2217,7 @@ bindPopupUiEvents({
     infoBackdrop,
     infoCloseButton,
     infoOptionsButton,
+    infoCachedButton,
     infoIssueButton,
     infoOsuButton,
     debugRunButton,
@@ -1722,7 +2230,11 @@ bindPopupUiEvents({
     shortcutsBackdrop,
     shortcutsCloseButton,
     recentClearBtn,
+    recentPanel,
     popupToast,
+    detachButton,
+    followButton,
+    timelineTooltip,
   },
   state,
   renderer,
@@ -1749,6 +2261,10 @@ bindPopupUiEvents({
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
+    openDetachedWindow,
+    toggleFollowEnabled,
+    toggleCachedMapsetsPanel,
+    closeCachedMapsetsPanel,
     clearHistory: async () => {
       await clearFullAudioCache();
       await clearHistory();
@@ -1766,6 +2282,7 @@ window.addEventListener('pagehide', () => {
   state.fullAudioJobId += 1;
   setFullAudioLoading(false);
   state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
+  state.detachedBoundsTimer = registry.clearTimeout(state.detachedBoundsTimer);
   state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
   state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
   stopPlayback();
@@ -1773,6 +2290,7 @@ window.addEventListener('pagehide', () => {
   stopTimelineDurationAnimation();
   setFullAudioObjectUrl(null);
   stopUnsupportedAsciiAnimation();
+  hitsoundPlayer.dispose();
   resetState();
 });
 
@@ -1795,13 +2313,42 @@ addRuntimeMessageListener((message) => {
   }
 });
 
+// The renderer resizes its backing store from the CSS box every frame, but a
+// paused preview has no frame loop, so a resize needs an explicit repaint.
+if (IS_DETACHED_WINDOW) {
+  window.addEventListener('resize', () => {
+    persistDetachedBounds();
+    if (!state.isPlaying) {
+      renderFrame();
+    }
+  });
+}
+
+// Fired before the preview loads so the detached window is gone before this one
+// starts playing, rather than both running for a moment.
+if (!IS_DETACHED_WINDOW) {
+  void closeDetachedWindowIfOpen();
+}
+
+setDetachContext({});
+// Matches the markup's default so the toggle is in step from the first paint,
+// even though the listeners only attach after the initial load.
+setFollowEnabled(IS_DETACHED_WINDOW);
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
 syncTimeLabelWidth();
 applyPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
 renderInfoMenu();
-initializePreviewForCurrentTab();
+// Following starts only once the detached window has loaded the map it was
+// opened with. Attaching the listeners earlier lets the new window's own focus
+// event fire a sync against a target that is not set yet, which reloads the same
+// map a second time on every open.
+initializePreviewForCurrentTab().finally(() => {
+  if (IS_DETACHED_WINDOW) {
+    startFollowingBrowsingTabs();
+  }
+});
 
 addStorageChangedListener((changes, areaName) => {
   if (areaName !== 'sync') {
@@ -1820,6 +2367,8 @@ addStorageChangedListener((changes, areaName) => {
     || changes[PROVIDER_PRIORITY_KEY]
     || changes[DISABLED_PROVIDERS_KEY]
     || changes[AUTO_FALLBACK_KEY]
+    || changes[HITSOUNDS_KEY]
+    || changes[HITSOUND_VOLUME_KEY]
   ) {
     applyPreviewSettings({
       maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
@@ -1839,7 +2388,11 @@ addStorageChangedListener((changes, areaName) => {
       providerPriority: changes[PROVIDER_PRIORITY_KEY]?.newValue ?? state.providerPriority,
       disabledProviders: changes[DISABLED_PROVIDERS_KEY]?.newValue ?? state.disabledProviders,
       autoFallback: changes[AUTO_FALLBACK_KEY]?.newValue ?? state.autoFallback,
+      hitsounds: changes[HITSOUNDS_KEY]?.newValue ?? state.hitsounds,
+      hitsoundVolume: changes[HITSOUND_VOLUME_KEY]?.newValue ?? state.hitsoundVolume,
     });
+
+    renderFrame();
 
     if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {
       renderFrame();

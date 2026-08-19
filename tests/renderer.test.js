@@ -218,3 +218,68 @@ test('stack offset scales with circle size, matching lazer StackOffset', () => {
   // Stack heights themselves must not change with circle size.
   assert.deepEqual(lowCs.map((object) => object.stackIndex), highCs.map((object) => object.stackIndex));
 });
+
+// Stacking used to rebuild every slider's curve from its control points on each
+// comparison, because the unstacked path deliberately skips the path cache and
+// the stacking passes ask for it from nested loops. Caching the endpoint cut
+// loading a 20k-object map from ~380ms to ~50ms. This pins the output so the
+// cache cannot silently start returning something different.
+const buildStackingFixture = () => {
+  const NL = String.fromCharCode(10);
+  const lines = [];
+  for (let i = 0; i < 300; i += 1) {
+    const time = 1000 + (i * 40);
+    const x = 100 + ((i % 7) * 2);
+    const y = 120 + ((i % 5) * 2);
+    if (i % 4 === 3) {
+      lines.push(`${x},${y},${time},2,0,B|${x + 40}:${y + 30}|${x + 80}:${y},1,90,0|0,0:0|0:0,0:0:0:0:`);
+    } else if (i % 11 === 0) {
+      lines.push(`256,192,${time},12,0,${time + 600},0:0:0:0:`);
+    } else {
+      lines.push(`${x},${y},${time},1,0,0:0:0:0:`);
+    }
+  }
+
+  const osu = [
+    'osu file format v14', '',
+    '[General]', 'AudioFilename: a.mp3', 'Mode: 0', '',
+    '[Difficulty]', 'CircleSize:4', 'ApproachRate:9', 'SliderMultiplier:1.4', 'SliderTickRate:1', '',
+    '[TimingPoints]', '0,400,4,2,0,60,1,0', '',
+    '[HitObjects]', ...lines,
+  ].join(NL);
+
+  const parsed = parseMapPreviewData(osu, { maxObjects: 40000 });
+  return convertMapForMode({ ...parsed, breaks: [] }, 0);
+};
+
+const stackIndicesFor = (mapData) => {
+  assignComboIndices(mapData.objects, 0);
+  applyPreviewStacking(
+    mapData.objects,
+    mapData.approachRate,
+    mapData.stackLeniency,
+    mapData.beatmapVersion,
+    mapData.circleSize,
+  );
+  return mapData.objects.map((object) => object.stackIndex || 0);
+};
+
+test('stacking a slider-heavy map produces the expected offsets', () => {
+  const stackIndices = stackIndicesFor(buildStackingFixture());
+
+  assert.equal(stackIndices.length, 300);
+  assert.equal(stackIndices.filter((value) => value !== 0).length, 180);
+  assert.deepEqual(stackIndices.slice(0, 20), [
+    0, 3, 2, 1, 0, 1, 0, 2, 1, 0, 3, 2, 1, 0, 0, 1, 3, 2, 1, 0,
+  ]);
+});
+
+test('stacking is stable when run again over the same objects', () => {
+  // The endpoint cache lives for as long as the objects do, so a second pass has
+  // to agree with the first rather than compounding the offsets it already set.
+  const mapData = buildStackingFixture();
+  const first = stackIndicesFor(mapData);
+  const second = stackIndicesFor(mapData);
+
+  assert.deepEqual(second, first);
+});

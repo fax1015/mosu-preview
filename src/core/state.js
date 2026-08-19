@@ -48,6 +48,16 @@ const createInitialState = ({ audio = null } = {}) => {
     popupSize: normalizedSettings.popupSize,
     unsupportedAsciiTimer: null,
     unsupportedAsciiField: null,
+    // Ids the detach button hands to the separate window, since that window
+    // cannot read them back off the active tab.
+    detachContext: { beatmapId: '', setId: '', mode: null },
+    detachedBoundsTimer: null,
+    // Detached-window tab following.
+    followEnabled: false,
+    followTarget: null,
+    followSyncTimer: null,
+    detachedWindowId: null,
+    lastFocusedBrowsingWindowId: null,
     lastAudioVisualSyncPerfMs: 0,
     maniaScrollSpeed: normalizedSettings.maniaScrollSpeed,
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
@@ -59,6 +69,9 @@ const createInitialState = ({ audio = null } = {}) => {
     providerPriority: normalizedSettings.providerPriority,
     disabledProviders: normalizedSettings.disabledProviders,
     autoFallback: normalizedSettings.autoFallback,
+    hitsoundEvents: [],
+    hitsounds: normalizedSettings.hitsounds,
+    hitsoundVolume: normalizedSettings.hitsoundVolume,
     preMuteVolume: DEFAULT_AUDIO_VOLUME,
   };
 };

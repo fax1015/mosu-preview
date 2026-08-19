@@ -85,7 +85,12 @@ const extractFullBeatmapAudioToCache = async (options = {}) => {
   }
 
   const audioBlob = new Blob([result.audioBytes], { type: result.mime || getAudioMimeType(result.pickedAudioFilename) });
-  const wroteRequested = await writeCachedFullAudioBlob(options.setId, result.requestedAudioFilename, audioBlob);
+  const wroteRequested = await writeCachedFullAudioBlob(
+    options.setId,
+    result.requestedAudioFilename,
+    audioBlob,
+    options.mapsetInfo,
+  );
   if (!wroteRequested) {
     return { ok: false, error: 'Could not write extracted audio to cache.' };
   }

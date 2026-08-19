@@ -11,6 +11,7 @@ import {
   PROVIDER_PRIORITY_KEY,
   DISABLED_PROVIDERS_KEY,
   AUTO_FALLBACK_KEY,
+  PREVIEW_SETTING_KEYS,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
   normalizeProviderOverride,
@@ -27,6 +28,9 @@ const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
 const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
 const maniaScrollTimeValue = document.querySelector('#maniaScrollTimeValue');
 const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm');
+const hitsoundsToggle = document.querySelector('#hitsounds');
+const hitsoundVolumeRange = document.querySelector('#hitsoundVolume');
+const hitsoundVolumeValue = document.querySelector('#hitsoundVolumeValue');
 const maniaScrollDirection = document.querySelector('#maniaScrollDirection');
 const maniaTimingNoteColours = document.querySelector('#maniaTimingNoteColours');
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
@@ -43,20 +47,7 @@ let saveStatusClearTimeout = null;
 
 const readSettings = async () => {
   try {
-    const items = await storageGet('sync', [
-      PROVIDER_OVERRIDE_KEY,
-      MANIA_SCROLL_SPEED_KEY,
-      MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-      MANIA_SCROLL_DIRECTION_KEY,
-      MANIA_TIMING_NOTE_COLOURS_KEY,
-      STANDARD_SNAKING_SLIDERS_KEY,
-      STANDARD_SLIDER_SNAKE_OUT_KEY,
-      STANDARD_SLIDER_END_CIRCLES_KEY,
-      POPUP_SIZE_KEY,
-      PROVIDER_PRIORITY_KEY,
-      DISABLED_PROVIDERS_KEY,
-      AUTO_FALLBACK_KEY,
-    ]);
+    const items = await storageGet('sync', [PROVIDER_OVERRIDE_KEY, ...PREVIEW_SETTING_KEYS]);
 
     return {
       providerOverride: normalizeProviderOverride(items?.[PROVIDER_OVERRIDE_KEY]),
@@ -481,6 +472,13 @@ const renderManiaScrollSpeed = (value) => {
   }
 };
 
+// Stored as 0-1, presented as a percentage.
+const renderPercentSetting = (labelEl, value) => {
+  if (labelEl) {
+    labelEl.textContent = `${Math.round(Number(value) * 100)}%`;
+  }
+};
+
 const getFormSettings = () => ({
   ...normalizePreviewSettings({
     popupSize: popupSizeSelect?.value,
@@ -494,6 +492,8 @@ const getFormSettings = () => ({
     providerPriority: currentProviderPriority,
     disabledProviders,
     autoFallback: autoFallbackToggle?.checked ?? true,
+    hitsounds: hitsoundsToggle?.checked ?? false,
+    hitsoundVolume: hitsoundVolumeRange ? Number(hitsoundVolumeRange.value) / 100 : undefined,
   }),
 });
 
@@ -543,6 +543,25 @@ const initialize = async () => {
   standardSnakingSliders.checked = settings.standardSnakingSliders;
   standardSliderSnakeOut.checked = settings.standardSliderSnakeOut;
   standardSliderEndCircles.checked = settings.standardSliderEndCircles;
+
+  if (hitsoundsToggle) {
+    hitsoundsToggle.checked = settings.hitsounds;
+  }
+  if (hitsoundVolumeRange) {
+    hitsoundVolumeRange.value = String(Math.round(settings.hitsoundVolume * 100));
+    renderPercentSetting(hitsoundVolumeValue, settings.hitsoundVolume);
+  }
+
+  hitsoundsToggle?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  hitsoundVolumeRange?.addEventListener('input', () => {
+    renderPercentSetting(hitsoundVolumeValue, Number(hitsoundVolumeRange.value) / 100);
+  });
+  hitsoundVolumeRange?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
 
   popupSizeSelect.addEventListener('change', async () => {
     await persistFormSettings();

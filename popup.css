@@ -289,6 +289,73 @@ h6 {
     }
 }
 
+/* Detached window: the shell fills the OS window and the playfield takes the
+   slack, so resizing grows the preview instead of padding around a fixed box. */
+html.is-detached-window,
+html.is-detached-window body {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    max-width: none;
+}
+
+html.is-detached-window body {
+    padding: 0;
+}
+
+html.is-detached-window .map-preview-popup {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    transition: none;
+    transform: none;
+}
+
+html.is-detached-window .map-preview-canvas-wrap {
+    flex: 1 1 auto;
+    aspect-ratio: auto;
+    min-height: 0;
+}
+
+/* Detaching from a detached window would just spawn a duplicate. */
+html.is-detached-window .map-preview-detach-btn {
+    display: none;
+}
+
+/* Following only means something for a window that outlives the tab it came
+   from, so the toggle is hidden in the toolbar popup. Qualified with the shared
+   button class so it outranks that rule's `display` rather than tying with it
+   and losing on source order. */
+.map-preview-info-btn.map-preview-follow-btn {
+    display: none;
+}
+
+html.is-detached-window .map-preview-follow-btn {
+    display: inline-flex;
+}
+
+.map-preview-follow-btn.is-following {
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.24);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.map-preview-follow-icon--on,
+.map-preview-follow-icon--off {
+    display: none;
+}
+
+.map-preview-follow-btn.is-following .map-preview-follow-icon--on {
+    display: block;
+}
+
+.map-preview-follow-btn:not(.is-following) .map-preview-follow-icon--off {
+    display: block;
+}
+
 .map-preview-popup.is-open {
     opacity: 1;
     transform: translateY(0) scale(1);
@@ -422,6 +489,18 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 .map-preview-info-btn:focus-visible {
     outline: 2px solid rgba(205, 223, 255, 0.9);
     outline-offset: 2px;
+}
+
+.map-preview-info-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.map-preview-info-btn:disabled:hover {
+    background: transparent;
+    color: var(--text-secondary);
+    border-color: rgba(255, 255, 255, 0.1);
+    transform: none;
 }
 
 .map-preview-headings {
@@ -1132,6 +1211,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-controls {
+    position: relative;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
@@ -1552,4 +1632,115 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 
 .map-preview-recent-action-btn:active {
     transform: scale(0.92);
+}
+
+/* Opened from the menu on a beatmap page the panel sits under the transport
+   controls, so it gets a tighter ceiling than the full-height unsupported view
+   and scrolls internally rather than pushing the popup past its usable height. */
+/* Opened from the menu on a beatmap page the panel sits under the transport
+   controls, so it gets a tighter ceiling than the full-height unsupported view
+   and scrolls internally.
+
+   `:not([hidden])` is load-bearing. The panel is collapsed by max-height rather
+   than by `display`, and this selector is more specific than the `[hidden]`
+   rule, so without the guard it kept its 300px ceiling while closed and left the
+   popup padded out by an invisible panel that never went away. */
+.map-preview-popup:not(.is-unsupported) .map-preview-recent-list {
+    max-height: 216px;
+    min-height: 0;
+}
+
+/* Over a beatmap page the panel is lifted out of the layout and floated on top
+   of the preview. The popup is sized by the browser from its own content, so
+   anything that adds height risks pushing past the 600px ceiling and making the
+   whole popup scroll -- and `vh` cannot help, because the viewport is derived
+   from the content rather than the other way round. Out of flow, the popup
+   height simply never changes.
+
+   These properties deliberately apply open *and* closed. Scoping them to
+   `:not([hidden])` made closing drop the panel back into normal flow on the
+   first frame, so it snapped down the page and only then animated its height.
+   Being out of flow means it can keep its full size while invisible, leaving
+   opacity and a short slide as the only things that move. */
+html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-preview-recent-panel {
+    position: absolute;
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    z-index: 20;
+    max-height: 264px;
+    min-height: 0;
+    margin: 0;
+    padding: 0.6rem;
+    gap: 0.6rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: var(--border-radius);
+    background: rgba(30, 28, 36, 0.98);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+    transition: opacity 0.18s ease,
+                transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 0s;
+}
+
+html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-preview-recent-panel[hidden] {
+    /* Size held steady so nothing reflows mid-fade; visibility flips only once
+       the fade has finished, which also keeps tab focus out of a hidden panel. */
+    max-height: 264px;
+    padding: 0.6rem;
+    gap: 0.6rem;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(6px);
+    pointer-events: none;
+    transition: opacity 0.18s ease,
+                transform 0.22s cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 0.22s;
+}
+
+html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-preview-recent-list {
+    flex: 1 1 auto;
+    max-height: none;
+    min-height: 0;
+}
+
+/* Collapsed state owns every box property it needs, so no later rule can leave
+   part of the panel occupying space. */
+.map-preview-recent-panel[hidden] {
+    margin: 0;
+    border-top: 0;
+}
+
+/* Timestamp under the cursor while scrubbing the timeline. Positioned from JS
+   against the controls row, and kept out of the pointer's way so it never
+   swallows the drag it is describing. */
+.map-preview-timeline-tooltip {
+    position: absolute;
+    bottom: calc(100% + 0.3rem);
+    transform: translateX(-50%);
+    z-index: 9;
+    padding: 0.16rem 0.4rem;
+    border-radius: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(24, 23, 28, 0.96);
+    color: rgba(238, 241, 248, 0.96);
+    font-family: var(--font-family-mono);
+    font-size: 0.6rem;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+.map-preview-timeline-tooltip[hidden] {
+    display: none;
+}
+
+/* On the unsupported view the cached list is the page, not an overlay, and it is
+   shown automatically. Offering a toggle there only lets it be dismissed down to
+   a bare title and some ascii art, with no way back. */
+.map-preview-popup.is-unsupported .map-preview-info-cached-btn {
+    display: none;
 }

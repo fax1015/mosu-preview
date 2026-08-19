@@ -7,6 +7,8 @@ import {
   compactFullAudioAliasesForCacheKeys,
   normalizePath,
   removeFullAudioAliasesForCacheKeys,
+  buildMapsetInfoHeaders,
+  parseCachedMapsetInfo,
 } from '../src/audio/cache.js';
 
 test('normalizes backslashes in audio paths', () => {
@@ -82,4 +84,47 @@ test('cache aliases compact to live cache keys only', () => {
       [alias]: primary,
     },
   );
+});
+
+test('mapset names round-trip through cache headers', () => {
+  const headers = buildMapsetInfoHeaders({
+    title: 'Freedom Dive',
+    artist: 'xi',
+    creator: 'Nakagawa-Kanon',
+  });
+
+  assert.deepEqual(parseCachedMapsetInfo(new Response('', { headers })), {
+    title: 'Freedom Dive',
+    artist: 'xi',
+    creator: 'Nakagawa-Kanon',
+  });
+});
+
+test('non-latin1 names survive, and do not throw on the way in', () => {
+  // Header values are ByteString: assigning these raw throws a TypeError and
+  // would take the entire audio cache write down with it.
+  const mapsetInfo = {
+    title: '紅い影 -Ver.紅樓-',
+    artist: 'タカハシキヨシ',
+    creator: 'MønT',
+  };
+  const headers = buildMapsetInfoHeaders(mapsetInfo);
+
+  assert.doesNotThrow(() => new Response('', { headers }));
+  assert.deepEqual(parseCachedMapsetInfo(new Response('', { headers })), mapsetInfo);
+});
+
+test('absent and malformed name headers read as empty, never as a throw', () => {
+  assert.deepEqual(parseCachedMapsetInfo(new Response('')), { title: '', artist: '', creator: '' });
+  assert.deepEqual(buildMapsetInfoHeaders({}), {});
+  assert.deepEqual(buildMapsetInfoHeaders(), {});
+
+  // A lone % is not a valid escape sequence.
+  const malformed = new Response('', { headers: { 'x-mosu-title': '%E0%A4%A' } });
+  assert.equal(parseCachedMapsetInfo(malformed).title, '');
+});
+
+test('an over-long title is truncated rather than rejected', () => {
+  const headers = buildMapsetInfoHeaders({ title: 'a'.repeat(500) });
+  assert.equal(parseCachedMapsetInfo(new Response('', { headers })).title.length, 200);
 });

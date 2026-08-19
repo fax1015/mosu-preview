@@ -1,5 +1,5 @@
 import { parseMetadata, parseMapPreviewData, parseBreakPeriods } from './parser.js';
-import { PreviewRenderer, clamp } from './renderer.js';
+import { PreviewRenderer, clamp, formatTime } from './renderer.js';
 import {
   PROVIDER_OVERRIDE_KEY,
   AUDIO_VOLUME_KEY,
@@ -57,6 +57,7 @@ import {
   writeCachedFullAudioBlob,
 } from './audio/cache.js';
 import { extractFullBeatmapAudio } from './audio/fullAudioExtractionCore.js';
+import { getPreviewClipAnchorMapMs, isPreviewClipAnchorable, seekAudioElementToMapTime } from './audio/seek.js';
 import {
   getProviderDisplayName,
   getProviderSequenceForDownload,
@@ -83,6 +84,9 @@ const titleLine = document.querySelector('#mapPreviewTitle');
 const versionLine = document.querySelector('#mapPreviewVersion');
 const timeLabel = document.querySelector('#mapPreviewTimeLabel');
 const speedButton = document.querySelector('#mapPreviewSpeedBtn');
+const speedControl = document.querySelector('#mapPreviewSpeedControl');
+const speedSlider = document.querySelector('#mapPreviewSpeedSlider');
+const speedResetButton = document.querySelector('#mapPreviewSpeedResetBtn');
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const timelineCanvas = document.querySelector('#mapPreviewTimeline');
 const volumeSlider = document.querySelector('#mapPreviewVolume');
@@ -90,8 +94,6 @@ const volumeLabel = document.querySelector('#mapPreviewVolumeLabel');
 const toggleIndicator = document.querySelector('#mapPreviewToggleIndicator');
 const unsupportedPanel = document.querySelector('#mapPreviewUnsupported');
 const unsupportedAscii = document.querySelector('#mapPreviewUnsupportedAscii');
-// Compatibility shim for stale code paths that previously used a separate loading element.
-const audioLoadingIndicator = null;
 const audioStatusBadge = document.querySelector('#mapPreviewAudioBadge');
 const popupToast = document.querySelector('#mapPreviewToast');
 const debugPanel = document.querySelector('#mapPreviewDebugPanel');
@@ -138,7 +140,7 @@ const setModalShellVisible = (modalShell, isVisible) => {
 
   const hideTimer = modalHideTimers.get(modalShell);
   if (hideTimer) {
-    clearTimeout(hideTimer);
+    registry.clearTimeout(hideTimer);
     modalHideTimers.delete(modalShell);
   }
 
@@ -169,22 +171,24 @@ const AUDIO_BADGE_AUTO_HIDE_DELAY_MS = 3500;
 const DEBUG_LOG_LIMIT = 80;
 const PREVIEW_AUDIO_PROVIDER_LABEL = 'b.ppy.sh';
 const CACHE_AUDIO_PROVIDER_LABEL = 'cache';
+// Matches lazer's rate adjust range and precision.
+const MIN_PLAYBACK_SPEED = 0.1;
+const MAX_PLAYBACK_SPEED = 2;
+const PLAYBACK_SPEED_STEP = 0.05;
 const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
+// Marathon maps run well past 12k objects (a 60-minute map is comfortably over
+// 20k). Parsing all of them costs ~40MB and ~300ms, and rendering is windowed,
+// so the old cap only served to cut the timeline short.
+const MAX_PREVIEW_OBJECTS = 40000;
 const AUDIO_VISUAL_SYNC_INTERVAL_MS = 240;
 const AUDIO_VISUAL_SYNC_THRESHOLD_MS = 90;
 const SUPPORT_LINKS = {
   issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
 };
-const UNSUPPORTED_ASCII_TICK_MS = 140;
+const UNSUPPORTED_ASCII_TICK_MS = 240;
 const UNSUPPORTED_ASCII_CHAR_WIDTH_PX = 6.2;
 const UNSUPPORTED_ASCII_CHAR_HEIGHT_PX = 11.2;
-const UNSUPPORTED_ASCII_GLYPHS = ['.', 'o', 'O', '0', '@'];
-const UNSUPPORTED_ASCII_BUBBLE_MIN_MS = 1300;
-const UNSUPPORTED_ASCII_BUBBLE_MAX_MS = 3200;
-const UNSUPPORTED_ASCII_BUBBLE_DENSITY = 0.065;
-const UNSUPPORTED_ASCII_BUBBLE_MIN_RADIUS = 2;
-const UNSUPPORTED_ASCII_BUBBLE_MAX_RADIUS = 5;
 const UNSUPPORTED_ASCII_XY_RATIO = UNSUPPORTED_ASCII_CHAR_WIDTH_PX / UNSUPPORTED_ASCII_CHAR_HEIGHT_PX;
 
 const setFullAudioObjectUrl = (newUrl) => {
@@ -194,13 +198,6 @@ const setFullAudioObjectUrl = (newUrl) => {
   state.fullAudioObjectUrl = newUrl || null;
 };
 
-const clearCurrentRaf = () => {
-  if (state.rafId !== null) {
-    cancelAnimationFrame(state.rafId);
-    state.rafId = null;
-  }
-};
-
 const hasFullAudioSource = () => (
   state.audioSyncEnabled
   && Boolean(state.fullAudioObjectUrl)
@@ -208,10 +205,14 @@ const hasFullAudioSource = () => (
   && state.audio.src === state.fullAudioObjectUrl
 );
 
-const shouldContinueTimelineWhileFetchingFullAudio = () => (
+// True while the visual preview should keep advancing even though the audio
+// element has nothing left to play: either full audio is still downloading, or
+// we only ever had the short b.ppy.sh preview clip. Freezing the timeline ~10
+// seconds into an hour-long marathon is never the right answer.
+const shouldContinueTimelineWithoutFullAudio = () => (
   state.audioSyncEnabled
   && !hasFullAudioSource()
-  && state.fullAudioStatus === 'loading'
+  && state.currentTimeMs < (state.durationMs - 1)
 );
 
 const getResolvedPlaybackDurationMs = () => {
@@ -230,6 +231,33 @@ const getResolvedPlaybackDurationMs = () => {
   return Math.max(mappedDurationMs, audioDurationMs, 1);
 };
 
+// The timestamp reserves room for the widest label this duration can produce,
+// measured once per duration rather than per frame: sizing it to the live text
+// would make the whole control row twitch every time a digit rolled over.
+const syncTimeLabelWidth = () => {
+  if (!timeLabel) {
+    return;
+  }
+
+  const durationLabel = formatTime(state.durationMs);
+  // The elapsed side never renders wider than the duration side, and the label
+  // uses tabular figures, so zeros stand in for whichever digits show up.
+  const widestLabel = `${durationLabel} / ${durationLabel}`.replace(/\d/g, '0');
+  const restoreText = timeLabel.textContent;
+
+  // Measured on the label itself so the real font, letter spacing and padding
+  // are accounted for. Both writes land in the same task, so nothing paints
+  // between them.
+  timeLabel.style.setProperty('--map-preview-time-label-width', 'auto');
+  timeLabel.textContent = widestLabel;
+  const measuredPx = Math.ceil(timeLabel.getBoundingClientRect().width);
+  timeLabel.textContent = restoreText;
+  timeLabel.style.setProperty(
+    '--map-preview-time-label-width',
+    measuredPx > 0 ? `${measuredPx}px` : `${widestLabel.length}ch`,
+  );
+};
+
 const syncPlaybackDuration = () => {
   const previousDurationMs = state.durationMs;
   const nextDurationMs = getResolvedPlaybackDurationMs();
@@ -237,6 +265,9 @@ const syncPlaybackDuration = () => {
     durationMs: nextDurationMs,
     currentTimeMs: clamp(state.currentTimeMs, 0, nextDurationMs),
   });
+  if (nextDurationMs !== previousDurationMs) {
+    syncTimeLabelWidth();
+  }
   const shouldAnimateTimeline = hasFullAudioSource() && nextDurationMs > previousDurationMs;
   const isAnimatingTimeline = renderer.setDuration(nextDurationMs, { animate: shouldAnimateTimeline });
   if (isAnimatingTimeline) {
@@ -273,12 +304,8 @@ const ensureTimelineDurationAnimation = () => {
   state.timelineAnimationRafId = requestAnimationFrame(tickTimelineDurationAnimation);
 };
 
-state.audio.addEventListener('canplay', () => {
-  state.audioReady = true;
-  syncPlaybackDuration();
-});
+state.audio.addEventListener('canplay', syncPlaybackDuration);
 state.audio.addEventListener('error', () => {
-  state.audioReady = false;
   state.audioSyncEnabled = false;
   syncPlaybackDuration();
 });
@@ -307,14 +334,9 @@ state.audio.addEventListener('ended', () => {
   state.currentTimeMs = clamp(state.currentTimeMs, 0, state.durationMs || 1);
   renderFrame();
 
-  if (state.isPlaying && shouldContinueTimelineWhileFetchingFullAudio()) {
-    const nowPerf = performance.now();
-    state.playbackMode = 'manual';
-    state.playStartMapMs = state.currentTimeMs;
-    state.playStartPerfMs = nowPerf;
-    state.lastAudioVisualSyncPerfMs = 0;
-    clearCurrentRaf();
-    state.rafId = requestAnimationFrame(playbackTick);
+  if (state.isPlaying && shouldContinueTimelineWithoutFullAudio()) {
+    switchToManualTimeline();
+    ensurePlaybackLoop();
     return;
   }
 
@@ -350,12 +372,6 @@ const unsupportedViewController = createUnsupportedViewController({
     tickMs: UNSUPPORTED_ASCII_TICK_MS,
     charWidthPx: UNSUPPORTED_ASCII_CHAR_WIDTH_PX,
     charHeightPx: UNSUPPORTED_ASCII_CHAR_HEIGHT_PX,
-    glyphs: UNSUPPORTED_ASCII_GLYPHS,
-    bubbleMinMs: UNSUPPORTED_ASCII_BUBBLE_MIN_MS,
-    bubbleMaxMs: UNSUPPORTED_ASCII_BUBBLE_MAX_MS,
-    bubbleDensity: UNSUPPORTED_ASCII_BUBBLE_DENSITY,
-    bubbleMinRadius: UNSUPPORTED_ASCII_BUBBLE_MIN_RADIUS,
-    bubbleMaxRadius: UNSUPPORTED_ASCII_BUBBLE_MAX_RADIUS,
     xyRatio: UNSUPPORTED_ASCII_XY_RATIO,
   },
 });
@@ -409,12 +425,20 @@ const renderShortcutsMenu = () => {
   }
 };
 
+// The shortcuts dialog normally sits on top of the info menu, but the `?`
+// shortcut can open it directly from anywhere. Remember which route was taken
+// so closing it returns to the right place instead of revealing an info menu
+// the user never opened.
+let shortcutsOpenedFromInfoMenu = false;
+
 const setShortcutsMenuOpen = (isOpen) => {
   if (isOpen) {
     lastShortcutsFocus = document.activeElement instanceof HTMLElement ? document.activeElement : shortcutsButton;
+    shortcutsOpenedFromInfoMenu = state.infoMenuOpen;
     setUiState({ infoMenuOpen: true, shortcutsMenuOpen: true });
   } else {
-    setUiState({ infoMenuOpen: true, shortcutsMenuOpen: false });
+    setUiState({ infoMenuOpen: shortcutsOpenedFromInfoMenu, shortcutsMenuOpen: false });
+    shortcutsOpenedFromInfoMenu = false;
   }
   renderInfoMenu();
   renderShortcutsMenu();
@@ -542,10 +566,7 @@ const showPopupToast = (message, hideDelayMs = 3500) => {
     return;
   }
 
-  if (state.toastHideTimer) {
-    clearTimeout(state.toastHideTimer);
-    state.toastHideTimer = null;
-  }
+  state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
 
   popupToast.textContent = message;
   popupToast.classList.add('is-visible');
@@ -615,7 +636,7 @@ const applyAudioVolume = (volume) => {
 
   if (volumeSlider) {
     volumeSlider.value = String(Math.round(nextVolume * 100));
-    volumeSlider.style.setProperty('--volume-progress', `${Math.round(nextVolume * 100)}%`);
+    volumeSlider.style.setProperty('--range-progress', `${Math.round(nextVolume * 100)}%`);
   }
   if (volumeLabel) {
     volumeLabel.textContent = `${Math.round(nextVolume * 100)}%`;
@@ -660,13 +681,54 @@ const formatPlaybackSpeedLabel = (speed) => {
   return `${text}x`;
 };
 
-const setPlaybackSpeedButtonLabel = () => {
-  if (!speedButton) {
-    return;
+const normalizePlaybackSpeed = (speed) => {
+  const value = Number(speed);
+  if (!Number.isFinite(value)) {
+    return 1;
   }
+  const stepped = Math.round(value / PLAYBACK_SPEED_STEP) * PLAYBACK_SPEED_STEP;
+  return Number(clamp(stepped, MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED).toFixed(2));
+};
+
+const syncPlaybackSpeedControls = () => {
   const label = formatPlaybackSpeedLabel(state.playbackSpeed);
-  speedButton.textContent = label;
-  speedButton.title = `Playback speed (${label})`;
+
+  if (speedButton) {
+    speedButton.textContent = label;
+    speedButton.title = `Playback speed (${label})`;
+  }
+
+  if (speedSlider) {
+    const percent = Math.round(state.playbackSpeed * 100);
+    if (Number(speedSlider.value) !== percent) {
+      speedSlider.value = String(percent);
+    }
+    const min = Number(speedSlider.min) || MIN_PLAYBACK_SPEED * 100;
+    const max = Number(speedSlider.max) || MAX_PLAYBACK_SPEED * 100;
+    const progress = ((percent - min) / Math.max(1, max - min)) * 100;
+    speedSlider.style.setProperty('--range-progress', `${clamp(progress, 0, 100)}%`);
+    speedSlider.setAttribute('aria-valuetext', label);
+  }
+
+  if (speedResetButton) {
+    const canReset = state.playbackSpeed !== 1 && !speedButton?.disabled;
+    speedResetButton.classList.toggle('is-visible', canReset);
+    speedResetButton.disabled = !canReset;
+  }
+};
+
+const setPlaybackSpeedControlEnabled = (enabled) => {
+  if (speedButton) {
+    speedButton.disabled = !enabled;
+  }
+  if (speedSlider) {
+    speedSlider.disabled = !enabled;
+  }
+  if (!enabled) {
+    speedControl?.classList.remove('is-speed-open');
+    speedButton?.setAttribute('aria-expanded', 'false');
+  }
+  syncPlaybackSpeedControls();
 };
 
 const timingController = createTimingController({
@@ -682,7 +744,7 @@ const {
 } = timingController;
 
 const applyPlaybackSpeed = (nextSpeed) => {
-  const normalized = PLAYBACK_SPEED_CYCLE.find((value) => Math.abs(value - Number(nextSpeed)) < 0.0001) || 1;
+  const normalized = normalizePlaybackSpeed(nextSpeed);
 
   if (state.isPlaying) {
     const now = performance.now();
@@ -693,7 +755,7 @@ const applyPlaybackSpeed = (nextSpeed) => {
 
   state.playbackSpeed = normalized;
   state.audio.playbackRate = normalized;
-  setPlaybackSpeedButtonLabel();
+  syncPlaybackSpeedControls();
 
   if (state.mapData) {
     renderFrame();
@@ -718,10 +780,7 @@ const setAudioBadge = (stateName, label, tooltip = '') => {
     return;
   }
 
-  if (state.audioBadgeHideTimer) {
-    clearTimeout(state.audioBadgeHideTimer);
-    state.audioBadgeHideTimer = null;
-  }
+  state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
 
   audioStatusBadge.classList.remove('is-hidden');
   audioStatusBadge.classList.remove('is-preview', 'is-loading', 'is-ready', 'is-failed');
@@ -799,8 +858,14 @@ const showTryingArchiveProviderBadge = (providerLabel, progress) => {
   );
 };
 
-const waitForAudioReady = ({ requireFreshEvent = false } = {}) => new Promise((resolve) => {
-  if (!requireFreshEvent && state.audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+// `requireFreshEvent` is for the case where the source was just swapped: the
+// element can still report the previous source's readyState for a tick, so the
+// caller has to wait for an actual event rather than trust it.
+const waitForAudioElementReady = (
+  audioElement,
+  { timeoutMs = 10000, requireFreshEvent = false } = {},
+) => new Promise((resolve) => {
+  if (!requireFreshEvent && audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     resolve(true);
     return;
   }
@@ -821,73 +886,7 @@ const waitForAudioReady = ({ requireFreshEvent = false } = {}) => new Promise((r
   };
 
   const cleanup = () => {
-    clearTimeout(timer);
-    state.audio.removeEventListener('canplay', onReady);
-    state.audio.removeEventListener('loadeddata', onReady);
-    state.audio.removeEventListener('error', onError);
-  };
-
-  const timer = registry.addTimeout(setTimeout(onTimeout, 10000));
-  state.audio.addEventListener('canplay', onReady);
-  state.audio.addEventListener('loadeddata', onReady);
-  state.audio.addEventListener('error', onError);
-});
-
-const waitForAudioSeek = () => new Promise((resolve) => {
-  if (!state.audio?.src || state.audio.seeking === false) {
-    resolve(true);
-    return;
-  }
-
-  const onSeeked = () => {
-    cleanup();
-    resolve(true);
-  };
-
-  const onError = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const onTimeout = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const cleanup = () => {
-    clearTimeout(timer);
-    state.audio.removeEventListener('seeked', onSeeked);
-    state.audio.removeEventListener('error', onError);
-  };
-
-  const timer = registry.addTimeout(setTimeout(onTimeout, 2500));
-  state.audio.addEventListener('seeked', onSeeked, { once: true });
-  state.audio.addEventListener('error', onError, { once: true });
-});
-
-const waitForAudioElementReady = (audioElement, timeoutMs = 10000) => new Promise((resolve) => {
-  if (audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    resolve(true);
-    return;
-  }
-
-  const onReady = () => {
-    cleanup();
-    resolve(true);
-  };
-
-  const onError = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const onTimeout = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const cleanup = () => {
-    clearTimeout(timer);
+    registry.clearTimeout(timer);
     audioElement.removeEventListener('canplay', onReady);
     audioElement.removeEventListener('loadeddata', onReady);
     audioElement.removeEventListener('error', onError);
@@ -921,7 +920,7 @@ const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise(
   };
 
   const cleanup = () => {
-    clearTimeout(timer);
+    registry.clearTimeout(timer);
     audioElement.removeEventListener('seeked', onSeeked);
     audioElement.removeEventListener('error', onError);
   };
@@ -931,22 +930,8 @@ const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise(
   audioElement.addEventListener('error', onError, { once: true });
 });
 
-const seekAudioElementToMapTime = (audioElement, mapTimeMs, anchorMapMs) => {
-  const targetSec = (mapTimeMs - anchorMapMs) / 1000;
-  if (!Number.isFinite(targetSec) || targetSec < 0) {
-    return false;
-  }
-
-  const maxDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
-    ? audioElement.duration
-    : targetSec;
-  audioElement.currentTime = Math.max(0, Math.min(targetSec, maxDuration));
-  return true;
-};
-
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   state.audioSyncEnabled = Boolean(sourceUrl);
-  state.audioReady = false;
   state.lastAudioVisualSyncPerfMs = 0;
   state.audioAnchorMapMs = Math.max(0, Number.isFinite(anchorMapMs) ? anchorMapMs : 0);
   state.audio.playbackRate = state.playbackSpeed;
@@ -973,40 +958,35 @@ const renderFrame = () => {
   timeLabel.textContent = `${renderer.getCurrentLabel()} / ${renderer.getDurationLabel()}`;
 };
 
-const playbackController = createPlaybackController({
+const {
+  clearCurrentRaf,
+  ensurePlaybackLoop,
+  switchToManualTimeline,
+  stopPlayback,
+  togglePlayback,
+  seekTo,
+  seekRelative,
+  restartPreview,
+} = createPlaybackController({
   state,
-  renderer,
   config: {
     audioVisualSyncIntervalMs: AUDIO_VISUAL_SYNC_INTERVAL_MS,
   },
   helpers: {
     ensureTimelineDurationAnimation,
     getCurrentManualMapTime,
-    shouldContinueTimelineWhileFetchingFullAudio,
     syncVisualClockToMapTime,
-    getAudioMappedTimeMs,
     resyncVisualPlaybackToAudio,
-    clearCurrentRaf,
-    seekAudioToMapTime: (...args) => seekAudioToMapTime(...args),
     renderFrame,
-    clamp,
   },
 });
-const {
-  stopPlayback,
-  playbackTick,
-  togglePlayback,
-} = playbackController;
 
 const showCanvasToggleFeedback = (action) => {
   if (!toggleIndicator) {
     return;
   }
 
-  if (state.indicatorTimer) {
-    clearTimeout(state.indicatorTimer);
-    state.indicatorTimer = null;
-  }
+  state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
 
   toggleIndicator.classList.remove('is-visible', 'is-play', 'is-pause');
   void toggleIndicator.offsetWidth;
@@ -1025,53 +1005,6 @@ const setStatus = (text, isError = false) => {
   if (isError) {
     titleLine.textContent = 'Preview unavailable';
   }
-};
-
-const seekRelative = (deltaMs) => {
-  if (!state.mapData || state.durationMs <= 0) {
-    return;
-  }
-  seekToTimeMs(state.currentTimeMs + deltaMs);
-};
-
-const seekToTimeMs = (timeMs) => {
-  if (!state.mapData || state.durationMs <= 0) {
-    return;
-  }
-
-  const nextTime = clamp(timeMs, 0, state.durationMs || 0);
-  syncVisualClockToMapTime(nextTime);
-  if (state.audioSyncEnabled && state.audio?.src) {
-    try {
-      const hasTarget = seekAudioToMapTime(nextTime);
-      if (!hasTarget && state.isPlaying && state.playbackMode === 'audio') {
-        state.audio.pause();
-        state.playbackMode = 'manual';
-      } else if (state.playbackMode === 'audio') {
-        resyncVisualPlaybackToAudio({ force: true });
-      }
-    } catch {
-      // Ignore seek errors; visual playback continues.
-    }
-  }
-  renderFrame();
-};
-
-const restartPreview = () => {
-  if (!state.mapData || state.durationMs <= 0) {
-    return;
-  }
-  syncVisualClockToMapTime(0);
-  if (state.audioSyncEnabled && state.audio?.src) {
-    seekAudioToMapTime(0);
-    if (state.playbackMode === 'audio') {
-      resyncVisualPlaybackToAudio({ force: true });
-    }
-  }
-  if (!state.isPlaying) {
-    void togglePlayback();
-  }
-  renderFrame();
 };
 
 const toggleMute = () => {
@@ -1139,16 +1072,30 @@ const configureAudioPreview = (setId, previewTimeMs) => {
   }
 
   const normalizedSetId = String(setId);
-  const nextSrc = `${AUDIO_PREVIEW_BASE}/${normalizedSetId}.mp3`;
   setFullAudioState({
     previewSetId: normalizedSetId,
     activeSetId: normalizedSetId,
   });
-  setAudioElementSource(nextSrc, Math.max(0, Number.isFinite(previewTimeMs) && previewTimeMs > 0 ? previewTimeMs : 0));
-};
 
-const seekAudioToMapTime = (mapTimeMs) => {
-  return seekAudioElementToMapTime(state.audio, mapTimeMs, state.audioAnchorMapMs);
+  // The b.ppy.sh clip is a ~10s excerpt with a 100ms lead-in before the
+  // beatmap's PreviewTime. When PreviewTime is -1 (or absent) osu! generates the
+  // clip from ~40% into the track instead, and that offset is not derivable from
+  // the .osu file. Anchoring it at 0 anyway played the middle of the song over
+  // the start of the map — a large, constant desync. Better to stay silent until
+  // full audio arrives.
+  if (!isPreviewClipAnchorable(previewTimeMs)) {
+    setAudioElementSource('', 0);
+    setAudioBadgeWithProvider(
+      'preview',
+      'No preview point',
+      PREVIEW_AUDIO_PROVIDER_LABEL,
+      'This beatmap has no preview point, so the short preview clip cannot be lined up with the map. Waiting for full audio.',
+    );
+    return;
+  }
+
+  const nextSrc = `${AUDIO_PREVIEW_BASE}/${normalizedSetId}.mp3`;
+  setAudioElementSource(nextSrc, getPreviewClipAnchorMapMs(previewTimeMs));
 };
 
 const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, providerLabel = '') => {
@@ -1157,7 +1104,9 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
   }
 
   addDebugLog(`audio: hotswap start (${sourceAudioFilename}, ${Math.round(audioBlob.size / 1024)} KB)`);
-  const swapMapTimeMs = state.currentTimeMs;
+  // Only used for the preflight probe below, which just needs *some* valid
+  // position. The real commit re-reads the playhead (see commitMapTimeMs).
+  const preflightMapTimeMs = state.currentTimeMs;
   const wasPlaying = state.isPlaying;
   const fullAudioUrl = URL.createObjectURL(audioBlob);
 
@@ -1181,7 +1130,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
 
     let testSeekOk = false;
     try {
-      testSeekOk = seekAudioElementToMapTime(testAudio, swapMapTimeMs, 0);
+      testSeekOk = seekAudioElementToMapTime(testAudio, preflightMapTimeMs, 0, { requireCoverage: false });
     } catch {
       testSeekOk = false;
     }
@@ -1225,7 +1174,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
 
   state.fullAudioObjectUrl = fullAudioUrl;
   const sourceChanged = setAudioElementSource(fullAudioUrl, 0);
-  const realReady = await waitForAudioReady({ requireFreshEvent: sourceChanged });
+  const realReady = await waitForAudioElementReady(state.audio, { requireFreshEvent: sourceChanged });
   if (!realReady || jobId !== state.fullAudioJobId) {
     addDebugLog('audio: hotswap failed, media element not ready after commit');
     rollbackCommittedSwap();
@@ -1234,9 +1183,26 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
 
   syncPlaybackDuration();
 
+  // Re-read the playhead instead of reusing the value captured before the four
+  // awaits above. The visual timeline keeps running while the element loads and
+  // seeks, and the user can scrub during that window, so committing the stale
+  // timestamp silently threw their seek away and dropped the map back to
+  // wherever it was when the swap started.
+  const commitMapTimeMs = state.currentTimeMs;
+  if (Math.abs(commitMapTimeMs - preflightMapTimeMs) > 1) {
+    addDebugLog(`audio: playhead moved during hotswap, committing at ${Math.round(commitMapTimeMs)}ms`);
+  }
+
   let hasSyncedSeek = false;
   try {
-    hasSyncedSeek = seekAudioToMapTime(swapMapTimeMs);
+    // Full audio may be marginally shorter than the mapped duration, so clamp
+    // rather than refuse when the playhead sits in that tail.
+    hasSyncedSeek = seekAudioElementToMapTime(
+      state.audio,
+      commitMapTimeMs,
+      state.audioAnchorMapMs,
+      { requireCoverage: false },
+    );
   } catch {
     hasSyncedSeek = false;
   }
@@ -1247,7 +1213,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     return false;
   }
 
-  const seekSettled = await waitForAudioSeek();
+  const seekSettled = await waitForAudioElementSeek(state.audio);
   if (!seekSettled || jobId !== state.fullAudioJobId) {
     addDebugLog('audio: hotswap failed, seek did not settle after commit');
     rollbackCommittedSwap();
@@ -1280,17 +1246,13 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
       setPlaybackState({ playbackMode: 'audio', isPlaying: true });
       syncVisualClockToMapTime(getAudioMappedTimeMs());
       resyncVisualPlaybackToAudio({ force: true });
-      if (state.rafId === null) {
-        state.rafId = requestAnimationFrame(playbackTick);
-      }
+      ensurePlaybackLoop();
       addDebugLog('audio: hotswap success, playback resumed');
       return true;
     } catch {
-      setPlaybackState({ playbackMode: 'manual', isPlaying: true });
-      syncVisualClockToMapTime(state.currentTimeMs);
-      if (state.rafId === null) {
-        state.rafId = requestAnimationFrame(playbackTick);
-      }
+      state.isPlaying = true;
+      switchToManualTimeline();
+      ensurePlaybackLoop();
       addDebugLog('audio: hotswap fallback to manual timeline');
       return false;
     }
@@ -1500,28 +1462,29 @@ const queryActiveTab = async () => {
 
 const fetchBeatmapFile = async (beatmapId) => {
   const controller = registry.createAbortController();
-  let response;
   try {
-    response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
+    const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
       method: 'GET',
       credentials: 'omit',
       cache: 'no-store',
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      throw new Error(`Beatmap request failed (${response.status}).`);
+    }
+
+    // Reading the body has to stay inside the controller's lifetime, otherwise
+    // closing the popup mid-download leaves the read running unaborted.
+    const text = await response.text();
+    if (!text.includes('[HitObjects]')) {
+      throw new Error('Fetched data is not a valid .osu beatmap file.');
+    }
+
+    return text;
   } finally {
     registry.releaseAbortController(controller);
   }
-
-  if (!response.ok) {
-    throw new Error(`Beatmap request failed (${response.status}).`);
-  }
-
-  const text = await response.text();
-  if (!text.includes('[HitObjects]')) {
-    throw new Error('Fetched data is not a valid .osu beatmap file.');
-  }
-
-  return text;
 };
 
 const readCachedPreview = async () => {
@@ -1553,7 +1516,7 @@ const writeCachedPreview = async (value) => {
 const initializePreviewForCurrentTab = async () => {
   stopTimelineDurationAnimation();
   stopPlayback();
-  speedButton.disabled = true;
+  setPlaybackSpeedControlEnabled(false);
   popup?.classList.add('is-open');
   setUnsupportedMode(false);
   void pruneFullAudioCache();
@@ -1640,9 +1603,12 @@ const initializePreviewForCurrentTab = async () => {
     }
 
     const metadata = parseMetadata(osuContent);
-    const parsedMapData = parseMapPreviewData(osuContent, { maxObjects: 12000 });
+    const parsedMapData = parseMapPreviewData(osuContent, { maxObjects: MAX_PREVIEW_OBJECTS });
+    const breaks = parseBreakPeriods(osuContent);
     const requestedMode = Number.isInteger(info.mode) ? info.mode : parsedMapData.mode;
-    const mapData = convertMapForMode(parsedMapData, requestedMode);
+    // Breaks feed the mania converter's drain-time difficulty, so they have to
+    // be parsed before the conversion rather than alongside the renderer setup.
+    const mapData = convertMapForMode({ ...parsedMapData, breaks }, requestedMode);
     const modeNames = ['osu!', 'taiko', 'catch', 'mania'];
     if (mapData.mode !== parsedMapData.mode) {
       addDebugLog(
@@ -1651,7 +1617,12 @@ const initializePreviewForCurrentTab = async () => {
     } else {
       addDebugLog(`init: using ${modeNames[mapData.mode] || 'unknown'} ruleset`);
     }
-    const breaks = parseBreakPeriods(osuContent);
+    if (parsedMapData.truncated) {
+      addDebugLog(
+        `init: map truncated to ${parsedMapData.renderedObjectCount} of `
+        + `${parsedMapData.hitObjectCount} objects (timeline still spans the full map)`,
+      );
+    }
     const resolvedSetId = info.setId || extractSetIdFromMetadata(metadata.beatmapSetID);
     addDebugLog(`init: resolved set id ${resolvedSetId || 'none'}`);
 
@@ -1677,7 +1648,7 @@ const initializePreviewForCurrentTab = async () => {
     setMetadataText();
 
     void addToHistory({
-      beatmapId: metadata.beatmapId || info.beatmapId || resolvedSetId,
+      beatmapId: info.beatmapId || resolvedSetId,
       beatmapSetId: resolvedSetId,
       title: metadata.title,
       artist: metadata.artist,
@@ -1685,7 +1656,16 @@ const initializePreviewForCurrentTab = async () => {
     });
     renderFrame();
 
-    speedButton.disabled = false;
+    setPlaybackSpeedControlEnabled(true);
+
+    // Start the current source before launching the full-audio upgrade. Both
+    // paths use the same HTMLAudioElement; starting them together lets the
+    // slower promise overwrite the other's seek/play state, which presents as
+    // a map-specific audio delay when the full track is already cached.
+    if (!state.hasAutoStarted) {
+      state.hasAutoStarted = true;
+      await togglePlayback();
+    }
 
     if (resolvedSetId && metadata.audio) {
       void upgradeToFullAudioIfPossible(resolvedSetId, metadata.audio);
@@ -1698,16 +1678,11 @@ const initializePreviewForCurrentTab = async () => {
       );
       addDebugLog('audio: metadata has no AudioFilename or set id');
     }
-
-    if (!state.hasAutoStarted) {
-      state.hasAutoStarted = true;
-      await togglePlayback();
-    }
   } catch (error) {
     setUnsupportedMode(false);
     addDebugLog(`init: failed -> ${error?.message || 'unknown error'}`);
     stopPlayback();
-    speedButton.disabled = true;
+    setPlaybackSpeedControlEnabled(false);
     titleLine.textContent = 'Preview unavailable';
     versionLine.textContent = '';
     versionLine.title = '';
@@ -1716,6 +1691,7 @@ const initializePreviewForCurrentTab = async () => {
     renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
     state.mappedDurationMs = 1;
     setTimelineState({ currentTimeMs: 0, durationMs: 1 });
+    syncTimeLabelWidth();
     renderFrame();
   }
 };
@@ -1723,6 +1699,9 @@ const initializePreviewForCurrentTab = async () => {
 bindPopupUiEvents({
   elements: {
     speedButton,
+    speedControl,
+    speedSlider,
+    speedResetButton,
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
@@ -1751,6 +1730,7 @@ bindPopupUiEvents({
   supportLinks: SUPPORT_LINKS,
   actions: {
     cyclePlaybackSpeed,
+    applyPlaybackSpeed,
     togglePlayback,
     showCanvasToggleFeedback,
     toggleDebugPanelOpen,
@@ -1765,7 +1745,7 @@ bindPopupUiEvents({
     writeAudioVolumeSetting,
     showPopupToast,
     seekRelative,
-    seekToTimeMs,
+    seekTo,
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
@@ -1779,26 +1759,18 @@ bindPopupUiEvents({
   },
 });
 
-window.addEventListener('unload', () => {
+// `pagehide` rather than `unload`: `unload` is deprecated, is not guaranteed to
+// fire, and blocks the back/forward cache. CleanupRegistry listens on the same
+// event, so both teardown paths now agree.
+window.addEventListener('pagehide', () => {
   state.fullAudioJobId += 1;
   setFullAudioLoading(false);
-  if (state.volumePersistTimer) {
-    clearTimeout(state.volumePersistTimer);
-    state.volumePersistTimer = null;
-  }
-  if (state.audioBadgeHideTimer) {
-    clearTimeout(state.audioBadgeHideTimer);
-    state.audioBadgeHideTimer = null;
-  }
-  if (state.toastHideTimer) {
-    clearTimeout(state.toastHideTimer);
-    state.toastHideTimer = null;
-  }
+  state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
+  state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
+  state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
   stopPlayback();
-  if (state.indicatorTimer) {
-    clearTimeout(state.indicatorTimer);
-    state.indicatorTimer = null;
-  }
+  state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
+  stopTimelineDurationAnimation();
   setFullAudioObjectUrl(null);
   stopUnsupportedAsciiAnimation();
   resetState();
@@ -1825,6 +1797,7 @@ addRuntimeMessageListener((message) => {
 
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
+syncTimeLabelWidth();
 applyPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
 renderInfoMenu();

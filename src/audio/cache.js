@@ -1,8 +1,10 @@
 import { storageGet, storageSet, hasStorageArea } from '../webextension.js';
 
 const FULL_AUDIO_CACHE_NAME = 'mosuPreviewFullAudioV1';
-const FULL_AUDIO_CACHE_MAX_BYTES = 35 * 1024 * 1024;
-const FULL_AUDIO_CACHE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
+// Must stay >= MAX_ZIP_AUDIO_ENTRY_BYTES in zip.js, otherwise audio that
+// extracts fine cannot be stored and the caller treats the whole run as failed.
+const FULL_AUDIO_CACHE_MAX_BYTES = 150 * 1024 * 1024;
+const FULL_AUDIO_CACHE_TOTAL_MAX_BYTES = 256 * 1024 * 1024;
 const FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
 const FULL_AUDIO_CACHE_PRUNE_INTERVAL_MS = 1000 * 60 * 30;
 const FULL_AUDIO_CACHE_LAST_PRUNE_KEY = 'fullAudioCacheLastPruneMs';
@@ -107,6 +109,18 @@ const writeFullAudioCacheAliases = async (aliases) => {
     debugFullAudioCache(`cache: failed to write aliases (${error?.message || error})`);
     return false;
   }
+};
+
+// JSON.stringify comparison is key-order sensitive, which caused redundant
+// storage writes whenever the map was rebuilt in a different order.
+const areAliasMapsEqual = (a, b) => {
+  const left = a && typeof a === 'object' ? a : {};
+  const right = b && typeof b === 'object' ? b : {};
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) {
+    return false;
+  }
+  return leftKeys.every((key) => Object.hasOwn(right, key) && left[key] === right[key]);
 };
 
 const removeFullAudioAliasesForCacheKeys = (aliases, cacheKeys) => {
@@ -337,7 +351,7 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
       const aliases = await readFullAudioCacheAliases();
       const aliasesWithoutDeletedKeys = removeFullAudioAliasesForCacheKeys(aliases, deletedRequests);
       const compactAliases = compactFullAudioAliasesForCacheKeys(aliasesWithoutDeletedKeys, liveUrls);
-      if (JSON.stringify(compactAliases) !== JSON.stringify(aliases)) {
+      if (!areAliasMapsEqual(compactAliases, aliases)) {
         await writeFullAudioCacheAliases(compactAliases);
       }
     }
@@ -413,7 +427,12 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob) => {
       }),
     );
     void updateFullAudioCacheAliases(setId, audioFilename);
-    void pruneFullAudioCache();
+
+    // A throttled prune can be up to 30 minutes away, during which the cache
+    // would keep growing past its ceiling. Force one as soon as we know we are
+    // actually over budget.
+    const { bytes } = await getFullAudioCacheUsage();
+    void pruneFullAudioCache({ force: bytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES });
     return true;
   } catch (error) {
     debugFullAudioCache(`cache: write failed (${error?.message || error})`);

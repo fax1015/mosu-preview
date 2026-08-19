@@ -1,6 +1,12 @@
 import { getAudioMimeType, normalizePath, writeCachedFullAudioBlob } from './cache.js';
 import { downloadBeatmapArchive } from './provider.js';
-import { extractZipEntry, parseZipEntries, pickAudioEntryFromZip } from './zip.js';
+import {
+  MAX_ZIP_AUDIO_ENTRY_BYTES,
+  extractZipEntry,
+  findOversizedAudioEntries,
+  parseZipEntries,
+  pickAudioEntryFromZip,
+} from './zip.js';
 
 /**
  * Downloads the beatmap archive and extracts the selected audio entry.
@@ -38,12 +44,25 @@ const extractFullBeatmapAudio = async ({
     const entries = parseZipEntries(archiveBytes);
     const pickedEntry = pickAudioEntryFromZip(entries, normalizedAudio);
     if (!pickedEntry) {
+      // Distinguish "no audio in the archive" from "audio rejected for size",
+      // which is what actually happens on marathon maps.
+      const oversized = findOversizedAudioEntries(entries);
+      if (oversized.length > 0) {
+        const largestBytes = Math.max(...oversized.map((entry) => entry.uncompressedSize));
+        return {
+          ok: false,
+          error: `Audio track is too large to preview (${Math.round(largestBytes / (1024 * 1024))} MB, `
+            + `limit ${Math.round(MAX_ZIP_AUDIO_ENTRY_BYTES / (1024 * 1024))} MB).`,
+        };
+      }
       return { ok: false, error: 'Could not find an audio track in beatmap archive.' };
     }
 
+    // extractZipEntry already returns a buffer of its own (a copy for stored
+    // entries, the inflate output otherwise), so it is safe to hand straight
+    // on. Copying it again here just doubled peak memory on a path that can
+    // already be holding a 120MB archive in the service worker.
     const audioBytes = await extractZipEntry(archiveBytes, pickedEntry);
-    const standalone = new Uint8Array(audioBytes.byteLength);
-    standalone.set(audioBytes);
     return {
       ok: true,
       sourceLabel,
@@ -52,7 +71,7 @@ const extractFullBeatmapAudio = async ({
       normalizedPickedAudioFilename: normalizePath(pickedEntry.name).toLowerCase(),
       normalizedRequestedAudioFilename: normalizePath(normalizedAudio).toLowerCase(),
       mime: getAudioMimeType(pickedEntry.name),
-      audioBytes: standalone,
+      audioBytes,
     };
   } catch (error) {
     return { ok: false, error: error?.message || 'archive download failed' };

@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBreakPeriods, parseColours, parseMapPreviewData } from '../src/parser.js';
+import {
+  MAX_SLIDER_SLIDES,
+  parseBreakPeriods,
+  parseColours,
+  parseMapPreviewData,
+} from '../src/parser.js';
 
 test('parses up to eight osu combo colours and ignores optional alpha', () => {
   const colours = parseColours(`
@@ -104,4 +109,85 @@ Break,3000,4500
     { start: 1000, end: 2000 },
     { start: 3000, end: 4500 },
   ]);
+});
+
+test('legacy timing points without an uninherited column use the beatLength sign', () => {
+  // osu file format v4 and earlier omit the uninherited flag; a negative
+  // beatLength marks an inherited slider-velocity multiplier.
+  const map = parseMapPreviewData(`
+osu file format v4
+
+[Difficulty]
+SliderMultiplier:1.4
+
+[TimingPoints]
+0,500,4,2,0
+1000,-50,4,2,0
+
+[HitObjects]
+100,100,1000,2,0,L|200:200,1,140
+`);
+
+  assert.deepEqual(map.timingControlPoints.map((tp) => tp.uninherited), [true, false]);
+  assert.equal(map.timingControlPoints[1].svMultiplier, 2);
+  // 140 units at SV x2 over a 500ms beat = 250ms, not the 500ms you get when
+  // the inherited point is misread as uninherited.
+  assert.equal(map.objects[0].endTime, 1250);
+});
+
+test('slider repeat count is clamped so a corrupt file cannot exhaust memory', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+SliderMultiplier:1.4
+
+[TimingPoints]
+0,500,4,2,0,60,1,0
+
+[HitObjects]
+100,100,1000,2,0,L|200:200,999999999,140
+`);
+
+  assert.equal(map.objects[0].slides, MAX_SLIDER_SLIDES);
+});
+
+test('a truncated map still reports the full beatmap duration', () => {
+  // Marathon maps exceed the object cap. Deriving the duration from the last
+  // kept object left the rest of the map unreachable by the scrubber.
+  const lines = [];
+  for (let i = 0; i < 500; i += 1) {
+    lines.push(`100,100,${1000 + (i * 1000)},1,0,0:0:0:0:`);
+  }
+
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+SliderMultiplier:1.4
+
+[HitObjects]
+${lines.join('\n')}
+`, { maxObjects: 50 });
+
+  assert.equal(map.objects.length, 50);
+  assert.equal(map.renderedObjectCount, 50);
+  assert.equal(map.hitObjectCount, 500);
+  assert.equal(map.truncated, true);
+  // Last object sits at 1000 + 499*1000 = 500000ms, not at the 50th object.
+  assert.equal(map.maxObjectTime, 500000);
+});
+
+test('an untruncated map is not flagged as truncated', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[HitObjects]
+100,100,1000,1,0,0:0:0:0:
+100,100,2000,1,0,0:0:0:0:
+`);
+
+  assert.equal(map.truncated, false);
+  assert.equal(map.hitObjectCount, 2);
+  assert.equal(map.maxObjectTime, 2000);
 });

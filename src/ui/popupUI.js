@@ -8,6 +8,9 @@ const bindPopupUiEvents = ({
 }) => {
   const {
     speedButton,
+    speedControl,
+    speedSlider,
+    speedResetButton,
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
@@ -33,6 +36,7 @@ const bindPopupUiEvents = ({
 
   const {
     cyclePlaybackSpeed,
+    applyPlaybackSpeed,
     togglePlayback,
     showCanvasToggleFeedback,
     toggleDebugPanelOpen,
@@ -47,7 +51,7 @@ const bindPopupUiEvents = ({
     writeAudioVolumeSetting,
     showPopupToast,
     seekRelative,
-    seekToTimeMs,
+    seekTo,
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
@@ -229,9 +233,6 @@ const bindPopupUiEvents = ({
       case 'r':
         restartPreview();
         break;
-      case 'escape':
-        setCtrlTimelineZoomActive(false);
-        break;
       case '?':
       case '/':
         if (key === '?' || (key === '/' && shiftKey)) {
@@ -274,8 +275,49 @@ const bindPopupUiEvents = ({
     void clearHistory();
   });
 
-  speedButton.addEventListener('click', () => {
-    cyclePlaybackSpeed();
+  // The speed popover opens and closes on click alone: hover-to-open has no
+  // equivalent on touch, where there is no pointer to move away.
+  // Read back from the class rather than a local flag, so the popover cannot
+  // get out of step when loading a map force-closes it.
+  const isSpeedPopoverOpen = () => Boolean(speedControl?.classList.contains('is-speed-open'));
+
+  const setSpeedPopoverOpen = (open) => {
+    const nextOpen = open && Boolean(speedControl) && !speedButton?.disabled;
+    if (nextOpen === isSpeedPopoverOpen()) {
+      return;
+    }
+    speedControl?.classList.toggle('is-speed-open', nextOpen);
+    speedButton?.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+  };
+
+  speedButton?.addEventListener('click', () => {
+    setSpeedPopoverOpen(!isSpeedPopoverOpen());
+  });
+
+  // Covers keyboard dismissal; pointers are handled by the outside pointerdown.
+  speedControl?.addEventListener('focusout', (event) => {
+    if (speedControl.contains(event.relatedTarget)) {
+      return;
+    }
+    setSpeedPopoverOpen(false);
+  });
+
+  speedSlider?.addEventListener('input', () => {
+    applyPlaybackSpeed(Number(speedSlider.value) / 100);
+  });
+
+  speedResetButton?.addEventListener('click', () => {
+    // Focus moves first: resetting disables this button, and focus dropping off
+    // a disabled element would read as focus leaving the control.
+    speedButton?.focus();
+    applyPlaybackSpeed(1);
+  });
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!isSpeedPopoverOpen() || speedControl?.contains(event.target)) {
+      return;
+    }
+    setSpeedPopoverOpen(false);
   });
 
   timeLabel?.addEventListener('click', () => {
@@ -291,7 +333,7 @@ const bindPopupUiEvents = ({
       showPopupToast(`Copied ${timestamp}`);
       if (popupToast) {
         popupToast.classList.add('is-copied');
-        setTimeout(() => popupToast.classList.remove('is-copied'), 3700);
+        registry.addTimeout(setTimeout(() => popupToast.classList.remove('is-copied'), 3700));
       }
     }).catch((err) => {
       addDebugLog(`ui: failed to copy timestamp -> ${err?.message || 'unknown error'}`);
@@ -315,8 +357,7 @@ const bindPopupUiEvents = ({
     if (event.ctrlKey && !isCtrlTimelineZoomActive) {
       setCtrlTimelineZoomActive(true);
     }
-    const startTimeMs = renderer.timeFromTimelineEvent(event);
-    seekToTimeMs(startTimeMs);
+    seekTo(renderer.timeFromTimelineEvent(event));
 
     const onMove = (moveEvent) => {
       lastTimelinePointerEvent = moveEvent;
@@ -324,7 +365,7 @@ const bindPopupUiEvents = ({
         clientX: moveEvent.clientX,
         clientY: moveEvent.clientY,
       };
-      seekToTimeMs(renderer.timeFromTimelineEvent(moveEvent));
+      seekTo(renderer.timeFromTimelineEvent(moveEvent));
     };
 
     const onUp = () => {
@@ -401,9 +442,7 @@ const bindPopupUiEvents = ({
     const next = Number(volumeSlider.value) / 100;
     applyAudioVolume(next);
 
-    if (state.volumePersistTimer) {
-      clearTimeout(state.volumePersistTimer);
-    }
+    state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
     state.volumePersistTimer = registry.addTimeout(setTimeout(async () => {
       state.volumePersistTimer = null;
       await writeAudioVolumeSetting(state.volume);
@@ -413,25 +452,36 @@ const bindPopupUiEvents = ({
   volumeSlider?.addEventListener('change', async () => {
     const next = Number(volumeSlider.value) / 100;
     applyAudioVolume(next);
-    if (state.volumePersistTimer) {
-      clearTimeout(state.volumePersistTimer);
-      state.volumePersistTimer = null;
-    }
+    state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
     await writeAudioVolumeSetting(state.volume);
   });
 
+  // Single owner for Escape, so dismissing the timeline zoom or a dialog never
+  // falls through to closing the whole popup.
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      if (state.shortcutsMenuOpen) {
-        setShortcutsMenuOpen(false);
-        return;
-      }
-      if (state.infoMenuOpen) {
-        setInfoMenuOpen(false);
-        return;
-      }
-      window.close();
+    if (event.key !== 'Escape') {
+      return;
     }
+    if (isCtrlTimelineZoomActive) {
+      setCtrlTimelineZoomActive(false);
+      return;
+    }
+    if (state.shortcutsMenuOpen) {
+      setShortcutsMenuOpen(false);
+      return;
+    }
+    if (state.infoMenuOpen) {
+      setInfoMenuOpen(false);
+      return;
+    }
+    if (isSpeedPopoverOpen()) {
+      if (speedControl?.contains(document.activeElement)) {
+        speedButton?.focus();
+      }
+      setSpeedPopoverOpen(false);
+      return;
+    }
+    window.close();
   });
 };
 

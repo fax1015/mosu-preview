@@ -15,6 +15,30 @@ class CleanupRegistry {
     return id;
   }
 
+  /**
+   * Clears a timer and drops it from the registry. Without these the sets only
+   * ever grow: every toast, badge auto-hide, modal close and restarted
+   * animation registered an id that then stayed for the lifetime of the page.
+   * Returns null so callers can write `state.timer = registry.clearTimeout(state.timer)`.
+   */
+  clearTimeout(id) {
+    if (id === null || id === undefined) {
+      return null;
+    }
+    clearTimeout(id);
+    this.timers.delete(id);
+    return null;
+  }
+
+  clearInterval(id) {
+    if (id === null || id === undefined) {
+      return null;
+    }
+    clearInterval(id);
+    this.intervals.delete(id);
+    return null;
+  }
+
   addAbortController(controller) {
     this.controllers.add(controller);
     return controller;

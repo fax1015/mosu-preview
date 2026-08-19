@@ -3,15 +3,26 @@ import {
   DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM,
   calculateManiaScrollTimeMs,
 } from './settings.js';
+import {
+  buildSliderCurvePoints,
+  getPathLength,
+  pointDistance,
+  trimPathFromStart,
+  trimPathToLength,
+} from './core/sliderPath.js';
+import { getTimingStateAt } from './core/controlPoints.js';
 
 const OSU_WIDTH = 512;
 const OSU_HEIGHT = 384;
-const STACK_OFFSET_OSU = 3;
+// osu!lazer: StackOffset = StackHeight * Scale * -6.4, with Scale = radius/64,
+// so one stack level is worth radius/10 osu! pixels — 4.5px at CS 2 down to
+// 2.3px at CS 7. This constant is only the CS 5 value, used as a fallback when
+// an object has not been through the stacking pass.
+const STACK_OFFSET_OSU_AT_CS5 = 3.2;
+const getStackOffsetUnit = (circleSize) => getCircleRadius(circleSize) / 10;
 const DRAWN_CIRCLE_RADIUS_SCALE = 0.92;
 const CIRCLE_POST_HIT_FADE_MS = 120;
 const LONG_OBJECT_POST_HIT_FADE_MS = 140;
-const FOLLOW_POINT_FADE_LEAD_MS = 120;
-const FOLLOW_POINT_FADE_OUT_MS = 120;
 const SLIDER_HEAD_HIT_FADE_MS = 120;
 const SLIDER_HEAD_HIT_SCALE_BOOST = 0.2;
 const COMBO_NUMBER_FONT_SCALE = 0.84;
@@ -22,7 +33,6 @@ const STANDARD_FADE_IN_BASE_MS = 400;
 const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
 const MANIA_SCROLL_TRAVEL_HEIGHT_SCALE = 1.34;
-const IS_FIREFOX = /firefox/i.test(globalThis.navigator?.userAgent || '');
 const MAX_CANVAS_DPR = 2;
 const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
 const canvasContextCache = new WeakMap();
@@ -30,6 +40,24 @@ const sliderPathCache = new WeakMap();
 const standardSliderTickCache = new WeakMap();
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// Hit objects and catch render objects are kept sorted by `time`, so the start
+// of the visible window can be found with a binary search rather than scanning
+// from index 0 on every frame.
+const findFirstIndexAtOrAfter = (items, timeMs) => {
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const value = items[mid]?.time;
+    if (Number.isFinite(value) && value < timeMs) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+};
 
 const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(cs, 0, 10));
 
@@ -125,284 +153,6 @@ const getComboColour = (colours, object) => {
   return palette[colourIndex] || DEFAULT_COLOURS[0];
 };
 
-const pointsEqual = (a, b, epsilon = 0.001) => (
-  Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon
-);
-
-const pointDistance = (a, b) => Math.hypot((b.x - a.x), (b.y - a.y));
-
-const dedupeAdjacentPoints = (points, epsilon = 0.001) => {
-  if (!Array.isArray(points) || points.length === 0) {
-    return [];
-  }
-  const out = [points[0]];
-  for (let i = 1; i < points.length; i += 1) {
-    if (!pointsEqual(points[i], out[out.length - 1], epsilon)) {
-      out.push(points[i]);
-    }
-  }
-  return out;
-};
-
-const trimPathToLength = (points, targetLength) => {
-  const cleanPoints = dedupeAdjacentPoints(points);
-  if (cleanPoints.length < 2 || !Number.isFinite(targetLength)) {
-    return cleanPoints;
-  }
-  if (targetLength <= 0) {
-    return [cleanPoints[0]];
-  }
-
-  let remaining = targetLength;
-  const trimmed = [cleanPoints[0]];
-  for (let i = 1; i < cleanPoints.length; i += 1) {
-    const start = cleanPoints[i - 1];
-    const end = cleanPoints[i];
-    const segmentLength = pointDistance(start, end);
-    if (segmentLength <= 0) {
-      continue;
-    }
-
-    if (remaining >= segmentLength) {
-      trimmed.push(end);
-      remaining -= segmentLength;
-      continue;
-    }
-
-    const t = clamp(remaining / segmentLength, 0, 1);
-    trimmed.push({
-      x: start.x + ((end.x - start.x) * t),
-      y: start.y + ((end.y - start.y) * t),
-    });
-    return dedupeAdjacentPoints(trimmed);
-  }
-
-  return dedupeAdjacentPoints(trimmed);
-};
-
-const trimPathFromStart = (points, trimLength) => {
-  const cleanPoints = dedupeAdjacentPoints(points);
-  if (cleanPoints.length < 2 || !Number.isFinite(trimLength) || trimLength <= 0) {
-    return cleanPoints;
-  }
-
-  let remaining = trimLength;
-  for (let i = 1; i < cleanPoints.length; i += 1) {
-    const start = cleanPoints[i - 1];
-    const end = cleanPoints[i];
-    const segmentLength = pointDistance(start, end);
-    if (segmentLength <= 0) {
-      continue;
-    }
-
-    if (remaining >= segmentLength) {
-      remaining -= segmentLength;
-      continue;
-    }
-
-    const t = clamp(remaining / segmentLength, 0, 1);
-    return dedupeAdjacentPoints([
-      {
-        x: start.x + ((end.x - start.x) * t),
-        y: start.y + ((end.y - start.y) * t),
-      },
-      ...cleanPoints.slice(i),
-    ]);
-  }
-
-  return [cleanPoints[cleanPoints.length - 1]];
-};
-
-const getPathLength = (points) => {
-  const cleanPoints = dedupeAdjacentPoints(points);
-  if (cleanPoints.length < 2) {
-    return 0;
-  }
-
-  let totalLength = 0;
-  for (let i = 1; i < cleanPoints.length; i += 1) {
-    totalLength += pointDistance(cleanPoints[i - 1], cleanPoints[i]);
-  }
-  return totalLength;
-};
-
-const evaluateBezierPoint = (controlPoints, t) => {
-  const temp = controlPoints.map((point) => ({ x: point.x, y: point.y }));
-  for (let order = temp.length - 1; order > 0; order -= 1) {
-    for (let i = 0; i < order; i += 1) {
-      temp[i].x += (temp[i + 1].x - temp[i].x) * t;
-      temp[i].y += (temp[i + 1].y - temp[i].y) * t;
-    }
-  }
-  return temp[0];
-};
-
-const sampleBezierSegment = (controlPoints) => {
-  if (!Array.isArray(controlPoints) || controlPoints.length < 2) {
-    return [];
-  }
-
-  let estimate = 0;
-  for (let i = 1; i < controlPoints.length; i += 1) {
-    estimate += pointDistance(controlPoints[i - 1], controlPoints[i]);
-  }
-
-  const steps = Math.max(8, Math.min(96, Math.ceil(estimate / 6)));
-  const sampled = [];
-  for (let i = 0; i <= steps; i += 1) {
-    sampled.push(evaluateBezierPoint(controlPoints, i / steps));
-  }
-  return sampled;
-};
-
-const sampleBezierPath = (pathPoints) => {
-  if (!Array.isArray(pathPoints) || pathPoints.length < 2) {
-    return pathPoints || [];
-  }
-
-  const segments = [];
-  let current = [pathPoints[0]];
-
-  for (let i = 1; i < pathPoints.length; i += 1) {
-    const point = pathPoints[i];
-    current.push(point);
-
-    if (i < pathPoints.length - 1 && pointsEqual(point, pathPoints[i + 1])) {
-      if (current.length >= 2) {
-        segments.push(current);
-      }
-      current = [point];
-      i += 1;
-    }
-  }
-
-  if (current.length >= 2) {
-    segments.push(current);
-  }
-
-  if (!segments.length) {
-    return dedupeAdjacentPoints(pathPoints);
-  }
-
-  const sampled = [];
-  for (const segment of segments) {
-    const partial = sampleBezierSegment(segment);
-    if (!partial.length) {
-      continue;
-    }
-    if (sampled.length && pointsEqual(sampled[sampled.length - 1], partial[0])) {
-      sampled.push(...partial.slice(1));
-    } else {
-      sampled.push(...partial);
-    }
-  }
-
-  return dedupeAdjacentPoints(sampled);
-};
-
-const sampleCatmullPath = (pathPoints) => {
-  if (!Array.isArray(pathPoints) || pathPoints.length < 2) {
-    return pathPoints || [];
-  }
-
-  const sampled = [];
-  const catmull = (p0, p1, p2, p3, t) => {
-    const t2 = t * t;
-    const t3 = t2 * t;
-    return {
-      x: 0.5 * ((2 * p1.x) + ((-p0.x + p2.x) * t) + ((2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2) + ((-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)),
-      y: 0.5 * ((2 * p1.y) + ((-p0.y + p2.y) * t) + ((2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2) + ((-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)),
-    };
-  };
-
-  for (let i = 0; i < pathPoints.length - 1; i += 1) {
-    const p0 = i === 0 ? pathPoints[i] : pathPoints[i - 1];
-    const p1 = pathPoints[i];
-    const p2 = pathPoints[i + 1];
-    const p3 = (i + 2 < pathPoints.length) ? pathPoints[i + 2] : pathPoints[i + 1];
-    const steps = Math.max(6, Math.min(48, Math.ceil(pointDistance(p1, p2) / 8)));
-
-    for (let step = 0; step <= steps; step += 1) {
-      const t = step / steps;
-      const point = catmull(p0, p1, p2, p3, t);
-      if (!sampled.length || !pointsEqual(sampled[sampled.length - 1], point)) {
-        sampled.push(point);
-      }
-    }
-  }
-
-  return dedupeAdjacentPoints(sampled);
-};
-
-const samplePerfectCirclePath = (pathPoints) => {
-  if (!Array.isArray(pathPoints) || pathPoints.length < 3) {
-    return null;
-  }
-
-  const p0 = pathPoints[0];
-  const p1 = pathPoints[1];
-  const p2 = pathPoints[2];
-
-  const d = 2 * ((p0.x * (p1.y - p2.y)) + (p1.x * (p2.y - p0.y)) + (p2.x * (p0.y - p1.y)));
-  if (Math.abs(d) < 0.0001) {
-    return null;
-  }
-
-  const ux = (
-    (((p0.x * p0.x) + (p0.y * p0.y)) * (p1.y - p2.y)) +
-    (((p1.x * p1.x) + (p1.y * p1.y)) * (p2.y - p0.y)) +
-    (((p2.x * p2.x) + (p2.y * p2.y)) * (p0.y - p1.y))
-  ) / d;
-
-  const uy = (
-    (((p0.x * p0.x) + (p0.y * p0.y)) * (p2.x - p1.x)) +
-    (((p1.x * p1.x) + (p1.y * p1.y)) * (p0.x - p2.x)) +
-    (((p2.x * p2.x) + (p2.y * p2.y)) * (p1.x - p0.x))
-  ) / d;
-
-  const radius = pointDistance({ x: ux, y: uy }, p0);
-  if (!Number.isFinite(radius) || radius <= 0) {
-    return null;
-  }
-
-  const angle0 = Math.atan2(p0.y - uy, p0.x - ux);
-  const angle1 = Math.atan2(p1.y - uy, p1.x - ux);
-  const angle2 = Math.atan2(p2.y - uy, p2.x - ux);
-
-  const angleDistance = (start, end, direction) => {
-    if (direction > 0) {
-      let delta = end - start;
-      while (delta < 0) delta += Math.PI * 2;
-      return delta;
-    }
-    let delta = start - end;
-    while (delta < 0) delta += Math.PI * 2;
-    return delta;
-  };
-
-  let direction = 1;
-  const ccwStartMid = angleDistance(angle0, angle1, 1);
-  const ccwStartEnd = angleDistance(angle0, angle2, 1);
-  if (ccwStartMid > ccwStartEnd + 0.0001) {
-    direction = -1;
-  }
-
-  const arcAngle = angleDistance(angle0, angle2, direction);
-  const arcLength = arcAngle * radius;
-  const steps = Math.max(10, Math.min(128, Math.ceil(arcLength / 6)));
-
-  const sampled = [];
-  for (let i = 0; i <= steps; i += 1) {
-    const t = i / steps;
-    const angle = angle0 + (direction * arcAngle * t);
-    sampled.push({
-      x: ux + (Math.cos(angle) * radius),
-      y: uy + (Math.sin(angle) * radius),
-    });
-  }
-  return dedupeAdjacentPoints(sampled);
-};
-
 const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   if (!object || object.kind !== 'slider') {
     return [];
@@ -420,36 +170,7 @@ const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   }
 
   const stackOffset = useStackOffset ? getObjectStackOffset(object) : { x: 0, y: 0 };
-  const rawPoints = [
-    { x: object.x + stackOffset.x, y: object.y + stackOffset.y },
-    ...(Array.isArray(object.sliderPoints) ? object.sliderPoints : []).map((point) => ({
-      x: point.x + stackOffset.x,
-      y: point.y + stackOffset.y,
-    })),
-  ];
-
-  const curveType = String(object.sliderCurveType || 'B').toUpperCase();
-  const basePoints = curveType === 'B'
-    ? rawPoints
-    : dedupeAdjacentPoints(rawPoints);
-
-  if (basePoints.length < 2) {
-    if (useStackOffset) sliderPathCache.set(object, { stackIndex, points: basePoints });
-    return basePoints;
-  }
-
-  let sampled;
-  if (curveType === 'L') {
-    sampled = basePoints;
-  } else if (curveType === 'C') {
-    sampled = sampleCatmullPath(basePoints);
-  } else if (curveType === 'P') {
-    sampled = samplePerfectCirclePath(basePoints) || sampleBezierPath(basePoints);
-  } else {
-    sampled = sampleBezierPath(basePoints);
-  }
-  const trimmed = trimPathToLength(sampled, object.length);
-  const points = (trimmed.length >= 2) ? trimmed : sampled;
+  const points = buildSliderCurvePoints(object, stackOffset);
   if (useStackOffset) sliderPathCache.set(object, { stackIndex, points });
   return points;
 };
@@ -523,10 +244,15 @@ const getObjectStackOffset = (object) => {
     return { x: 0, y: 0 };
   }
 
-  // osu!lazer's StackOffset is negative: positive stack heights move the
-  // earlier objects up/left, while the slider-tail correction can move later
-  // circles down/right with a negative stack height.
-  const offset = -stackIndex * STACK_OFFSET_OSU;
+  // applyPreviewStacking() stamps the per-level offset on each object, since the
+  // position helpers have no route to the beatmap's circle size.
+  const unit = Number.isFinite(Number(object.stackOffsetUnit))
+    ? Number(object.stackOffsetUnit)
+    : STACK_OFFSET_OSU_AT_CS5;
+  // The sign is negative: positive stack heights move earlier objects up and
+  // left, while the slider-tail correction pushes later circles the other way
+  // with a negative stack height.
+  const offset = -stackIndex * unit;
   return { x: offset, y: offset };
 };
 
@@ -839,13 +565,15 @@ const applyPreviewStackingModern = (objects, approachRate, stackLeniency) => {
   }
 };
 
-const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersion = 14) => {
+const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersion = 14, circleSize = 5) => {
   if (!Array.isArray(objects) || objects.length === 0) {
     return;
   }
 
+  const stackOffsetUnit = getStackOffsetUnit(circleSize);
   for (const object of objects) {
     object.stackIndex = 0;
+    object.stackOffsetUnit = stackOffsetUnit;
     sliderPathCache.delete(object);
     standardSliderTickCache.delete(object);
   }
@@ -910,6 +638,7 @@ const drawFollowPoints = ({
   preemptMs,
   minVisibleTime,
   maxVisibleTime,
+  maxObjectDurationMs = 0,
   circleRadius,
   scale,
 }) => {
@@ -918,14 +647,21 @@ const drawFollowPoints = ({
   }
 
   const timeFadeInMs = getStandardFadeInMs(preemptMs);
+  // `next` is the object being filtered, so start one pair earlier than the
+  // first candidate index.
+  const startIndex = Math.max(
+    0,
+    findFirstIndexAtOrAfter(objects, minVisibleTime - maxObjectDurationMs) - 1,
+  );
 
-  for (let i = 0; i < objects.length - 1; i += 1) {
+  for (let i = startIndex; i < objects.length - 1; i += 1) {
     const current = objects[i];
     const next = objects[i + 1];
     if (!current || !next) continue;
+    if (next.time > maxVisibleTime) break;
     if ((current.comboIndex ?? 0) !== (next.comboIndex ?? 0)) continue;
     if (current.kind === 'spinner' || next.kind === 'spinner') continue;
-    if (next.time > maxVisibleTime || next.endTime < minVisibleTime) continue;
+    if (next.endTime < minVisibleTime) continue;
 
     const shootDuration = Math.min(250, timeFadeInMs);
     const fadeInStart = next.time - preemptMs;
@@ -1016,6 +752,7 @@ export class PreviewRenderer {
     this.catchHyperDashHitEffects = [];
     this.catchTriggeredHitEffects = new Set();
     this.catchLastEffectTime = Number.NaN;
+    this.maxObjectDurationMs = 0;
     this.maniaScrollSpeed = DEFAULT_MANIA_SCROLL_SPEED;
     this.maniaScaleScrollSpeedWithBpm = DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM;
     this.maniaScrollDirection = 'down';
@@ -1038,6 +775,17 @@ export class PreviewRenderer {
       ? mapData.comboColours
       : DEFAULT_COLOURS;
 
+    // Objects are sorted by start time but may overlap, so the visible-window
+    // search has to look back by the longest object in the map to avoid
+    // skipping a long slider or spinner that started before the window.
+    this.maxObjectDurationMs = 0;
+    for (const object of (mapData?.objects || [])) {
+      const duration = (Number(object?.endTime) || 0) - (Number(object?.time) || 0);
+      if (duration > this.maxObjectDurationMs) {
+        this.maxObjectDurationMs = duration;
+      }
+    }
+
     if (Array.isArray(this.mapData?.objects)) {
       assignComboIndices(this.mapData.objects, this.mapData.mode ?? 0);
       this.catchRenderObjects = null;
@@ -1056,6 +804,7 @@ export class PreviewRenderer {
           this.mapData.approachRate,
           this.mapData.stackLeniency,
           this.mapData.beatmapVersion,
+          this.mapData.circleSize,
         );
       } else {
         this.catcherRenderX = Number.NaN;
@@ -1511,26 +1260,7 @@ export class PreviewRenderer {
   }
 
   getStandardTimingState(time) {
-    const controlPoints = Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
-    let beatLength = 60000 / 120;
-    let svMultiplier = 1;
-
-    for (const point of controlPoints) {
-      if (!point || point.time > time) {
-        break;
-      }
-      if (point.uninherited && point.beatLength > 0) {
-        beatLength = point.beatLength;
-      } else if (!point.uninherited && point.svMultiplier > 0) {
-        svMultiplier = point.svMultiplier;
-      }
-    }
-
-    return {
-      beatLength,
-      svMultiplier,
-      bpm: 60000 / Math.max(1, beatLength),
-    };
+    return getTimingStateAt(this.mapData?.timingControlPoints, time);
   }
 
   buildStandardSliderTicks(object) {
@@ -1892,7 +1622,12 @@ export class PreviewRenderer {
       ctx.stroke();
     }
 
-    for (const object of objects) {
+    for (
+      let i = findFirstIndexAtOrAfter(objects, visibleStart - this.maxObjectDurationMs);
+      i < objects.length;
+      i += 1
+    ) {
+      const object = objects[i];
       if (object.time > visibleEnd) {
         break;
       }
@@ -2092,13 +1827,19 @@ export class PreviewRenderer {
       return startX + (Math.sign(endX - startX) * travelledPx);
     };
     const visibleCatchTargets = [];
-    for (const object of catchObjects) {
-      if (!object || object.type === 'banana') {
+    for (
+      let i = findFirstIndexAtOrAfter(catchObjects, currentTime - postCatchFadeMs);
+      i < catchObjects.length;
+      i += 1
+    ) {
+      const object = catchObjects[i];
+      if (!object) {
         continue;
       }
-
-      const dt = object.time - currentTime;
-      if (dt > lookAheadMs || dt < -postCatchFadeMs) {
+      if ((object.time - currentTime) > lookAheadMs) {
+        break;
+      }
+      if (object.type === 'banana') {
         continue;
       }
 
@@ -2215,16 +1956,22 @@ export class PreviewRenderer {
       }
     }
 
-    for (const object of catchObjects) {
-      if (!object || object.type === 'banana') {
+    for (
+      let i = findFirstIndexAtOrAfter(catchObjects, currentTime - postCatchFadeMs);
+      i < catchObjects.length;
+      i += 1
+    ) {
+      const object = catchObjects[i];
+      if (!object) {
+        continue;
+      }
+      if (object.time > currentTime) {
+        break;
+      }
+      if (object.type === 'banana') {
         continue;
       }
       if (!(object.hyperDash || object.hyperDashFollowUp) || this.catchTriggeredHitEffects.has(object.renderId)) {
-        continue;
-      }
-
-      const hitElapsed = currentTime - object.time;
-      if (hitElapsed < 0 || hitElapsed > postCatchFadeMs) {
         continue;
       }
 
@@ -2260,12 +2007,14 @@ export class PreviewRenderer {
     const tinyDropletColor = { r: 238, g: 252, b: 255 };
     const bananaColor = { r: 255, g: 222, b: 84 };
 
-    for (const object of catchObjects) {
+    for (
+      let i = findFirstIndexAtOrAfter(catchObjects, visibleStart);
+      i < catchObjects.length;
+      i += 1
+    ) {
+      const object = catchObjects[i];
       if (object.time > visibleEnd) {
         break;
-      }
-      if (object.time < visibleStart) {
-        continue;
       }
 
       const dt = object.time - currentTime;
@@ -2403,7 +2152,12 @@ export class PreviewRenderer {
     const receptorVanishCenterY = receptorY + ((scrollsUp ? -1 : 1) * receptorHalf * 0.5);
     const receptorVanishFadePx = Math.max(1, receptorHalf);
 
-    for (const object of objects) {
+    for (
+      let i = findFirstIndexAtOrAfter(objects, visibleStart - this.maxObjectDurationMs);
+      i < objects.length;
+      i += 1
+    ) {
+      const object = objects[i];
       if (object.time > visibleEnd) {
         break;
       }
@@ -2644,12 +2398,18 @@ export class PreviewRenderer {
       preemptMs,
       minVisibleTime,
       maxVisibleTime,
+      maxObjectDurationMs: this.maxObjectDurationMs,
       circleRadius: drawnCircleRadius,
       scale,
     });
 
     const visibleObjects = [];
-    for (const object of this.mapData.objects) {
+    for (
+      let i = findFirstIndexAtOrAfter(this.mapData.objects, minVisibleTime - this.maxObjectDurationMs);
+      i < this.mapData.objects.length;
+      i += 1
+    ) {
+      const object = this.mapData.objects[i];
       if (object.time > maxVisibleTime) break;
       if (object.endTime < minVisibleTime) continue;
       visibleObjects.push(object);

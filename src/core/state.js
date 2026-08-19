@@ -1,11 +1,11 @@
 import {
   DEFAULT_AUDIO_VOLUME,
-  DEFAULT_DISABLED_PROVIDERS,
-  DEFAULT_AUTO_FALLBACK,
   normalizePreviewSettings,
 } from '../settings.js';
 
-const createInitialState = () => {
+// `audio` is injectable so resetState() can carry the live media element across
+// a reset instead of constructing (and immediately discarding) a new one.
+const createInitialState = ({ audio = null } = {}) => {
   const normalizedSettings = normalizePreviewSettings();
 
   return {
@@ -22,9 +22,8 @@ const createInitialState = () => {
     rafId: null,
     timelineAnimationRafId: null,
     indicatorTimer: null,
-    audio: new Audio(),
+    audio: audio ?? new Audio(),
     audioSyncEnabled: false,
-    audioReady: false,
     audioAnchorMapMs: 0,
     previewSetId: null,
     fullAudioSetId: null,
@@ -58,8 +57,9 @@ const createInitialState = () => {
     standardSliderSnakeOut: normalizedSettings.standardSliderSnakeOut,
     standardSliderEndCircles: normalizedSettings.standardSliderEndCircles,
     providerPriority: normalizedSettings.providerPriority,
-    disabledProviders: DEFAULT_DISABLED_PROVIDERS,
-    autoFallback: DEFAULT_AUTO_FALLBACK,
+    disabledProviders: normalizedSettings.disabledProviders,
+    autoFallback: normalizedSettings.autoFallback,
+    preMuteVolume: DEFAULT_AUDIO_VOLUME,
   };
 };
 
@@ -112,9 +112,9 @@ const setFullAudioState = (patch = {}) => {
 };
 
 const resetState = () => {
-  const currentAudio = state.audio;
-  const nextState = createInitialState();
-  Object.assign(state, nextState, { audio: currentAudio });
+  // Callers are responsible for cancelling in-flight work first: this only
+  // clears the handles, so cancel rAF/timers before calling it.
+  Object.assign(state, createInitialState({ audio: state.audio }));
   state.audio.preload = 'auto';
 };
 

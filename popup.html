@@ -90,7 +90,25 @@
       </div>
     </div>
     <div class="map-preview-controls">
-      <button type="button" class="secondary-button map-preview-speed-btn" id="mapPreviewSpeedBtn" disabled>1x</button>
+      <div class="map-preview-speed-control" id="mapPreviewSpeedControl">
+        <button type="button" class="secondary-button map-preview-speed-btn" id="mapPreviewSpeedBtn"
+          aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewSpeedPopover" disabled>1x</button>
+        <div class="map-preview-speed-popover" id="mapPreviewSpeedPopover">
+          <div class="map-preview-speed-panel">
+            <span class="map-preview-speed-bound">0.1x</span>
+            <input type="range" min="10" max="200" step="5" value="100" class="map-preview-speed-slider"
+              id="mapPreviewSpeedSlider" aria-label="Playback speed" aria-valuetext="1x" />
+            <span class="map-preview-speed-bound">2x</span>
+            <button type="button" class="map-preview-speed-reset" id="mapPreviewSpeedResetBtn"
+              title="Reset speed to 1x" aria-label="Reset speed to 1x" disabled>
+              <svg viewBox="0 0 512 512" aria-hidden="true">
+                <path
+                  d="M125.7 160H176c17.7 0 32 14.3 32 32s-14.3 32-32 32H48c-17.7 0-32-14.3-32-32V64c0-17.7 14.3-32 32-32s32 14.3 32 32v51.2L97.6 97.6c87.5-87.5 229.3-87.5 316.8 0s87.5 229.3 0 316.8s-229.3 87.5-316.8 0c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0c62.5 62.5 163.8 62.5 226.3 0s62.5-163.8 0-226.3s-163.8-62.5-226.3 0L125.7 160z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
       <canvas id="mapPreviewTimeline" class="list-timeline map-preview-timeline" aria-label="Preview timeline"></canvas>
       <span class="map-preview-time-label" id="mapPreviewTimeLabel">0:00 / 0:00</span>
       <label class="map-preview-volume-control" for="mapPreviewVolume" title="Volume">

@@ -62,6 +62,12 @@ export const parseMetadata = (content) => {
   };
 };
 
+// osu! itself has no hard cap on slider repeats, but real beatmaps never go
+// far past single digits. An unbounded value here is turned into an array of
+// that length by the ruleset converters, so a corrupt file could exhaust the
+// heap. Clamping at parse time keeps every downstream consumer safe.
+export const MAX_SLIDER_SLIDES = 1000;
+
 export const parseMapPreviewData = (content, options = {}) => {
   const maxObjects = Number.isFinite(options?.maxObjects) && options.maxObjects > 0
     ? Math.floor(options.maxObjects)
@@ -84,8 +90,16 @@ export const parseMapPreviewData = (content, options = {}) => {
 
   const lines = content.split(/\r?\n/);
 
+  // osu!lazer's ControlPointInfo.TimingPointAt falls back to the *first* timing
+  // point for times before it, not to a fixed tempo. Sliders ahead of the first
+  // uninherited point were being given 120 BPM durations.
+  const getFirstBeatLength = () => {
+    const first = timingPoints.find((tp) => tp.uninherited && tp.beatLength > 0);
+    return first ? first.beatLength : (60000 / 120);
+  };
+
   const getTiming = (time) => {
-    let activeBeatLength = 60000 / 120;
+    let activeBeatLength = getFirstBeatLength();
     let activeSv = 1.0;
 
     for (const tp of timingPoints) {
@@ -180,11 +194,19 @@ export const parseMapPreviewData = (content, options = {}) => {
         continue;
       }
 
+      // `osu file format` v4 and earlier omit the uninherited column entirely;
+      // there the sign of beatLength is the discriminator (negative values are
+      // inherited slider-velocity multipliers). Treating those as uninherited
+      // silently drops every SV change on legacy beatmaps.
+      const uninherited = parts.length > 6
+        ? parts[6] === '1'
+        : beatLength > 0;
+
       timingPoints.push({
         time,
         beatLength,
         meter: Number.parseInt(parts[2], 10) || 4,
-        uninherited: parts.length > 6 ? parts[6] === '1' : true,
+        uninherited,
         effects: Number.parseInt(parts[7], 10) || 0,
       });
       continue;
@@ -252,7 +274,7 @@ export const parseMapPreviewData = (content, options = {}) => {
         const pathString = parts[5] || '';
         const firstToken = pathString.split('|')[0] || '';
         sliderCurveType = firstToken.trim().charAt(0).toUpperCase() || 'B';
-        slides = parseInt(parts[6], 10) || 1;
+        slides = Math.min(MAX_SLIDER_SLIDES, Math.max(1, parseInt(parts[6], 10) || 1));
         length = parseFloat(parts[7]) || 0;
         sliderEdgeSounds = (parts[8] || '')
           .split('|')
@@ -324,6 +346,20 @@ export const parseMapPreviewData = (content, options = {}) => {
     }
   }
 
+  // When the object cap truncates a map, the timeline must still span the real
+  // beatmap: deriving the duration from the last *kept* object left the second
+  // half of a marathon unreachable by the scrubber. Reading just the timestamp
+  // of the dropped lines is cheap and keeps the duration honest.
+  const isTruncated = objects.length < hitObjectLines.length;
+  if (isTruncated) {
+    for (let index = objects.length; index < hitObjectLines.length; index += 1) {
+      const time = Number.parseInt(hitObjectLines[index].split(',')[2], 10);
+      if (Number.isFinite(time) && time > maxObjectTime) {
+        maxObjectTime = time;
+      }
+    }
+  }
+
   let bpmMin = 0;
   let bpmMax = 0;
   let primaryBpm = 0;
@@ -385,6 +421,9 @@ export const parseMapPreviewData = (content, options = {}) => {
     })),
     comboColours: parseColours(content),
     maxObjectTime,
+    hitObjectCount: hitObjectLines.length,
+    renderedObjectCount: objects.length,
+    truncated: isTruncated,
   };
 };
 
@@ -400,7 +439,7 @@ export const parseBreakPeriods = (content) => {
     }
 
     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-      inEvents = trimmed === '[Events]';
+      inEvents = trimmed.toLowerCase() === '[events]';
       continue;
     }
 
@@ -464,6 +503,9 @@ export const parseColours = (content) => {
 
     if (!inColours) continue;
 
+    // Case-sensitive on purpose: osu!lazer's LegacyBeatmapDecoder matches the
+    // "Combo" prefix with StringComparison.Ordinal, so `combo3:` is not a
+    // combo colour. Covered by tests/parser.test.js.
     const match = trimmed.match(/^Combo(\d+)\s*:\s*(.*)$/);
     if (!match) continue;
 

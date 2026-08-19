@@ -4,17 +4,19 @@ import {
   computeProviderScore,
 } from '../settings.js';
 import {
+  MAX_ARCHIVE_DOWNLOAD_BYTES,
   readResponseArrayBufferLimited,
   readResponseArrayBufferLimitedWithInitialZipProbe,
   responseLooksLikeBeatmapArchiveDownload,
 } from './zip.js';
 import { hasStorageArea, storageGet, storageSet } from '../webextension.js';
 
-const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 18000;
 /** Service-worker fetches plus slow mirrors often exceed 8s; match single-provider ceiling (see de6c36f "better download"). */
 const FETCH_TIMEOUT_FAILOVER_MS = 20000;
-const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
+// A marathon .osz runs 60-100MB; 60s of body budget could not finish one on a
+// typical connection, which showed up as a plain "timeout" on long maps.
+const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 180;
 const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
 const PROVIDER_STATS_STORAGE_KEY = 'providerStatsV1';
 
@@ -38,6 +40,12 @@ const providerCooldowns = {};
 let providerRuntimeStateLoaded = false;
 let providerRuntimeStateLoadPromise = null;
 let providerRuntimeStateSaveTimer = null;
+// Snapshot of the counters as they were when this realm last synced with
+// storage. The popup and the service worker each hold their own copy of this
+// module, so persisting requires writing back only our own delta rather than
+// overwriting whatever the other realm recorded meanwhile.
+let providerStatsBaseline = {};
+const locallyTouchedProviderIds = new Set();
 
 const getProviderById = (providerId) => ARCHIVE_DOWNLOAD_SOURCES.find((source) => source.id === providerId) || null;
 
@@ -96,6 +104,53 @@ const hydrateProviderRuntimeState = (snapshot = {}) => {
       providerCooldowns[id] = numeric;
     }
   });
+
+  providerStatsBaseline = cloneProviderStatsMap(providerStats);
+  locallyTouchedProviderIds.clear();
+};
+
+const cloneProviderStatsMap = (source) => Object.fromEntries(
+  Object.entries(source || {}).map(([id, record]) => [id, sanitizeProviderStatsRecord(record)]),
+);
+
+const mergeProviderRuntimeState = (storedSnapshot, nowMs = Date.now()) => {
+  const stored = storedSnapshot && typeof storedSnapshot === 'object' ? storedSnapshot : {};
+  const storedStats = stored.stats && typeof stored.stats === 'object' ? stored.stats : {};
+  const storedCooldowns = stored.cooldowns && typeof stored.cooldowns === 'object' ? stored.cooldowns : {};
+
+  const stats = {};
+  const cooldowns = {};
+
+  for (const source of ARCHIVE_DOWNLOAD_SOURCES) {
+    const id = source.id;
+    const base = sanitizeProviderStatsRecord(storedStats[id]);
+    const local = sanitizeProviderStatsRecord(providerStats[id]);
+    const baseline = sanitizeProviderStatsRecord(providerStatsBaseline[id]);
+
+    const merged = {
+      successes: Math.max(0, base.successes + (local.successes - baseline.successes)),
+      failures: Math.max(0, base.failures + (local.failures - baseline.failures)),
+      timedSuccesses: Math.max(0, base.timedSuccesses + (local.timedSuccesses - baseline.timedSuccesses)),
+      totalSuccessMs: Math.max(0, base.totalSuccessMs + (local.totalSuccessMs - baseline.totalSuccessMs)),
+    };
+
+    if (merged.successes > 0 || merged.failures > 0 || merged.timedSuccesses > 0 || merged.totalSuccessMs > 0) {
+      stats[id] = merged;
+    }
+
+    // For providers this realm actually attempted, our view is authoritative —
+    // a success clears the cooldown and must not be resurrected from storage.
+    const cooldownUntil = Number(
+      locallyTouchedProviderIds.has(id)
+        ? providerCooldowns[id]
+        : (providerCooldowns[id] ?? storedCooldowns[id]),
+    );
+    if (Number.isFinite(cooldownUntil) && cooldownUntil > nowMs) {
+      cooldowns[id] = cooldownUntil;
+    }
+  }
+
+  return { version: 1, savedAt: nowMs, stats, cooldowns };
 };
 
 const serializeProviderRuntimeState = () => ({
@@ -140,9 +195,21 @@ const persistProviderRuntimeState = async () => {
     return false;
   }
   try {
+    let stored = null;
+    try {
+      const items = await storageGet('local', [PROVIDER_STATS_STORAGE_KEY]);
+      stored = items?.[PROVIDER_STATS_STORAGE_KEY] ?? null;
+    } catch {
+      stored = null;
+    }
+
     await storageSet('local', {
-      [PROVIDER_STATS_STORAGE_KEY]: serializeProviderRuntimeState(),
+      [PROVIDER_STATS_STORAGE_KEY]: mergeProviderRuntimeState(stored),
     });
+
+    // Re-baseline so the next persist only contributes new deltas.
+    providerStatsBaseline = cloneProviderStatsMap(providerStats);
+    locallyTouchedProviderIds.clear();
     return true;
   } catch {
     return false;
@@ -162,6 +229,19 @@ const scheduleProviderRuntimeStatePersist = () => {
   }, 500);
 };
 
+/**
+ * Cancels the pending debounce and writes immediately. The MV3 service worker
+ * can be torn down as soon as a download settles, which would otherwise drop
+ * the queued 500ms write along with the run's stats.
+ */
+const flushProviderRuntimeState = async () => {
+  if (providerRuntimeStateSaveTimer !== null) {
+    clearTimeout(providerRuntimeStateSaveTimer);
+    providerRuntimeStateSaveTimer = null;
+  }
+  return persistProviderRuntimeState();
+};
+
 const getProviderCooldownRemainingMs = (providerId) => {
   const cooldownUntil = Number(providerCooldowns[providerId] || 0);
   return Math.max(0, cooldownUntil - Date.now());
@@ -177,6 +257,7 @@ const markProviderSuccess = (providerId, durationMs = NaN) => {
     stats.totalSuccessMs += durationMs;
   }
   delete providerCooldowns[providerId];
+  locallyTouchedProviderIds.add(providerId);
   scheduleProviderRuntimeStatePersist();
 };
 
@@ -184,6 +265,7 @@ const markProviderFailure = (providerId) => {
   const stats = ensureProviderStats(providerId);
   stats.failures += 1;
   providerCooldowns[providerId] = Date.now() + PROVIDER_FAILURE_COOLDOWN_MS;
+  locallyTouchedProviderIds.add(providerId);
   scheduleProviderRuntimeStatePersist();
 };
 
@@ -352,7 +434,11 @@ const fetchArrayBufferWithTimeout = async (
   externalSignal,
 ) => {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The timeout covers the response headers only. Applying it to the body too
+  // meant a large archive on a slow connection could never finish: at 18s a
+  // 40MB .osz needs roughly twice that just to transfer. The body gets its own
+  // (much longer) budget below, matching the multi-provider adaptive path.
+  let timer = setTimeout(() => controller.abort(), timeoutMs);
   const mergedSignal = combineSignals(externalSignal, controller);
 
   try {
@@ -360,10 +446,20 @@ const fetchArrayBufferWithTimeout = async (
       ...options,
       signal: mergedSignal,
     }));
-    const buffer = await readResponseArrayBufferLimited(response, maxBytes, undefined, onBodyProgress);
+    clearTimeout(timer);
+    timer = null;
+
+    const buffer = await readResponseArrayBufferLimited(
+      response,
+      maxBytes,
+      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+      onBodyProgress,
+    );
     return { response, buffer };
   } finally {
-    clearTimeout(timer);
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
   }
 };
 
@@ -485,6 +581,22 @@ const downloadBeatmapArchive = async (
     throw new Error('no providers available');
   }
 
+  try {
+    return await attemptProviderSequence(sources, setId, fetchTimeoutMs, failures, {
+      onTryingSource,
+      onDownloadProgress,
+      signal,
+    });
+  } finally {
+    // Persist before the caller (or a service-worker teardown) can drop the
+    // debounced write.
+    await flushProviderRuntimeState();
+  }
+};
+
+const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures, hooks) => {
+  const { onTryingSource, onDownloadProgress, signal } = hooks;
+
   for (const source of sources) {
     if (signal?.aborted) {
       throw new Error('download cancelled');
@@ -589,6 +701,8 @@ export {
   getProviderSequenceForDownload,
   loadProviderRuntimeState,
   persistProviderRuntimeState,
+  flushProviderRuntimeState,
+  mergeProviderRuntimeState,
   downloadBeatmapArchive,
   fetchArrayBufferWithTimeout,
   fetchBeatmapArchiveAdaptive,

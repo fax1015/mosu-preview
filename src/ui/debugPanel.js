@@ -19,6 +19,12 @@ const createDebugPanelController = ({
       debugPanel.hidden = !state.debugPanelOpen;
     }
 
+    // Nothing below is observable while the panel is closed, and addLog() calls
+    // render() on every entry — including once per download-progress tick.
+    if (!state.debugPanelOpen) {
+      return;
+    }
+
     if (debugStatus) {
       const status = state.fullAudioStatus || 'idle';
       const setLabel = state.activeSetId ? `set ${state.activeSetId}` : 'no set';

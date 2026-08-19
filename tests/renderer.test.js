@@ -193,3 +193,28 @@ SliderMultiplier:1.4
     else globalThis.window = previousWindow;
   }
 });
+
+test('stack offset scales with circle size, matching lazer StackOffset', () => {
+  // osu!lazer: StackOffset = StackHeight * Scale * -6.4 with Scale = radius/64,
+  // i.e. radius/10 per level. A fixed 3px made stacks too tight on low CS and
+  // too loose on high CS.
+  const makeChain = () => [
+    { kind: 'circle', x: 100, y: 100, time: 1000, endTime: 1000 },
+    { kind: 'circle', x: 100, y: 100, time: 1100, endTime: 1100 },
+  ];
+
+  const lowCs = makeChain();
+  applyPreviewStacking(lowCs, 5, 0.7, 14, 2);
+  assert.equal(Math.round(lowCs[0].stackOffsetUnit * 100) / 100, 4.54);
+
+  const midCs = makeChain();
+  applyPreviewStacking(midCs, 5, 0.7, 14, 5);
+  assert.equal(Math.round(midCs[0].stackOffsetUnit * 100) / 100, 3.2);
+
+  const highCs = makeChain();
+  applyPreviewStacking(highCs, 5, 0.7, 14, 7);
+  assert.equal(Math.round(highCs[0].stackOffsetUnit * 100) / 100, 2.3);
+
+  // Stack heights themselves must not change with circle size.
+  assert.deepEqual(lowCs.map((object) => object.stackIndex), highCs.map((object) => object.stackIndex));
+});

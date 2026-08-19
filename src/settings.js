@@ -221,6 +221,18 @@ export const normalizePopupSize = (value) => {
   return Object.hasOwn(POPUP_SIZE_PRESETS, candidate) ? candidate : DEFAULT_POPUP_SIZE;
 };
 
+export const normalizeDisabledProviders = (value) => {
+  if (!Array.isArray(value)) {
+    return [...DEFAULT_DISABLED_PROVIDERS];
+  }
+  const validIds = new Set(ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id));
+  return [...new Set(value.filter((id) => validIds.has(id)))];
+};
+
+export const normalizeAutoFallback = (value) => (
+  value === undefined || value === null ? DEFAULT_AUTO_FALLBACK : Boolean(value)
+);
+
 export const normalizeProviderPriority = (value) => {
   if (!Array.isArray(value)) {
     return ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
@@ -255,10 +267,12 @@ export const normalizePreviewSettings = (items = {}) => ({
   ),
   popupSize: normalizePopupSize(items?.[POPUP_SIZE_KEY] ?? items?.popupSize),
   providerPriority: normalizeProviderPriority(items?.[PROVIDER_PRIORITY_KEY] ?? items?.providerPriority),
-  disabledProviders: Array.isArray(items?.[DISABLED_PROVIDERS_KEY])
-    ? items[DISABLED_PROVIDERS_KEY]
-    : (Array.isArray(items?.disabledProviders) ? items.disabledProviders : DEFAULT_DISABLED_PROVIDERS),
-  autoFallback: items?.[AUTO_FALLBACK_KEY] ?? items?.autoFallback ?? DEFAULT_AUTO_FALLBACK,
+  // Always a fresh array: returning the shared DEFAULT_DISABLED_PROVIDERS
+  // reference would let a caller's mutation corrupt the module-level default.
+  disabledProviders: normalizeDisabledProviders(
+    items?.[DISABLED_PROVIDERS_KEY] ?? items?.disabledProviders,
+  ),
+  autoFallback: normalizeAutoFallback(items?.[AUTO_FALLBACK_KEY] ?? items?.autoFallback),
 });
 
 export const toPreviewSettingsStorage = (settings = {}) => {

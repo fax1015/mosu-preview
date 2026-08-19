@@ -38,7 +38,7 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     return { valid: false, reason: 'Active tab URL is not valid.' };
   }
 
-  if (!/^osu\.ppy\.sh$/i.test(url.hostname)) {
+  if (url.protocol !== 'https:' || !/^osu\.ppy\.sh$/i.test(url.hostname)) {
     return {
       valid: false,
       reason: 'unsupported website :(',

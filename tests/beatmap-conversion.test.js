@@ -133,3 +133,63 @@ test('does not convert an already-native non-standard map', () => {
   assert.equal(result.mode, 3);
   assert.equal(result.conversion, undefined);
 });
+
+test('mania conversion honours the clap hitsound two-note rule', () => {
+  // Hitsounds are stored as the raw .osu bitmask (clap = 8). The converter used
+  // to look for a string sample list the parser never produces, so this rule
+  // could never fire.
+  const withClap = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+OverallDifficulty:2
+ApproachRate:2
+HPDrainRate:2
+
+[TimingPoints]
+0,500,4,2,0,60,1,0
+
+[HitObjects]
+64,192,1000,1,8,0:0:0:0:
+`);
+
+  const withoutClap = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+OverallDifficulty:2
+ApproachRate:2
+HPDrainRate:2
+
+[TimingPoints]
+0,500,4,2,0,60,1,0
+
+[HitObjects]
+64,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.equal(convertMapForMode(withClap, 3).objects.length, 2);
+  assert.equal(convertMapForMode(withoutClap, 3).objects.length, 1);
+});
+
+test('an absurd slider repeat count does not blow up catch conversion', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+SliderMultiplier:1.4
+SliderTickRate:1
+
+[TimingPoints]
+0,500,4,2,0,60,1,0
+
+[HitObjects]
+100,100,1000,2,0,L|200:200,999999999,140
+`);
+
+  const converted = convertMapForMode(map, 2);
+  assert.ok(converted.catchObjects.length > 0);
+  assert.ok(converted.catchObjects.length <= 60000);
+});

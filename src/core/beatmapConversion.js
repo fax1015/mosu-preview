@@ -1,8 +1,15 @@
+import { MAX_SLIDER_SLIDES } from '../parser.js';
+import { getTimingStateAt } from './controlPoints.js';
+import { buildSliderCurvePoints, getPathLength, positionOnPathAtProgress } from './sliderPath.js';
+
 const MODE_NAMES = ['osu', 'taiko', 'catch', 'mania'];
 const OSU_WIDTH = 512;
-const DEFAULT_BEAT_LENGTH = 500;
 const TAIKO_VELOCITY_MULTIPLIER = 1.4;
 const SWELL_HIT_MULTIPLIER = 1.65;
+// A dense slider-heavy map can generate a droplet every ~45ms across every
+// slider span. Without a ceiling the converted object list (and the per-frame
+// render scan over it) grows without bound.
+const MAX_CATCH_OBJECTS = 60000;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const numberOr = (value, fallback) => {
@@ -63,30 +70,12 @@ const cloneMapData = (mapData) => ({
     : undefined,
 });
 
-const getTimingState = (mapData, time) => {
-  let beatLength = DEFAULT_BEAT_LENGTH;
-  let svMultiplier = 1;
-  let kiai = false;
-
-  for (const point of mapData?.timingControlPoints || []) {
-    if (!point || point.time > time) {
-      break;
-    }
-
-    kiai = Boolean(point.kiai);
-    if (point.uninherited && point.beatLength > 0) {
-      beatLength = point.beatLength;
-      svMultiplier = 1;
-    } else if (!point.uninherited && point.svMultiplier > 0) {
-      svMultiplier = point.svMultiplier;
-    }
-  }
-
-  return { beatLength, svMultiplier, kiai };
-};
+const getTimingState = (mapData, time) => getTimingStateAt(mapData?.timingControlPoints, time);
 
 const getSliderSpanTimes = (object) => {
-  const slides = Math.max(1, Number.parseInt(object?.slides, 10) || 1);
+  // Clamped defensively: this allocates an array of `slides + 1` entries, so an
+  // unvalidated repeat count from a corrupt .osu file would exhaust the heap.
+  const slides = clamp(Number.parseInt(object?.slides, 10) || 1, 1, MAX_SLIDER_SLIDES);
   const duration = Math.max(0, (object?.endTime || object?.time || 0) - (object?.time || 0));
   const spanDuration = duration / slides;
   return Array.from({ length: slides + 1 }, (_, index) => (
@@ -105,14 +94,10 @@ const getSliderDistance = (object) => {
     return object.length;
   }
 
-  const points = Array.isArray(object?.sliderPoints) ? object.sliderPoints : [];
-  let distance = 0;
-  let previous = { x: object?.x || 0, y: object?.y || 0 };
-  for (const point of points) {
-    distance += Math.hypot((point.x || 0) - previous.x, (point.y || 0) - previous.y);
-    previous = point;
-  }
-  return distance;
+  // No usable declared distance, so fall back to the curve's own length. The
+  // declared length is dropped rather than passed through, otherwise a slider
+  // recorded as length 0 would be fitted down to a single point and measure 0.
+  return getPathLength(buildSliderCurvePoints({ ...object, length: undefined }));
 };
 
 const createConvertedObject = (source, overrides = {}) => ({
@@ -199,26 +184,76 @@ const getColumnFromX = (x, keys) => clamp(
 
 const getColumnX = (column, keys) => ((column + 0.5) / keys) * OSU_WIDTH;
 
-const getSourceSampleNames = (source) => {
-  const names = [];
-  if (source?.sampleSet) names.push(String(source.sampleSet).toLowerCase());
-  if (source?.additionSet) names.push(String(source.additionSet).toLowerCase());
-  for (const sample of source?.samples || []) {
-    if (typeof sample === 'string') names.push(sample.toLowerCase());
-    else if (sample?.name) names.push(String(sample.name).toLowerCase());
+// Hitsound bitmask from the .osu [HitObjects] format.
+const HIT_SOUND_FLAGS = Object.freeze({
+  normal: 1,
+  whistle: 2,
+  finish: 4,
+  clap: 8,
+});
+
+// The parser represents hitsounds as this raw bitmask plus an optional custom
+// sample filename. It never produces the string sample list that osu!lazer's
+// converters read, so matching on `sampleSet`/`samples` (as this used to) could
+// never succeed — every hasSample() call silently returned false.
+const hasSample = (source, name) => {
+  const flag = HIT_SOUND_FLAGS[name];
+  if (flag && (Number(source?.hitSound) & flag) !== 0) {
+    return true;
   }
-  return names;
+
+  const filename = String(source?.sampleFilename || '').toLowerCase();
+  return filename.length > 0 && filename.includes(name);
 };
 
-const hasSample = (source, name) => getSourceSampleNames(source).some((value) => value.includes(name));
+// osu!lazer's IBeatmapDifficultyInfo.DifficultyRange: piecewise-linear through
+// (0, min), (5, mid), (10, max). Interpolating straight from min to max instead
+// only agrees with it at the endpoints.
+const difficultyRange = (difficulty, min, mid, max) => {
+  const value = numberOr(difficulty, 5);
+  if (value > 5) {
+    return mid + (((max - mid) * (value - 5)) / 5);
+  }
+  if (value < 5) {
+    return mid - (((mid - min) * (5 - value)) / 5);
+  }
+  return mid;
+};
 
-const getConversionDifficulty = (mapData) => clamp(
-  numberOr(mapData?.overallDifficulty, 5)
-    + numberOr(mapData?.circleSize, 5) * 0.1
-    + numberOr(mapData?.hpDrainRate ?? mapData?.drainRate, 5) * 0.08,
-  0,
-  10,
-);
+const getTotalBreakTime = (mapData) => {
+  const breaks = Array.isArray(mapData?.breaks) ? mapData.breaks : [];
+  return breaks.reduce((total, period) => (
+    total + Math.max(0, numberOr(period?.end, 0) - numberOr(period?.start, 0))
+  ), 0);
+};
+
+/**
+ * osu!lazer's PatternGenerator.ConversionDifficulty, which drives how many notes
+ * a converted mania object becomes. This used to be `OD + CS*0.1 + HP*0.08` — a
+ * formula with no counterpart in lazer, and one that ignored note density
+ * entirely, so converted charts came out at the wrong density regardless of how
+ * long or busy the map was.
+ */
+const getConversionDifficulty = (mapData) => {
+  const objects = Array.isArray(mapData?.objects) ? mapData.objects : [];
+  const first = objects[0];
+  const last = objects[objects.length - 1];
+
+  // Truncated to whole seconds, and treated as 10000 when it collapses to zero,
+  // both of which lazer relies on to keep the ratio below from blowing up.
+  let drainTime = Math.trunc(
+    (numberOr(last?.time, 0) - numberOr(first?.time, 0) - getTotalBreakTime(mapData)) / 1000,
+  );
+  if (drainTime === 0) {
+    drainTime = 10000;
+  }
+
+  const drainRate = numberOr(mapData?.hpDrainRate ?? mapData?.drainRate, 5);
+  const approachRate = clamp(numberOr(mapData?.approachRate, 5), 4, 7);
+  const difficulty = ((((drainRate + approachRate) / 1.5) + ((objects.length / drainTime) * 9)) / 38) * 5 / 1.15;
+
+  return Math.min(Number.isFinite(difficulty) ? difficulty : 0, 12);
+};
 
 const getManiaNoteCount = (keys, difficulty, source, random, type) => {
   if (keys <= 2 || type === 'spinner') return 1;
@@ -247,7 +282,6 @@ const getOrderedColumns = (keys, preferred, used, direction) => {
 };
 
 const createManiaPatternGenerator = (mapData, keys, random) => {
-  const difficulty = getConversionDifficulty(mapData);
   const columnsByTime = new Map();
   const previousColumns = [];
   const previousTimes = [];
@@ -343,7 +377,7 @@ const convertToTaiko = (mapData) => {
             endTime: clampedTime,
             kind: 'circle',
             taikoType: 'hit',
-            taikoStrong: hasSample(source, 'finish') || (Number(source.hitSound) & 4) !== 0,
+            taikoStrong: hasSample(source, 'finish'),
             hitSound: getSliderEdgeSound(source, edgeIndex),
             newCombo: edgeIndex === 0 && Boolean(source.newCombo),
             comboSkip: edgeIndex === 0 ? source.comboSkip : 0,
@@ -366,8 +400,8 @@ const convertToTaiko = (mapData) => {
 
     if (source.kind === 'spinner' || source.kind === 'hold') {
       const duration = Math.max(1, source.endTime - source.time);
-      const difficulty = clamp(Number(mapData.overallDifficulty) || 5, 0, 10);
-      const requiredHitsPerSecond = (3 + ((difficulty / 10) * 4.5)) * SWELL_HIT_MULTIPLIER;
+      const requiredHitsPerSecond = difficultyRange(mapData.overallDifficulty, 3, 5, 7.5)
+        * SWELL_HIT_MULTIPLIER;
       convertedObjects.push(createConvertedObject(source, {
         kind: 'spinner',
         taikoType: 'swell',
@@ -376,11 +410,10 @@ const convertToTaiko = (mapData) => {
       continue;
     }
 
-    const hitSound = Number(source.hitSound) || 0;
     convertedObjects.push(createConvertedObject(source, {
       kind: 'circle',
       taikoType: 'hit',
-      taikoStrong: hasSample(source, 'finish') || (hitSound & 4) !== 0,
+      taikoStrong: hasSample(source, 'finish'),
     }));
   }
 
@@ -392,33 +425,40 @@ const convertToTaiko = (mapData) => {
   };
 };
 
+const sliderCurveCache = new WeakMap();
+
+/**
+ * Position at a fraction along a slider, following its actual curve.
+ *
+ * osu!lazer's catch and mania converters read this off Slider.Path. This used to
+ * interpolate straight lines between the raw control points, ignoring the curve
+ * type entirely, so every droplet and fruit on a curved slider landed at the
+ * wrong x — the more the slider bent, the further off it was.
+ */
 const getPathPosition = (object, progress) => {
-  const points = [{ x: Number(object?.x) || 0, y: Number(object?.y) || 192 }, ...(object?.sliderPoints || [])];
-  if (points.length === 1) return points[0];
-  const clampedProgress = clamp(progress, 0, 1);
-  const distances = [0];
-  for (let i = 1; i < points.length; i += 1) {
-    distances[i] = distances[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  if (!object) {
+    return { x: 0, y: 0 };
   }
-  const total = distances.at(-1) || 1;
-  const target = total * clampedProgress;
-  for (let i = 1; i < distances.length; i += 1) {
-    if (target <= distances[i]) {
-      const span = Math.max(0.001, distances[i] - distances[i - 1]);
-      const ratio = (target - distances[i - 1]) / span;
-      return {
-        x: points[i - 1].x + ((points[i].x - points[i - 1].x) * ratio),
-        y: points[i - 1].y + ((points[i].y - points[i - 1].y) * ratio),
-      };
-    }
+
+  let path = sliderCurveCache.get(object);
+  if (!path) {
+    const curve = buildSliderCurvePoints(object);
+    path = curve.length > 0
+      ? curve
+      : [{ x: Number(object.x) || 0, y: Number(object.y) || 192 }];
+    sliderCurveCache.set(object, path);
   }
-  return points.at(-1);
+
+  return positionOnPathAtProgress(path, progress);
 };
 
 const buildCatchObjects = (mapData) => {
   const result = [];
   let renderId = 0;
   const add = (source, time, x, type, extra = {}) => {
+    if (result.length >= MAX_CATCH_OBJECTS) {
+      return false;
+    }
     result.push({
       time,
       x: clamp(Number(x) || 0, 0, OSU_WIDTH),
@@ -429,9 +469,13 @@ const buildCatchObjects = (mapData) => {
       renderId: renderId++,
       ...extra,
     });
+    return true;
   };
 
   for (let index = 0; index < (mapData.objects || []).length; index += 1) {
+    if (result.length >= MAX_CATCH_OBJECTS) {
+      break;
+    }
     const source = mapData.objects[index];
     if (!source) continue;
     const indexedSource = { ...source, index };
@@ -679,6 +723,8 @@ export {
   MODE_NAMES,
   convertMapForMode,
   createLegacyRandom,
+  difficultyRange,
+  getConversionDifficulty,
   getManiaConversionSeed,
   getManiaKeyCount,
   normalizeMode,

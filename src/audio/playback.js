@@ -1,30 +1,54 @@
+import { seekAudioElementToMapTime } from './seek.js';
+
+// Owns the playback mode, the animation frame loop and every seek. Nothing
+// outside this module should assign `state.rafId` or `state.playbackMode`: the
+// audio clock and the visual clock only stay consistent because one place moves
+// them together.
 const createPlaybackController = ({
   state,
-  renderer,
   config,
   helpers,
 }) => {
   const {
     ensureTimelineDurationAnimation,
     getCurrentManualMapTime,
-    shouldContinueTimelineWhileFetchingFullAudio,
     syncVisualClockToMapTime,
-    getAudioMappedTimeMs,
     resyncVisualPlaybackToAudio,
-    clearCurrentRaf,
-    seekAudioToMapTime,
     renderFrame,
-    clamp,
   } = helpers;
+
+  const seekAudioToMapTime = (mapTimeMs, options) => (
+    seekAudioElementToMapTime(state.audio, mapTimeMs, state.audioAnchorMapMs, options)
+  );
+
+  const clearCurrentRaf = () => {
+    if (state.rafId !== null) {
+      cancelAnimationFrame(state.rafId);
+      state.rafId = null;
+    }
+  };
+
+  const ensurePlaybackLoop = () => {
+    if (state.rafId === null) {
+      state.rafId = requestAnimationFrame(playbackTick);
+    }
+  };
+
+  // Hands the clock back to the visual timeline, for whenever the audio stops
+  // being authoritative: it ended, it was paused, or the playhead moved outside
+  // the range it covers.
+  const switchToManualTimeline = (nowPerfMs = performance.now()) => {
+    state.playbackMode = 'manual';
+    state.playStartMapMs = state.currentTimeMs;
+    state.playStartPerfMs = nowPerfMs;
+    state.lastAudioVisualSyncPerfMs = 0;
+  };
 
   const stopPlayback = () => {
     state.isPlaying = false;
     state.playbackMode = 'none';
     state.lastAudioVisualSyncPerfMs = 0;
-    if (state.rafId !== null) {
-      cancelAnimationFrame(state.rafId);
-      state.rafId = null;
-    }
+    clearCurrentRaf();
     if (state.audio && !state.audio.paused) {
       state.audio.pause();
     }
@@ -40,19 +64,7 @@ const createPlaybackController = ({
 
     if (state.playbackMode === 'audio' && state.audioSyncEnabled && state.audio) {
       if (state.audio.paused) {
-        state.playbackMode = 'manual';
-        if (
-          state.isPlaying
-          && shouldContinueTimelineWhileFetchingFullAudio()
-          && state.audio.ended
-        ) {
-          syncVisualClockToMapTime(
-            clamp(getAudioMappedTimeMs(), 0, state.durationMs || 1),
-            now,
-          );
-        } else {
-          syncVisualClockToMapTime(state.currentTimeMs, now);
-        }
+        switchToManualTimeline(now);
       } else if ((now - state.lastAudioVisualSyncPerfMs) >= config.audioVisualSyncIntervalMs) {
         resyncVisualPlaybackToAudio({ nowPerfMs: now });
       }
@@ -74,11 +86,9 @@ const createPlaybackController = ({
     if (state.currentTimeMs >= state.durationMs) {
       state.currentTimeMs = 0;
     }
-    state.playbackMode = 'manual';
     state.isPlaying = true;
-    state.playStartPerfMs = performance.now();
-    state.playStartMapMs = state.currentTimeMs;
-    state.rafId = requestAnimationFrame(playbackTick);
+    switchToManualTimeline();
+    ensurePlaybackLoop();
     return true;
   };
 
@@ -89,8 +99,7 @@ const createPlaybackController = ({
     }
 
     try {
-      const hasSeekTarget = seekAudioToMapTime(state.currentTimeMs);
-      if (!hasSeekTarget) {
+      if (!seekAudioToMapTime(state.currentTimeMs)) {
         return false;
       }
       syncVisualClockToMapTime(state.currentTimeMs);
@@ -99,7 +108,7 @@ const createPlaybackController = ({
       state.playbackMode = 'audio';
       state.isPlaying = true;
       resyncVisualPlaybackToAudio({ force: true });
-      state.rafId = requestAnimationFrame(playbackTick);
+      ensurePlaybackLoop();
       return true;
     } catch {
       return false;
@@ -120,29 +129,40 @@ const createPlaybackController = ({
       state.currentTimeMs = 0;
     }
 
-    const startedAudio = await startAudioPlayback();
-    if (startedAudio) {
-      return true;
-    }
-    return startManualPlayback();
+    return (await startAudioPlayback()) || startManualPlayback();
   };
 
-  const seekFromTimelineEvent = (event) => {
+  /**
+   * The one seek path. Moves the visual clock, and moves the audio with it when
+   * the audio actually covers that timestamp. When it does not — a b.ppy.sh
+   * preview clip only spans ~10s around PreviewTime — the audio is paused and
+   * the visual clock takes over, otherwise the 'seeked'/'timeupdate' listeners
+   * drag the playhead straight back to the clip.
+   */
+  const seekTo = (mapTimeMs) => {
     if (!state.mapData || state.durationMs <= 0) {
       return;
     }
 
-    const newTime = renderer.timeFromTimelineEvent(event);
-    syncVisualClockToMapTime(newTime);
+    syncVisualClockToMapTime(mapTimeMs);
 
     if (state.audioSyncEnabled && state.audio?.src) {
       try {
-        const hasTarget = seekAudioToMapTime(state.currentTimeMs);
-        if (!hasTarget && state.isPlaying && state.playbackMode === 'audio') {
-          state.audio.pause();
-          state.playbackMode = 'manual';
-        } else if (state.playbackMode === 'audio') {
-          resyncVisualPlaybackToAudio({ force: true });
+        if (seekAudioToMapTime(state.currentTimeMs)) {
+          if (state.playbackMode === 'audio') {
+            resyncVisualPlaybackToAudio({ force: true });
+          }
+        } else {
+          if (!state.audio.paused) {
+            state.audio.pause();
+          }
+          if (state.playbackMode === 'audio') {
+            if (state.isPlaying) {
+              switchToManualTimeline();
+            } else {
+              state.playbackMode = 'none';
+            }
+          }
         }
       } catch {
         // Ignore seek errors; visual playback continues.
@@ -152,13 +172,24 @@ const createPlaybackController = ({
     renderFrame();
   };
 
+  const seekRelative = (deltaMs) => seekTo(state.currentTimeMs + deltaMs);
+
+  const restartPreview = () => {
+    seekTo(0);
+    if (state.mapData && state.durationMs > 0 && !state.isPlaying) {
+      void togglePlayback();
+    }
+  };
+
   return {
+    clearCurrentRaf,
+    ensurePlaybackLoop,
+    switchToManualTimeline,
     stopPlayback,
-    playbackTick,
-    startManualPlayback,
-    startAudioPlayback,
     togglePlayback,
-    seekFromTimelineEvent,
+    seekTo,
+    seekRelative,
+    restartPreview,
   };
 };
 

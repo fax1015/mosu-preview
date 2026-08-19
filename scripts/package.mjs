@@ -4,6 +4,11 @@ import { Buffer } from "node:buffer";
 
 const root = process.cwd();
 const distDir = path.join(root, "dist");
+// One timestamp for the whole run, honouring SOURCE_DATE_EPOCH, so repeated
+// builds of the same tree produce byte-identical archives.
+const buildDate = process.env.SOURCE_DATE_EPOCH
+  ? new Date(Number(process.env.SOURCE_DATE_EPOCH) * 1000)
+  : new Date();
 const requestedTarget = process.argv[2] ?? "all";
 const packageFiles = [
   "popup.html",
@@ -118,7 +123,7 @@ function createZip(files) {
     const name = Buffer.from(file.name);
     const data = Buffer.from(file.data);
     const crc = crc32(data);
-    const { time, date } = dosDateTime(new Date());
+    const { time, date } = dosDateTime(buildDate);
 
     const localHeader = Buffer.alloc(30);
     localHeader.writeUInt32LE(0x04034b50, 0);

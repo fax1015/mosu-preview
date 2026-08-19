@@ -77,16 +77,20 @@ const readSettings = async () => {
 };
 
 const writeSettings = async (settings) => {
-  const providerOverride = normalizeProviderOverride(settings?.providerOverride);
-
   try {
-    await storageSet('sync', {
-      [PROVIDER_OVERRIDE_KEY]: providerOverride,
-      [PROVIDER_PRIORITY_KEY]: settings?.providerPriority || [],
-      [DISABLED_PROVIDERS_KEY]: settings?.disabledProviders || [],
-      [AUTO_FALLBACK_KEY]: settings?.autoFallback ?? true,
-      ...toPreviewSettingsStorage(settings),
-    });
+    // Provider priority / disabled providers / auto-fallback are all emitted by
+    // toPreviewSettingsStorage, so they must not be written separately here —
+    // the spread would overwrite them anyway.
+    const payload = toPreviewSettingsStorage(settings);
+
+    // This page has no provider-override control. Only write the key when a
+    // caller actually supplied one; otherwise writing a normalized `undefined`
+    // silently resets the user's stored override to 'auto'.
+    if (settings?.providerOverride !== undefined) {
+      payload[PROVIDER_OVERRIDE_KEY] = normalizeProviderOverride(settings.providerOverride);
+    }
+
+    await storageSet('sync', payload);
     return true;
   } catch {
     return false;
@@ -514,6 +518,7 @@ const initialize = async () => {
     || !standardSnakingSliders
     || !standardSliderSnakeOut
     || !standardSliderEndCircles
+    || !providerPriorityList
   ) {
     return;
   }

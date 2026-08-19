@@ -1139,12 +1139,158 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     line-height: 1;
 }
 
+.map-preview-speed-control {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: var(--map-preview-control-height);
+    margin-right: 0.5rem;
+}
+
 .map-preview-speed-btn {
     min-width: 64px;
     height: var(--map-preview-control-height);
     padding: 0 0.6rem;
+    /* Thinner than the shared secondary button, to match the 1px outlines the
+       rest of the popup uses. */
+    border-width: 1px;
     font-size: 0.74rem;
-    margin-right: 0.5rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Hover only lifts it towards white; the accent is reserved for the open
+   popover, so the button reads as active rather than merely pointed at. */
+.map-preview-speed-btn:hover {
+    color: rgba(238, 236, 245, 0.95);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.map-preview-speed-control.is-speed-open .map-preview-speed-btn {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+}
+
+/* Sits above the speed button and only exists while the control is hovered,
+   focused, or being dragged, so it never steals room from the timeline row. */
+.map-preview-speed-popover {
+    position: absolute;
+    bottom: 100%;
+    /* Left-anchored, not centred: the button sits against the popup's left
+       padding, so a centred panel would spill past the window edge. */
+    left: 0;
+    z-index: 30;
+    /* Leaves room under the panel for the arrow that points at the button. */
+    padding-bottom: 8px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(6px) scale(0.98);
+    transform-origin: 20% 100%;
+    pointer-events: none;
+    transition: opacity 140ms ease,
+                transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 180ms;
+    will-change: opacity, transform;
+}
+
+.map-preview-speed-control.is-speed-open .map-preview-speed-popover {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+    transition: opacity 140ms ease,
+                transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s;
+}
+
+.map-preview-speed-panel {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.34rem 0.5rem;
+    border-radius: calc(var(--border-radius) - 1px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(36, 34, 42, 0.96);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(16px);
+    white-space: nowrap;
+    user-select: none;
+}
+
+/* Rotated square rather than a border triangle, so the panel's own outline
+   carries on around the tip. Sits over the panel's bottom edge, lined up with
+   the middle of the speed button. */
+.map-preview-speed-panel::after {
+    content: '';
+    position: absolute;
+    bottom: -4px;
+    left: 28px;
+    width: 8px;
+    height: 8px;
+    transform: rotate(45deg);
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(36, 34, 42, 0.96);
+}
+
+.map-preview-speed-bound {
+    font-size: 0.62rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+
+.map-preview-speed-slider {
+    --range-width: 118px;
+}
+
+/* Only takes up room once the speed leaves 1x, so the panel stays compact at
+   the default rate and widens into the button. */
+.map-preview-speed-reset {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0;
+    height: 16px;
+    margin-left: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    opacity: 0;
+    overflow: hidden;
+    pointer-events: none;
+    cursor: pointer;
+    transition: width 170ms cubic-bezier(0.32, 0.72, 0, 1),
+                margin-left 170ms cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 140ms ease,
+                color 120ms ease;
+}
+
+.map-preview-speed-reset.is-visible {
+    width: 16px;
+    margin-left: 0.3rem;
+    opacity: 0.72;
+    pointer-events: auto;
+}
+
+.map-preview-speed-reset.is-visible:hover {
+    opacity: 1;
+    color: rgba(239, 244, 251, 0.96);
+}
+
+.map-preview-speed-reset:focus-visible {
+    outline: 1px solid rgba(181, 164, 244, 0.9);
+    outline-offset: 1px;
+}
+
+.map-preview-speed-reset svg {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    fill: currentColor;
 }
 
 .map-preview-timeline {
@@ -1163,7 +1309,9 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     font-size: 0.72rem;
     color: var(--text-secondary);
     white-space: nowrap;
-    width: 60px;
+    /* Sized in JS from the longest label the current duration can produce, so
+       the row lays out around the real text instead of clipping long maps. */
+    width: var(--map-preview-time-label-width, 60px);
     text-align: right;
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
@@ -1178,7 +1326,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     min-width: 114px;
     padding: 0 0.45rem;
     border-radius: var(--border-radius);
-    border: 2px solid var(--bg-quaternary);
+    border: 1px solid var(--bg-quaternary);
     background: transparent;
     user-select: none;
 }
@@ -1193,9 +1341,10 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     letter-spacing: 0;
 }
 
-.map-preview-volume-slider {
-    --volume-progress: 80%;
-    width: 72px;
+.map-preview-volume-slider,
+.map-preview-speed-slider {
+    --range-progress: 80%;
+    width: var(--range-width, 72px);
     height: 10px;
     margin: 0;
     appearance: none;
@@ -1204,21 +1353,23 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     background:
         linear-gradient(90deg,
             rgba(171, 144, 255, 0.88) 0%,
-            rgba(140, 102, 255, 0.9) var(--volume-progress),
-            rgba(60, 58, 70, 0.95) var(--volume-progress),
+            rgba(140, 102, 255, 0.9) var(--range-progress),
+            rgba(60, 58, 70, 0.95) var(--range-progress),
             rgba(60, 58, 70, 0.95) 100%);
     box-shadow: none;
     cursor: pointer;
 }
 
-.map-preview-volume-slider::-webkit-slider-runnable-track {
+.map-preview-volume-slider::-webkit-slider-runnable-track,
+.map-preview-speed-slider::-webkit-slider-runnable-track {
     height: 100%;
     background: transparent;
     border: 0;
     border-radius: 999px;
 }
 
-.map-preview-volume-slider::-webkit-slider-thumb {
+.map-preview-volume-slider::-webkit-slider-thumb,
+.map-preview-speed-slider::-webkit-slider-thumb {
     appearance: none;
     width: 10px;
     height: 10px;
@@ -1229,14 +1380,16 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     box-shadow: 0 0 0 1px rgba(49, 33, 98, 0.45);
 }
 
-.map-preview-volume-slider::-moz-range-track {
+.map-preview-volume-slider::-moz-range-track,
+.map-preview-speed-slider::-moz-range-track {
     height: 100%;
     background: transparent;
     border: 0;
     border-radius: 999px;
 }
 
-.map-preview-volume-slider::-moz-range-thumb {
+.map-preview-volume-slider::-moz-range-thumb,
+.map-preview-speed-slider::-moz-range-thumb {
     width: 10px;
     height: 10px;
     border-radius: 50%;
@@ -1245,7 +1398,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     box-shadow: 0 0 0 1px rgba(49, 33, 98, 0.45);
 }
 
-.map-preview-volume-slider:focus-visible {
+.map-preview-volume-slider:focus-visible,
+.map-preview-speed-slider:focus-visible {
     outline: 1px solid rgba(181, 164, 244, 0.9);
     outline-offset: 1px;
 }

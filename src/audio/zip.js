@@ -1,10 +1,16 @@
 import { normalizePath, getPathBaseName } from './cache.js';
 
-const MAX_ARCHIVE_DOWNLOAD_BYTES = 120 * 1024 * 1024;
-const MAX_ZIP_AUDIO_ENTRY_BYTES = 48 * 1024 * 1024;
+// Sized for marathon maps. A 60-minute beatmap's audio.mp3 is ~60MB at 128kbps
+// and ~90MB at 192kbps, so the old 48MB entry ceiling rejected the audio track
+// outright and full audio could never load for them.
+// INVARIANT: FULL_AUDIO_CACHE_MAX_BYTES (cache.js) must be >= this value.
+// When it was smaller, extraction succeeded but the cache write failed, the
+// worker reported failure, and the popup silently re-downloaded the entire
+// archive a second time before hitting the same wall.
+const MAX_ARCHIVE_DOWNLOAD_BYTES = 200 * 1024 * 1024;
+const MAX_ZIP_AUDIO_ENTRY_BYTES = 150 * 1024 * 1024;
 const MAX_ZIP_ENTRY_INFLATE_RATIO = 80;
 const MAX_ZIP_ENTRIES = 6000;
-const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 60;
 
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_SIGNATURE = 0x02014b50;
@@ -57,18 +63,34 @@ const findZipEocdOffset = (bytes) => {
   }
 
   const scanStart = Math.max(0, bytes.length - (0xFFFF + minimumLength));
+  let firstSignatureOffset = -1;
+
   for (let offset = bytes.length - minimumLength; offset >= scanStart; offset -= 1) {
     if (
-      bytes[offset] === 0x50
-      && bytes[offset + 1] === 0x4b
-      && bytes[offset + 2] === 0x05
-      && bytes[offset + 3] === 0x06
+      bytes[offset] !== 0x50
+      || bytes[offset + 1] !== 0x4b
+      || bytes[offset + 2] !== 0x05
+      || bytes[offset + 3] !== 0x06
     ) {
+      continue;
+    }
+
+    if (firstSignatureOffset === -1) {
+      firstSignatureOffset = offset;
+    }
+
+    // The signature can also occur by chance inside compressed data. A real
+    // end-of-central-directory record's comment length accounts for exactly the
+    // bytes that follow it, so prefer a match that checks out.
+    const commentLength = bytes[offset + 20] | (bytes[offset + 21] << 8);
+    if (offset + minimumLength + commentLength === bytes.length) {
       return offset;
     }
   }
 
-  return -1;
+  // Fall back to the first signature so archives with trailing padding (which
+  // used to work) keep working.
+  return firstSignatureOffset;
 };
 
 const parseZipEntries = (archiveBytes) => {
@@ -464,10 +486,23 @@ const extractZipEntry = async (archiveBytes, entry) => {
   throw new Error(`ZIP compression method ${entry.compressionMethod} is unsupported.`);
 };
 
+const AUDIO_ENTRY_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac', '.opus'];
+
+const isAudioEntryName = (value) => AUDIO_ENTRY_EXTENSIONS.some(
+  (ext) => String(value || '').toLowerCase().endsWith(ext),
+);
+
+/** Audio entries that exist but were skipped purely for being too large. */
+const findOversizedAudioEntries = (entries) => (entries || []).filter((entry) => (
+  entry
+  && isAudioEntryName(entry.name)
+  && Number.isFinite(entry.uncompressedSize)
+  && entry.uncompressedSize > MAX_ZIP_AUDIO_ENTRY_BYTES
+));
+
 const pickAudioEntryFromZip = (entries, requestedAudioFilename) => {
   const targetBaseName = getPathBaseName(requestedAudioFilename);
-  const audioExtensions = ['.mp3', '.ogg', '.wav', '.flac', '.opus'];
-  const isAudioName = (value) => audioExtensions.some((ext) => value.toLowerCase().endsWith(ext));
+  const isAudioName = isAudioEntryName;
   const safeEntries = entries.filter((entry) => (
     isAudioName(entry.name)
     && Number.isFinite(entry.uncompressedSize)
@@ -497,6 +532,8 @@ export {
   MAX_ARCHIVE_DOWNLOAD_BYTES,
   MAX_ZIP_AUDIO_ENTRY_BYTES,
   decodeZipName,
+  isAudioEntryName,
+  findOversizedAudioEntries,
   findZipEocdOffset,
   parseZipEntries,
   inflateWithFormat,

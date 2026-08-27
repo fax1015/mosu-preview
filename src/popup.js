@@ -54,6 +54,9 @@ import {
   buildBeatmapSourceUrl,
   buildDetachedPageUrl,
   normalizeDetachedBounds,
+  isBoundsRejection,
+  withoutDetachedPosition,
+  hasDetachedPosition,
   readDetachedParams,
 } from './core/detachedWindow.js';
 import { isSameFollowTarget, pickBeatmapTabInfo, toFollowTarget } from './core/tabFollow.js';
@@ -82,7 +85,12 @@ import {
   writeCachedFullAudioBlob,
 } from './audio/cache.js';
 import { extractFullBeatmapAudio } from './audio/fullAudioExtractionCore.js';
-import { getPreviewClipAnchorMapMs, isPreviewClipAnchorable, seekAudioElementToMapTime } from './audio/seek.js';
+import {
+  PREVIEW_CLIP_LEAD_IN_MS,
+  getPreviewClipAnchorMapMs,
+  isPreviewClipAnchorable,
+  seekAudioElementToMapTime,
+} from './audio/seek.js';
 import {
   getProviderDisplayName,
   getProviderSequenceForDownload,
@@ -236,8 +244,6 @@ const MAX_PREVIEW_OBJECTS = 40000;
 // Long enough to collapse a burst of hash rewrites, short enough that clicking a
 // difficulty feels like it loads immediately.
 const FOLLOW_SYNC_DEBOUNCE_MS = 250;
-const AUDIO_VISUAL_SYNC_INTERVAL_MS = 240;
-const AUDIO_VISUAL_SYNC_THRESHOLD_MS = 90;
 const SUPPORT_LINKS = {
   issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
@@ -361,38 +367,46 @@ const ensureTimelineDurationAnimation = () => {
 };
 
 state.audio.addEventListener('canplay', syncPlaybackDuration);
+// The element is the clock, so losing it is a state transition, not a
+// correction: hand the preview back to the visual timeline and keep it moving.
 state.audio.addEventListener('error', () => {
   state.audioSyncEnabled = false;
+  if (state.playbackMode === 'audio' || state.playbackMode === 'seeking') {
+    releaseAudioClock();
+  }
   syncPlaybackDuration();
 });
 state.audio.addEventListener('loadedmetadata', syncPlaybackDuration);
 state.audio.addEventListener('durationchange', syncPlaybackDuration);
 state.audio.addEventListener('emptied', syncPlaybackDuration);
+// No 'seeked' or 'timeupdate' listener on purpose. Both used to write a
+// corrected timestamp back into the visual clock, which is how a late event
+// from a superseded seek could drag the playhead backwards. Seeks are awaited
+// by whoever issued them now, and the frame loop reads the element directly.
 state.audio.addEventListener('playing', () => {
-  if (state.playbackMode === 'audio') {
-    resyncVisualPlaybackToAudio({ force: true });
+  if (!state.isPlaying) {
+    return;
   }
-});
-state.audio.addEventListener('seeked', () => {
   if (state.playbackMode === 'audio') {
-    resyncVisualPlaybackToAudio({ force: true });
+    ensurePlaybackLoop();
+    return;
   }
-});
-state.audio.addEventListener('timeupdate', () => {
-  if (state.playbackMode === 'audio') {
-    resyncVisualPlaybackToAudio();
+  // Sound again after a stall handed the clock to the visual timeline.
+  if (resumeAudioClockAfterStall()) {
+    addDebugLog('audio: media clock resumed after a stall');
   }
 });
 state.audio.addEventListener('ended', () => {
-  if (state.playbackMode === 'audio') {
+  // Only take the element's own position if the anchor still describes the
+  // source that just ended; mid-swap it does not.
+  if (isAudioClockAuthoritative()) {
     syncVisualClockToMapTime(getAudioMappedTimeMs());
   }
   state.currentTimeMs = clamp(state.currentTimeMs, 0, state.durationMs || 1);
   renderFrame();
 
   if (state.isPlaying && shouldContinueTimelineWithoutFullAudio()) {
-    switchToManualTimeline();
-    ensurePlaybackLoop();
+    releaseAudioClock();
     return;
   }
 
@@ -783,7 +797,22 @@ const openDetachedWindow = async () => {
     }
 
     const bounds = await readDetachedBounds();
-    const createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...bounds });
+    let createdWindow = null;
+    try {
+      createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...bounds });
+    } catch (error) {
+      if (!isBoundsRejection(error) || !hasDetachedPosition(bounds)) {
+        throw error;
+      }
+      // The remembered position is not on a screen any more -- a monitor was
+      // unplugged, or the resolution changed under it. Keep the size, let the
+      // browser choose where, and forget the position so it cannot strand the
+      // detach button again.
+      addDebugLog('detach: remembered position is off-screen, letting the browser place it');
+      const size = withoutDetachedPosition(bounds);
+      createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...size });
+      void storageSet('local', { [DETACHED_WINDOW_BOUNDS_KEY]: size }).catch(() => {});
+    }
     await writeStoredDetachedWindowId(createdWindow?.id ?? null);
     window.close();
   } catch (error) {
@@ -1078,16 +1107,16 @@ const setPlaybackSpeedControlEnabled = (enabled) => {
 const timingController = createTimingController({
   state,
   clamp,
-  thresholdMs: AUDIO_VISUAL_SYNC_THRESHOLD_MS,
 });
 const {
   getCurrentManualMapTime,
   syncVisualClockToMapTime: syncVisualClockToMapTimeRaw,
   getAudioMappedTimeMs,
-  resyncVisualPlaybackToAudio,
+  isAudioClockAuthoritative,
+  applyPlaybackRate,
 } = timingController;
 
-const hitsoundPlayer = createHitsoundPlayer();
+const hitsoundPlayer = createHitsoundPlayer({ onLog: addDebugLog });
 
 // Every jump in the clock -- a scrub, a restart, an audio resync -- funnels
 // through here, so it is the one place the hitsound cursor has to catch up.
@@ -1100,15 +1129,10 @@ const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs) => {
 const applyPlaybackSpeed = (nextSpeed) => {
   const normalized = normalizePlaybackSpeed(nextSpeed);
 
-  if (state.isPlaying) {
-    const now = performance.now();
-    state.currentTimeMs = clamp(getCurrentManualMapTime(now), 0, state.durationMs || 1);
-    state.playStartMapMs = state.currentTimeMs;
-    state.playStartPerfMs = now;
-  }
-
-  state.playbackSpeed = normalized;
-  state.audio.playbackRate = normalized;
+  const mapTimeMs = applyPlaybackRate(normalized);
+  // Hitsounds are placed ahead of the playhead against the rate that was
+  // running when they were placed, so the ones already queued are wrong now.
+  hitsoundPlayer.syncTo(state.hitsoundEvents, mapTimeMs);
   syncPlaybackSpeedControls();
 
   if (state.mapData) {
@@ -1298,9 +1322,18 @@ const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise(
 });
 
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
+  // Replacing the source invalidates anything still waiting on the old one: its
+  // seeks can never land now, and its anchor no longer describes this element.
+  beginAudioOperation();
+  state.pendingSeekMapMs = null;
+  if (state.playbackMode === 'seeking') {
+    // Whatever the preview was frozen on is unreachable, and a new source can
+    // take minutes to arrive. Let the visual clock carry it in the meantime.
+    releaseAudioClock();
+  }
   state.audioSyncEnabled = Boolean(sourceUrl);
-  state.lastAudioVisualSyncPerfMs = 0;
   state.audioAnchorMapMs = Math.max(0, Number.isFinite(anchorMapMs) ? anchorMapMs : 0);
+  state.audioAnchorSrc = sourceUrl || '';
   state.audio.playbackRate = state.playbackSpeed;
   if (!sourceUrl) {
     state.audio.removeAttribute('src');
@@ -1324,7 +1357,7 @@ let lastTimeLabelText = '';
 const renderFrame = () => {
   // Only while playing: a paused scrub should show the map, not sound it.
   if (state.isPlaying) {
-    hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs);
+    hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs, { rate: state.playbackSpeed });
   }
   renderer.setTime(state.currentTimeMs);
   renderer.render();
@@ -1339,9 +1372,13 @@ const renderFrame = () => {
 };
 
 const {
-  clearCurrentRaf,
+  beginAudioOperation,
+  isCurrentAudioOperation,
+  holdForAudioSeek,
+  adoptAudioClock,
+  releaseAudioClock,
+  resumeAudioClockAfterStall,
   ensurePlaybackLoop,
-  switchToManualTimeline,
   stopPlayback,
   togglePlayback,
   seekTo,
@@ -1349,15 +1386,14 @@ const {
   restartPreview,
 } = createPlaybackController({
   state,
-  config: {
-    audioVisualSyncIntervalMs: AUDIO_VISUAL_SYNC_INTERVAL_MS,
-  },
   helpers: {
     ensureTimelineDurationAnimation,
     getCurrentManualMapTime,
+    getAudioMappedTimeMs,
+    isAudioClockAuthoritative,
     syncVisualClockToMapTime,
-    resyncVisualPlaybackToAudio,
     renderFrame,
+    waitForAudioSeek: (audioElement) => waitForAudioElementSeek(audioElement),
   },
 });
 
@@ -1506,8 +1542,17 @@ const configureAudioPreview = (setId, previewTimeMs, { skipPreviewClip = false }
     return;
   }
 
+  // Worth logging in full, because this is the only anchor in the app that is
+  // inferred rather than known: the clip belongs to the beatmapset while
+  // PreviewTime is read from this difficulty, and b.ppy.sh's lead-in is a
+  // constant we assume rather than one the file states.
+  const previewAnchorMapMs = getPreviewClipAnchorMapMs(previewTimeMs);
+  addDebugLog(
+    `audio: preview clip anchored at ${Math.round(previewAnchorMapMs)}ms `
+    + `(PreviewTime ${Math.round(previewTimeMs)}ms, assumed ${PREVIEW_CLIP_LEAD_IN_MS}ms lead-in)`,
+  );
   const nextSrc = `${AUDIO_PREVIEW_BASE}/${normalizedSetId}.mp3`;
-  setAudioElementSource(nextSrc, getPreviewClipAnchorMapMs(previewTimeMs));
+  setAudioElementSource(nextSrc, previewAnchorMapMs);
 };
 
 const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, providerLabel = '') => {
@@ -1605,6 +1650,13 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     addDebugLog(`audio: playhead moved during hotswap, committing at ${Math.round(commitMapTimeMs)}ms`);
   }
 
+  // From here the swap goes through the same operation controller as a user
+  // seek, so the two cannot both claim the playhead: whichever started last
+  // wins, and the loser's continuation drops out below instead of resuming from
+  // a timestamp the user has already left.
+  const commitToken = beginAudioOperation();
+  holdForAudioSeek(commitMapTimeMs);
+
   let hasSyncedSeek = false;
   try {
     // Full audio may be marginally shorter than the mapped duration, so clamp
@@ -1622,13 +1674,26 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
   if (!hasSyncedSeek) {
     addDebugLog('audio: hotswap failed, seek sync rejected after commit');
     rollbackCommittedSwap();
+    releaseAudioClock();
     return false;
   }
 
   const seekSettled = await waitForAudioElementSeek(state.audio);
-  if (!seekSettled || jobId !== state.fullAudioJobId) {
+  const landedMapMs = getAudioMappedTimeMs();
+  if (Math.abs(landedMapMs - commitMapTimeMs) > 1) {
+    addDebugLog(
+      `audio: full audio landed at ${Math.round(landedMapMs)}ms for a `
+      + `${Math.round(commitMapTimeMs)}ms seek`,
+    );
+  }
+  // A seek issued after ours has already moved this element and owns the
+  // playhead. Its own continuation will position and resume it, so the swap
+  // stops here rather than rolling back a source that is perfectly good.
+  const isSupersededCommit = !isCurrentAudioOperation(commitToken);
+  if (!isSupersededCommit && (!seekSettled || jobId !== state.fullAudioJobId)) {
     addDebugLog('audio: hotswap failed, seek did not settle after commit');
     rollbackCommittedSwap();
+    releaseAudioClock();
     return false;
   }
 
@@ -1649,30 +1714,40 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     `Using full audio: ${sourceAudioFilename}`,
   );
 
-  const shouldResumePlayback = wasPlaying || state.isPlaying;
-  clearCurrentRaf();
-  if (shouldResumePlayback) {
-    try {
-      state.audio.playbackRate = state.playbackSpeed;
-      await state.audio.play();
-      setPlaybackState({ playbackMode: 'audio', isPlaying: true });
-      syncVisualClockToMapTime(getAudioMappedTimeMs());
-      resyncVisualPlaybackToAudio({ force: true });
-      ensurePlaybackLoop();
-      addDebugLog('audio: hotswap success, playback resumed');
-      return true;
-    } catch {
-      state.isPlaying = true;
-      switchToManualTimeline();
-      ensurePlaybackLoop();
-      addDebugLog('audio: hotswap fallback to manual timeline');
-      return false;
-    }
+  if (isSupersededCommit) {
+    addDebugLog('audio: hotswap committed, a newer seek owns the playhead');
+    return true;
   }
 
-  addDebugLog('audio: hotswap success (paused state)');
-  renderFrame();
-  return true;
+  const shouldResumePlayback = wasPlaying || state.isPlaying;
+  if (!shouldResumePlayback) {
+    releaseAudioClock();
+    addDebugLog('audio: hotswap success (paused state)');
+    renderFrame();
+    return true;
+  }
+
+  try {
+    state.audio.playbackRate = state.playbackSpeed;
+    await state.audio.play();
+    if (!isCurrentAudioOperation(commitToken)) {
+      addDebugLog('audio: hotswap resume superseded by a newer seek');
+      return true;
+    }
+    setPlaybackState({ isPlaying: true });
+    adoptAudioClock();
+    renderFrame();
+    addDebugLog('audio: hotswap success, playback resumed');
+    return true;
+  } catch {
+    if (!isCurrentAudioOperation(commitToken)) {
+      return false;
+    }
+    setPlaybackState({ isPlaying: true });
+    releaseAudioClock();
+    addDebugLog('audio: hotswap fallback to manual timeline');
+    return false;
+  }
 };
 
 const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
@@ -2125,8 +2200,14 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     renderer.setBeatmap(mapData, breaks, durationMs);
     // Flattened once per map: sliders contribute a sound per node, so this is
     // longer than the object list and has its own ordering.
-    state.hitsoundEvents = buildHitsoundEvents(mapData.objects);
-    addDebugLog(`hitsounds: ${state.hitsoundEvents.length} events from ${mapData.objects.length} objects`);
+    state.hitsoundEvents = buildHitsoundEvents(mapData.objects, {
+      samplePoints: mapData.timingControlPoints,
+      defaultSampleSet: mapData.defaultSampleSet,
+    });
+    addDebugLog(
+      `hitsounds: ${state.hitsoundEvents.length} events from ${mapData.objects.length} objects, `
+      + `${(mapData.timingControlPoints || []).length} sample points`,
+    );
     hitsoundPlayer.syncTo(state.hitsoundEvents, startTimeMs);
     syncPlaybackDuration();
     setMetadataText();

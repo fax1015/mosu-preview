@@ -257,6 +257,7 @@ const renderProviderPriority = () => {
     const moveBtns = document.createElement('div');
     moveBtns.className = 'priority-move-btns';
 
+    // Caret glyphs below are Font Awesome Free 7.3.1 solid (CC BY 4.0).
     const upBtn = document.createElement('button');
     upBtn.type = 'button';
     upBtn.className = 'priority-btn';
@@ -264,7 +265,7 @@ const renderProviderPriority = () => {
     upBtn.dataset.id = source.id;
     upBtn.title = 'Move up';
     if (index === 0) upBtn.disabled = true;
-    upBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M182.6 137.4c-12.5-12.5-32.8-12.5-45.3 0l-128 128c-9.2 9.2-11.9 22.9-6.9 34.9s16.6 19.8 29.6 19.8H288c13 0 24.6-7.8 29.6-19.8s2.2-25.7-6.9-34.9l-128-128z"/></svg>';
+    upBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M140.3 135.2c12.6-10.3 31.1-9.5 42.8 2.2l128 128c9.2 9.2 11.9 22.9 6.9 34.9S301.4 320 288.5 320l-256 0c-12.9 0-24.6-7.8-29.6-19.8S.7 274.5 9.9 265.4l128-128 2.4-2.2z"/></svg>';
 
     const downBtn = document.createElement('button');
     downBtn.type = 'button';
@@ -273,7 +274,7 @@ const renderProviderPriority = () => {
     downBtn.dataset.id = source.id;
     downBtn.title = 'Move down';
     if (index === sortedSources.length - 1) downBtn.disabled = true;
-    downBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M137.4 374.6c12.5 12.5 32.8 12.5 45.3 0l128-128c9.2-9.2 11.9-22.9 6.9-34.9s-16.6-19.8-29.6-19.8H32c-13 0-24.6 7.8-29.6 19.8s-2.2 25.7 6.9 34.9l128 128z"/></svg>';
+    downBtn.innerHTML = '<svg viewBox="0 0 320 512"><path d="M140.3 376.8c12.6 10.2 31.1 9.5 42.8-2.2l128-128c9.2-9.2 11.9-22.9 6.9-34.9S301.4 192 288.5 192l-256 0c-12.9 0-24.6 7.8-29.6 19.8S.7 237.5 9.9 246.6l128 128 2.4 2.2z"/></svg>';
 
     moveBtns.appendChild(upBtn);
     moveBtns.appendChild(downBtn);

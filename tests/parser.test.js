@@ -191,3 +191,75 @@ osu file format v14
   assert.equal(map.hitObjectCount, 2);
   assert.equal(map.maxObjectTime, 2000);
 });
+
+test('timing points carry their sample bank, index and volume', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[General]
+SampleSet: Soft
+
+[TimingPoints]
+0,300,4,2,1,60,1,0
+1000,-100,4,3,7,25,0,0
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.equal(map.defaultSampleSet, 2);
+  assert.deepEqual(
+    map.timingControlPoints.map((point) => [point.time, point.sampleSet, point.sampleIndex, point.volume]),
+    [[0, 2, 1, 60], [1000, 3, 7, 25]],
+  );
+});
+
+test('a beatmap that names no sample set inherits nothing', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[TimingPoints]
+0,300,4,0,0,100,1,0
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.equal(map.defaultSampleSet, 0);
+  assert.equal(map.timingControlPoints[0].sampleSet, 0);
+});
+
+test('legacy timing points without a volume column play at full volume', () => {
+  // v4 and earlier omit the later columns entirely; those maps are not silent.
+  const map = parseMapPreviewData(`
+osu file format v4
+
+[TimingPoints]
+0,300
+
+[HitObjects]
+256,192,1000,1,0
+`);
+
+  assert.equal(map.timingControlPoints[0].volume, 100);
+  assert.equal(map.timingControlPoints[0].sampleSet, 0);
+});
+
+test('an out-of-range sample bank is treated as unset rather than trusted', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[General]
+SampleSet: Nonsense
+
+[TimingPoints]
+0,300,4,9,0,150,1,0
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.equal(map.defaultSampleSet, 0);
+  assert.equal(map.timingControlPoints[0].sampleSet, 0);
+  assert.equal(map.timingControlPoints[0].volume, 100, 'volume is clamped, not dropped');
+});

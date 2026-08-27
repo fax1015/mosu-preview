@@ -199,6 +199,27 @@ const normalizeDetachedBounds = (bounds = {}) => {
   return normalized;
 };
 
+/**
+ * Whether the window API refused the geometry we asked for.
+ *
+ * Stored coordinates cannot be validated ahead of time: the extension has no
+ * display permission, so it cannot know how many screens there are or where they
+ * sit, and `window.screen` only describes the one the popup is on. A position
+ * that looks impossible may be perfectly valid on a second monitor. So the
+ * browser is left to be the authority, and this recognises it saying no.
+ */
+const isBoundsRejection = (error) => /bounds/i.test(String(error?.message || error || ''));
+
+/** The same geometry with the position dropped, leaving the browser to place it. */
+const withoutDetachedPosition = (bounds = {}) => {
+  const { left, top, ...size } = bounds;
+  return size;
+};
+
+const hasDetachedPosition = (bounds = {}) => (
+  Number.isFinite(Number(bounds?.left)) && Number.isFinite(Number(bounds?.top))
+);
+
 export {
   DETACHED_PAGE,
   DETACHED_WINDOW_ID_KEY,
@@ -211,4 +232,7 @@ export {
   buildBeatmapSourceUrl,
   buildDetachedPageUrl,
   normalizeDetachedBounds,
+  isBoundsRejection,
+  withoutDetachedPosition,
+  hasDetachedPosition,
 };

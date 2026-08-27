@@ -16,15 +16,26 @@ const createInitialState = ({ audio = null } = {}) => {
     durationMs: 0,
     currentTimeMs: 0,
     isPlaying: false,
+    // 'none' | 'manual' | 'audio' | 'seeking'. 'audio' means the media element
+    // is the clock; 'seeking' means an operation is moving it and the playhead
+    // is held on that operation's target until it settles.
     playbackMode: 'none',
     playStartPerfMs: 0,
     playStartMapMs: 0,
+    // Bumped by every operation that moves or replaces the audio, so a
+    // continuation that resolves late can tell it has been superseded.
+    audioOpToken: 0,
+    pendingSeekMapMs: null,
     rafId: null,
     timelineAnimationRafId: null,
     indicatorTimer: null,
     audio: audio ?? new Audio(),
     audioSyncEnabled: false,
     audioAnchorMapMs: 0,
+    // The source `audioAnchorMapMs` describes. An element keeps reporting the
+    // old source's position for a while after `src` is reassigned, and reading
+    // that through the new anchor puts the playhead somewhere it has never been.
+    audioAnchorSrc: '',
     previewSetId: null,
     fullAudioSetId: null,
     fullAudioStatus: 'idle',
@@ -58,7 +69,6 @@ const createInitialState = ({ audio = null } = {}) => {
     followSyncTimer: null,
     detachedWindowId: null,
     lastFocusedBrowsingWindowId: null,
-    lastAudioVisualSyncPerfMs: 0,
     maniaScrollSpeed: normalizedSettings.maniaScrollSpeed,
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
     maniaScrollDirection: normalizedSettings.maniaScrollDirection,
@@ -84,9 +94,6 @@ const setPlaybackState = (patch = {}) => {
   if (Object.hasOwn(patch, 'playbackMode')) state.playbackMode = String(patch.playbackMode || 'none');
   if (Object.hasOwn(patch, 'playStartPerfMs')) state.playStartPerfMs = Number(patch.playStartPerfMs) || 0;
   if (Object.hasOwn(patch, 'playStartMapMs')) state.playStartMapMs = Number(patch.playStartMapMs) || 0;
-  if (Object.hasOwn(patch, 'lastAudioVisualSyncPerfMs')) {
-    state.lastAudioVisualSyncPerfMs = Number(patch.lastAudioVisualSyncPerfMs) || 0;
-  }
 };
 
 const setTimelineState = (patch = {}) => {

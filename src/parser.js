@@ -68,6 +68,44 @@ export const parseMetadata = (content) => {
 // heap. Clamping at parse time keeps every downstream consumer safe.
 export const MAX_SLIDER_SLIDES = 1000;
 
+// Sample bank ids as the .osu format numbers them. 0 means "inherit from
+// whatever is further up the chain", which is why it has a name of its own.
+export const SAMPLE_SET_NONE = 0;
+export const SAMPLE_SET_NORMAL = 1;
+export const SAMPLE_SET_SOFT = 2;
+export const SAMPLE_SET_DRUM = 3;
+
+const SAMPLE_SET_NAMES = {
+  none: SAMPLE_SET_NONE,
+  normal: SAMPLE_SET_NORMAL,
+  soft: SAMPLE_SET_SOFT,
+  drum: SAMPLE_SET_DRUM,
+};
+
+// [General] spells the bank out; everywhere else numbers it.
+const parseSampleSetName = (value) => (
+  SAMPLE_SET_NAMES[String(value || '').trim().toLowerCase()] ?? SAMPLE_SET_NONE
+);
+
+const parseSampleSetIndex = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= SAMPLE_SET_NORMAL && parsed <= SAMPLE_SET_DRUM
+    ? parsed
+    : SAMPLE_SET_NONE;
+};
+
+// osu! writes volume as a percentage. Old file formats omit the column, and
+// those maps play at full volume rather than silently.
+const DEFAULT_SAMPLE_VOLUME = 100;
+
+const parseSampleVolume = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_SAMPLE_VOLUME;
+  }
+  return Math.min(100, Math.max(0, parsed));
+};
+
 export const parseMapPreviewData = (content, options = {}) => {
   const maxObjects = Number.isFinite(options?.maxObjects) && options.maxObjects > 0
     ? Math.floor(options.maxObjects)
@@ -87,6 +125,9 @@ export const parseMapPreviewData = (content, options = {}) => {
   let stackLeniency = 0.7;
   let mode = 0;
   let beatmapVersion = 14;
+  // [General] SampleSet is the bank a hit falls back to when neither the object
+  // nor the timing point names one.
+  let defaultSampleSet = SAMPLE_SET_NONE;
 
   const lines = content.split(/\r?\n/);
 
@@ -149,6 +190,8 @@ export const parseMapPreviewData = (content, options = {}) => {
           if (Number.isFinite(value)) {
             mode = value;
           }
+        } else if (key === 'sampleset') {
+          defaultSampleSet = parseSampleSetName(trimmed.slice(sep + 1));
         }
       }
       continue;
@@ -206,6 +249,12 @@ export const parseMapPreviewData = (content, options = {}) => {
         time,
         beatLength,
         meter: Number.parseInt(parts[2], 10) || 4,
+        // Every timing point carries a sample bank and a volume, inherited ones
+        // included -- greenlines are how a mapper rides hitsound dynamics
+        // through a map, so these are not optional detail.
+        sampleSet: parseSampleSetIndex(parts[3]),
+        sampleIndex: Number.parseInt(parts[4], 10) || 0,
+        volume: parseSampleVolume(parts[5]),
         uninherited,
         effects: Number.parseInt(parts[7], 10) || 0,
       });
@@ -409,10 +458,14 @@ export const parseMapPreviewData = (content, options = {}) => {
     bpmMax,
     primaryBpm: Number.isFinite(primaryBpm) && primaryBpm > 0 ? primaryBpm : 0,
     timingPoints: uninheritedTimingPoints,
+    defaultSampleSet,
     timingControlPoints: timingPoints.map((tp) => ({
       time: tp.time,
       beatLength: tp.beatLength,
       meter: Number.isFinite(tp.meter) && tp.meter > 0 ? tp.meter : 4,
+      sampleSet: tp.sampleSet,
+      sampleIndex: tp.sampleIndex,
+      volume: tp.volume,
       uninherited: Boolean(tp.uninherited),
       bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
       svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,

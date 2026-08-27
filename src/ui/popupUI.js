@@ -78,6 +78,8 @@ const bindPopupUiEvents = ({
   let lastTimelinePointerEvent = null;
   let lastPointerPosition = null;
   let timelineZoomRafId = null;
+  let pendingTimelineSeekEvent = null;
+  let timelineSeekRafId = null;
 
   const trapDialogTab = (event, modalShell) => {
     if (event.key !== 'Tab' || !modalShell || modalShell.hidden) {
@@ -460,6 +462,34 @@ const bindPopupUiEvents = ({
     }
   });
 
+  // A drag is one seek per frame, to the position the pointer is at when that
+  // frame runs. Seeking on every pointer sample only made the media element
+  // start work it was about to be told to abandon.
+  const flushTimelineSeek = () => {
+    timelineSeekRafId = null;
+    if (!pendingTimelineSeekEvent) {
+      return;
+    }
+    const event = pendingTimelineSeekEvent;
+    pendingTimelineSeekEvent = null;
+    seekTo(renderer.timeFromTimelineEvent(event));
+  };
+
+  const queueTimelineSeek = (event) => {
+    pendingTimelineSeekEvent = event;
+    if (timelineSeekRafId === null) {
+      timelineSeekRafId = requestAnimationFrame(flushTimelineSeek);
+    }
+  };
+
+  const cancelQueuedTimelineSeek = () => {
+    if (timelineSeekRafId !== null) {
+      cancelAnimationFrame(timelineSeekRafId);
+      timelineSeekRafId = null;
+    }
+    pendingTimelineSeekEvent = null;
+  };
+
   timelineCanvas.addEventListener('mousedown', (event) => {
     lastTimelinePointerEvent = event;
     lastPointerPosition = {
@@ -469,6 +499,7 @@ const bindPopupUiEvents = ({
     if (event.ctrlKey && !isCtrlTimelineZoomActive) {
       setCtrlTimelineZoomActive(true);
     }
+    cancelQueuedTimelineSeek();
     seekTo(renderer.timeFromTimelineEvent(event));
 
     const onMove = (moveEvent) => {
@@ -477,12 +508,18 @@ const bindPopupUiEvents = ({
         clientX: moveEvent.clientX,
         clientY: moveEvent.clientY,
       };
-      seekTo(renderer.timeFromTimelineEvent(moveEvent));
+      queueTimelineSeek({ clientX: moveEvent.clientX, clientY: moveEvent.clientY });
     };
 
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      // Release lands on the last position the pointer was at, not on whichever
+      // sample the last frame happened to catch.
+      if (timelineSeekRafId !== null) {
+        cancelAnimationFrame(timelineSeekRafId);
+      }
+      flushTimelineSeek();
     };
 
     window.addEventListener('mousemove', onMove);

@@ -89,6 +89,18 @@ const getSliderEdgeSound = (object, index) => {
   return Number.isFinite(value) ? value : (Number(object?.hitSound) || 0);
 };
 
+// A node's own sample banks have to travel with it. Converted objects lose the
+// per-node arrays -- they are single sounds now, not sliders -- so a node that
+// named its own bank would otherwise fall back to the slider's.
+const getSliderEdgeSampleSets = (object, index) => {
+  const nodeSamples = Array.isArray(object?.nodeSamples) ? object.nodeSamples : [];
+  const node = nodeSamples[index];
+  return {
+    sampleSet: Number.isFinite(node?.normalSet) ? node.normalSet : (Number(object?.sampleSet) || 0),
+    additionSet: Number.isFinite(node?.additionSet) ? node.additionSet : (Number(object?.additionSet) || 0),
+  };
+};
+
 const getSliderDistance = (object) => {
   if (Number.isFinite(object?.length) && object.length > 0) {
     return object.length;
@@ -379,6 +391,7 @@ const convertToTaiko = (mapData) => {
             taikoType: 'hit',
             taikoStrong: hasSample(source, 'finish'),
             hitSound: getSliderEdgeSound(source, edgeIndex),
+            ...getSliderEdgeSampleSets(source, edgeIndex),
             newCombo: edgeIndex === 0 && Boolean(source.newCombo),
             comboSkip: edgeIndex === 0 ? source.comboSkip : 0,
           }));
@@ -393,6 +406,7 @@ const convertToTaiko = (mapData) => {
           taikoTickSpacing: tickSpacing,
           taikoRequiredHits: Math.max(1, Math.ceil(conversionDuration / Math.max(1, tickSpacing))),
           hitSound: getSliderEdgeSound(source, 0),
+          ...getSliderEdgeSampleSets(source, 0),
         }));
       }
       continue;

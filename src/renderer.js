@@ -179,6 +179,15 @@ const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   return points;
 };
 
+// A slider's `slides` counts spans, not repeats: one span is head-to-tail, and
+// each extra one is a reverse. Nearly everything that draws or times a slider
+// needs the same three numbers off the back of that.
+const getSliderSpanTiming = (object) => {
+  const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
+  const slides = Math.max(1, object.slides || 1);
+  return { totalDuration, slides, spanDuration: totalDuration / slides };
+};
+
 const getSliderBallPositionOsu = (object, currentTime) => {
   const path = buildSliderPathPointsOsu(object);
 
@@ -187,9 +196,7 @@ const getSliderBallPositionOsu = (object, currentTime) => {
     return { x: object.x + offset.x, y: object.y + offset.y };
   }
 
-  const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
-  const slides = Math.max(1, object.slides || 1);
-  const spanDuration = totalDuration / slides;
+  const { totalDuration, slides, spanDuration } = getSliderSpanTiming(object);
   const elapsed = clamp(currentTime - object.time, 0, totalDuration);
 
   let spanIndex = Math.min(slides - 1, Math.floor(elapsed / spanDuration));
@@ -398,7 +405,13 @@ const assignComboIndices = (objects, mode = 0) => {
       const comboOffset = object.newCombo && !isComboBarrier
         ? Math.max(0, Number(object.comboSkip) || 0)
         : 0;
-      comboIndexWithOffsets += 1 + comboOffset;
+      if (comboIndexWithOffsets === 0) {
+        comboIndexWithOffsets = object.newCombo && !isComboBarrier
+          ? 2 + comboOffset
+          : 1;
+      } else {
+        comboIndexWithOffsets += 1 + comboOffset;
+      }
       comboNumber = 1;
     } else if (i > 0) {
       comboNumber += 1;
@@ -1299,9 +1312,7 @@ export class PreviewRenderer {
       return cachedTicks.ticks;
     }
 
-    const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
-    const slides = Math.max(1, object.slides || 1);
-    const spanDuration = totalDuration / slides;
+    const { slides, spanDuration } = getSliderSpanTiming(object);
     const pathLength = Number.isFinite(object.length) && object.length > 0 ? object.length : 0;
     const ticks = [];
     const cacheTicks = () => {
@@ -1377,9 +1388,7 @@ export class PreviewRenderer {
 
   buildCatchSliderRenderObjects(object) {
     const renderObjects = [];
-    const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
-    const slides = Math.max(1, object.slides || 1);
-    const spanDuration = totalDuration / slides;
+    const { slides, spanDuration } = getSliderSpanTiming(object);
     const beatLength = this.getCatchTimingState(object.time).beatLength;
     const sliderTickRate = Number.isFinite(this.mapData?.sliderTickRate) && this.mapData.sliderTickRate > 0
       ? this.mapData.sliderTickRate
@@ -1393,7 +1402,7 @@ export class PreviewRenderer {
         time,
         x: position.x,
         type,
-        comboIndexWithOffsets: getComboColourIndex(object),
+        comboIndexWithOffsets: object?.comboIndexWithOffsets,
       });
     };
 
@@ -1425,7 +1434,7 @@ export class PreviewRenderer {
             time: tinyTime,
             x: position.x,
             type: 'tinyDroplet',
-            comboIndexWithOffsets: getComboColourIndex(object),
+            comboIndexWithOffsets: object?.comboIndexWithOffsets,
           });
         }
       }
@@ -1449,7 +1458,7 @@ export class PreviewRenderer {
         time,
         x,
         type: 'banana',
-        comboIndexWithOffsets: getComboColourIndex(object),
+        comboIndexWithOffsets: object?.comboIndexWithOffsets,
       });
     }
 
@@ -1484,7 +1493,7 @@ export class PreviewRenderer {
           time: object.time,
           x: object.x,
           type: 'fruit',
-          comboIndexWithOffsets: getComboColourIndex(object),
+          comboIndexWithOffsets: object?.comboIndexWithOffsets,
         });
       }
     }
@@ -2508,9 +2517,9 @@ export class PreviewRenderer {
             sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * snakeProgress);
           }
         } else if (this.standardSliderSnakeOut && this.currentTimeMs > object.time) {
-          const sliderDuration = Math.max(1, object.endTime - object.time);
-          const slides = Math.max(1, object.slides || 1);
-          const spanDuration = sliderDuration / slides;
+          const {
+            totalDuration: sliderDuration, slides, spanDuration,
+          } = getSliderSpanTiming(object);
           const elapsed = clamp(this.currentTimeMs - object.time, 0, sliderDuration);
           const spanIndex = Math.min(slides - 1, Math.floor(elapsed / Math.max(1, spanDuration)));
 
@@ -2603,9 +2612,7 @@ export class PreviewRenderer {
               y: pathPoints[Math.max(0, pathPoints.length - 2)].y - endPoint.y,
             };
             const indicatorSize = Math.max(5, drawnCircleRadius * 0.45);
-            const slides = object.slides || 1;
-            const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
-            const spanDuration = totalDuration / slides;
+            const { slides, spanDuration } = getSliderSpanTiming(object);
             // Generate a reverse indicator for each span boundary.
             // Reverse at end of span i occurs at object.time + (i+1) * spanDuration.
             // Even span index → reverse at path end; odd → at path start.

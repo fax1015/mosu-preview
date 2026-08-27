@@ -45,6 +45,73 @@ test('assigns 1-based combo indices and separate offset colour indices', () => {
   assert.deepEqual(objects.map((object) => object.comboNumber), [1, 2, 1, 2]);
 });
 
+test('correctly handles colorhaxed first hitobject with newCombo and comboSkip', () => {
+  const palette = [
+    { r: 255, g: 0, b: 0 },   // Combo 1
+    { r: 0, g: 255, b: 0 },   // Combo 2
+    { r: 0, g: 0, b: 255 },   // Combo 3
+    { r: 255, g: 255, b: 0 }, // Combo 4
+  ];
+
+  // First object marked newCombo + comboSkip 0 -> starts on Combo 2
+  const toCombo2 = [{ kind: 'circle', newCombo: true, comboSkip: 0 }];
+  assignComboIndices(toCombo2, 0);
+  assert.equal(toCombo2[0].comboIndexWithOffsets, 2);
+  assert.deepEqual(getComboColour(palette, toCombo2[0]), palette[1]);
+
+  // First object marked newCombo + comboSkip 1 -> starts on Combo 3
+  const toCombo3 = [{ kind: 'circle', newCombo: true, comboSkip: 1 }];
+  assignComboIndices(toCombo3, 0);
+  assert.equal(toCombo3[0].comboIndexWithOffsets, 3);
+  assert.deepEqual(getComboColour(palette, toCombo3[0]), palette[2]);
+
+  // First object marked newCombo + comboSkip 2 -> starts on Combo 4
+  const toCombo4 = [{ kind: 'circle', newCombo: true, comboSkip: 2 }];
+  assignComboIndices(toCombo4, 0);
+  assert.equal(toCombo4[0].comboIndexWithOffsets, 4);
+  assert.deepEqual(getComboColour(palette, toCombo4[0]), palette[3]);
+
+  // First object marked newCombo + comboSkip 3 (Mapping Tools export for Combo 1) -> starts on Combo 1
+  const toCombo1 = [{ kind: 'circle', newCombo: true, comboSkip: 3 }];
+  assignComboIndices(toCombo1, 0);
+  assert.equal(toCombo1[0].comboIndexWithOffsets, 5);
+  assert.deepEqual(getComboColour(palette, toCombo1[0]), palette[0]);
+});
+
+test('correctly renders colorhax sequences with manual combo color overrides', () => {
+  const palette = [
+    { r: 255, g: 0, b: 0 },   // Combo 1
+    { r: 0, g: 255, b: 0 },   // Combo 2
+    { r: 0, g: 0, b: 255 },   // Combo 3
+    { r: 255, g: 255, b: 0 }, // Combo 4
+  ];
+
+  // Sequence:
+  // Note 1: Combo 1 (normal start)
+  // Note 2: New combo, overridden to Combo 3 (skip 1)
+  // Note 3: New combo, overridden to stay on Combo 3 (skip 3)
+  // Note 4: New combo, overridden to Combo 2 (skip 2)
+  // Note 5: Same combo as note 4 (Combo 2)
+  const objects = [
+    { kind: 'circle', newCombo: false, comboSkip: 0 },
+    { kind: 'circle', newCombo: true, comboSkip: 1 },
+    { kind: 'circle', newCombo: true, comboSkip: 3 },
+    { kind: 'circle', newCombo: true, comboSkip: 2 },
+    { kind: 'circle', newCombo: false, comboSkip: 0 },
+  ];
+
+  assignComboIndices(objects, 0);
+
+  const colors = objects.map((obj) => getComboColour(palette, obj));
+  assert.deepEqual(colors, [
+    palette[0], // Combo 1
+    palette[2], // Combo 3
+    palette[2], // Combo 3
+    palette[1], // Combo 2
+    palette[1], // Combo 2
+  ]);
+});
+
 test('matches lazer stacking for chains, slider tails, and stack timing', () => {
   const chain = [
     { kind: 'circle', x: 100, y: 100, time: 1000, endTime: 1000 },

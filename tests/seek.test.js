@@ -20,11 +20,20 @@ const createPreviewAudio = () => ({
   duration: PREVIEW_CLIP_SEC,
   currentTime: 0,
   paused: false,
+  playbackRate: 1,
   src: 'https://b.ppy.sh/preview/970063.mp3',
   pause() {
     this.paused = true;
   },
+  play() {
+    this.paused = false;
+    return Promise.resolve();
+  },
 });
+
+// Seeks settle asynchronously now: the controller waits for the element before
+// it hands the clock back to the audio.
+const flushAsync = () => new Promise((resolve) => { setTimeout(resolve, 0); });
 
 test('map times outside the audio are reported as uncovered', () => {
   const before = resolveAudioSeekTarget(5 * 60_000, PREVIEW_TIME_MS, PREVIEW_CLIP_SEC);
@@ -83,7 +92,10 @@ const createScrubHarness = () => {
   const state = {
     audio,
     audioAnchorMapMs: PREVIEW_TIME_MS,
+    audioAnchorSrc: audio.src,
     audioSyncEnabled: true,
+    audioOpToken: 0,
+    pendingSeekMapMs: null,
     currentTimeMs: PREVIEW_TIME_MS,
     durationMs: 62 * 60_000,
     mapData: { objects: [] },
@@ -93,23 +105,24 @@ const createScrubHarness = () => {
     playStartMapMs: PREVIEW_TIME_MS,
     playStartPerfMs: 0,
     rafId: null,
-    lastAudioVisualSyncPerfMs: 0,
   };
-  const timing = createTimingController({ state, clamp, thresholdMs: 90 });
+  const timing = createTimingController({ state, clamp });
   const controller = createPlaybackController({
     state,
-    config: { audioVisualSyncIntervalMs: 240 },
     helpers: {
       ...timing,
       ensureTimelineDurationAnimation: () => {},
       renderFrame: () => {},
+      waitForAudioSeek: async () => true,
+      requestFrame: () => 1,
+      cancelFrame: () => {},
     },
   });
 
   return { audio, state, controller };
 };
 
-test('scrubbing a marathon on preview audio does not snap back to the clip', () => {
+test('scrubbing a marathon on preview audio does not snap back to the clip', async () => {
   const { audio, state, controller } = createScrubHarness();
 
   for (const targetMs of [0, 5 * 60_000, 25 * 60_000, 45 * 60_000, 61 * 60_000]) {
@@ -117,16 +130,21 @@ test('scrubbing a marathon on preview audio does not snap back to the clip', () 
     state.playbackMode = 'audio';
     audio.paused = false;
     controller.seekTo(targetMs);
+    // Uncovered targets are settled synchronously: there is no seek to wait for.
     assert.equal(state.currentTimeMs, targetMs, `scrub to ${targetMs}ms should hold`);
     assert.equal(state.playbackMode, 'manual');
   }
 
-  // Inside the clip the audio stays in charge.
+  // Inside the clip the audio takes the clock back once the element settles.
   state.playbackMode = 'audio';
   audio.paused = false;
   controller.seekTo(PREVIEW_TIME_MS + 3000);
+  assert.equal(state.playbackMode, 'seeking');
+  assert.equal(audio.paused, true, 'audio stays paused while the seek is pending');
+  await flushAsync();
   assert.equal(state.currentTimeMs, PREVIEW_TIME_MS + 3000);
   assert.equal(state.playbackMode, 'audio');
+  assert.equal(audio.paused, false);
 });
 
 test('a scrub out of range while paused leaves no clock running', () => {

@@ -6,9 +6,12 @@ import {
   MIN_DETACHED_WIDTH,
   buildBeatmapSourceUrl,
   buildDetachedPageUrl,
+  hasDetachedPosition,
+  isBoundsRejection,
   normalizeDetachedBounds,
   normalizeResumeTimeMs,
   readDetachedParams,
+  withoutDetachedPosition,
 } from '../src/core/detachedWindow.js';
 import { extractBeatmapInfoFromUrl } from '../src/core/beatmapUrl.js';
 
@@ -106,4 +109,42 @@ test('junk and out-of-range timestamps are rejected', () => {
 test('the paused flag is not emitted without a timestamp to pair it with', () => {
   const pageUrl = buildDetachedPageUrl({ beatmapId: '123', resumePaused: true });
   assert.equal(pageUrl.includes('paused'), false);
+});
+
+test('the position the browser refuses is recognised, whatever else fails', () => {
+  // Chrome's wording, which is all the extension gets back.
+  assert.equal(
+    isBoundsRejection(new Error('Invalid value for bounds. Bounds must be at least '
+      + '50% within visible screen space.')),
+    true,
+  );
+  assert.equal(isBoundsRejection({ message: 'Invalid bounds' }), true);
+  // Anything else has to keep propagating rather than being retried blindly.
+  assert.equal(isBoundsRejection(new Error('Windows API is unavailable.')), false);
+  assert.equal(isBoundsRejection(new Error('No tab')), false);
+  assert.equal(isBoundsRejection(undefined), false);
+});
+
+test('falling back keeps the size and drops only the position', () => {
+  const stored = {
+    width: 640, height: 720, left: 3200, top: -1800,
+  };
+  assert.equal(hasDetachedPosition(stored), true);
+  assert.deepEqual(withoutDetachedPosition(stored), { width: 640, height: 720 });
+
+  // Size-only geometry is already the fallback shape, so retrying is pointless.
+  const sizeOnly = { width: 640, height: 720 };
+  assert.equal(hasDetachedPosition(sizeOnly), false);
+  assert.deepEqual(withoutDetachedPosition(sizeOnly), sizeOnly);
+});
+
+test('a position on an unplugged monitor survives normalisation, which is why the retry exists', () => {
+  // The normaliser clamps to +/-4096, which is not a screen. A remembered
+  // position from a monitor that is no longer attached passes straight through
+  // and is only caught when the browser refuses it.
+  const farRight = normalizeDetachedBounds({
+    width: 640, height: 720, left: 3840, top: 0,
+  });
+  assert.equal(farRight.left, 3840, 'normalisation cannot know this is off-screen');
+  assert.equal(hasDetachedPosition(farRight), true);
 });

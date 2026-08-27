@@ -7,6 +7,9 @@
 const createTimingController = ({
   state,
   clamp,
+  getOutputLatencySec = null,
+  getAttachedLatencySec = null,
+  isMediaElementAttached = null,
 }) => {
   const getCurrentManualMapTime = (nowPerfMs) => (
     state.playStartMapMs + ((nowPerfMs - state.playStartPerfMs) * state.playbackSpeed)
@@ -20,9 +23,33 @@ const createTimingController = ({
     }
   };
 
-  const getAudioMappedTimeMs = () => (
-    state.audioAnchorMapMs + ((state.audio?.currentTime || 0) * 1000)
-  );
+  const getAudioMappedTimeMs = () => {
+    const rawMs = state.audioAnchorMapMs + ((state.audio?.currentTime || 0) * 1000);
+    // When music is routed through the shared WebAudio graph, its audible output lags
+    // `currentTime` by `outputLatency`. Visuals and hitsounds must lag by the same amount
+    // or the preview appears ahead of the music. Scale by playbackSpeed because the map
+    // timeline moves speed× wall time. Live reading is used (not snapshot) so the correct
+    // latency is picked up once the context is running; BACKWARD_SEEK_TOLERANCE is widened
+    // to absorb the one-time backward jump without double-scheduling hitsounds.
+    try {
+      if (typeof isMediaElementAttached === 'function' && isMediaElementAttached()) {
+        const latencySec = Number(getOutputLatencySec?.());
+        if (Number.isFinite(latencySec) && latencySec > 0 && latencySec < 1) {
+          const speed = Number.isFinite(state.playbackSpeed) && state.playbackSpeed > 0 ? state.playbackSpeed : 1;
+          return rawMs - (latencySec * 1000 * speed);
+        }
+        // Fallback to snapshot if live not yet known but attach already happened.
+        if (typeof getAttachedLatencySec === 'function') {
+          const snap = Number(getAttachedLatencySec?.());
+          if (Number.isFinite(snap) && snap > 0 && snap < 1) {
+            const speed = Number.isFinite(state.playbackSpeed) && state.playbackSpeed > 0 ? state.playbackSpeed : 1;
+            return rawMs - (snap * 1000 * speed);
+          }
+        }
+      }
+    } catch {}
+    return rawMs;
+  };
 
   // `audioAnchorMapMs` only describes the source it was set for. While a swap is
   // in flight the element still answers with the old source's position, and

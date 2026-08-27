@@ -1001,7 +1001,21 @@ const writeAudioVolumeSetting = async (volume) => {
 const applyAudioVolume = (volume) => {
   const nextVolume = clamp(Number.isFinite(volume) ? volume : DEFAULT_AUDIO_VOLUME, 0, 1);
   state.volume = nextVolume;
-  state.audio.volume = nextVolume;
+  // When the media element is routed through WebAudio, volume is controlled by a GainNode
+  // so the element itself must stay at 1 to avoid double attenuation (element volume is applied
+  // before MediaElementSource).
+  if (hitsoundPlayer?.isMediaElementAttached?.()) {
+    try {
+      state.audio.volume = 1;
+    } catch {}
+    hitsoundPlayer.setMusicVolume(nextVolume);
+  } else {
+    state.audio.volume = nextVolume;
+    // Keep the WebAudio gain in sync for when an attach later succeeds.
+    try {
+      hitsoundPlayer?.setMusicVolume?.(nextVolume);
+    } catch {}
+  }
 
   if (volumeSlider) {
     volumeSlider.value = String(Math.round(nextVolume * 100));
@@ -1023,6 +1037,10 @@ const applyPopupSize = (popupSize) => {
   document.documentElement.style.setProperty('--popup-content-width-mobile', `${preset.mobileContentWidth}px`);
 };
 
+// Called after WebAudio routing changes mid-play to rebase clocks without a jump that
+// would look like a backward seek. Set after timingController is created.
+let handleHitsoundRoutingRebase = () => {};
+
 const applyPreviewSettings = (settings = {}) => {
   const normalized = normalizePreviewSettings(settings);
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
@@ -1039,6 +1057,23 @@ const applyPreviewSettings = (settings = {}) => {
   state.hitsoundVolume = normalized.hitsoundVolume;
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
+  // Keep music routed through WebAudio only while hitsounds need it. Default off (experimental)
+  // avoids the extra outputLatency delay for the common case.
+  try {
+    const wasAttached = hitsoundPlayer.isMediaElementAttached?.() || false;
+    if (normalized.hitsounds) {
+      hitsoundPlayer.setMusicVolume(state.volume);
+      hitsoundPlayer.attachMediaElement(state.audio);
+    } else {
+      hitsoundPlayer.detachMediaElement();
+      // Restore element volume control when not using WebAudio gain.
+      try { state.audio.volume = clamp(state.volume, 0, 1); } catch {}
+    }
+    const nowAttached = hitsoundPlayer.isMediaElementAttached?.() || false;
+    if (wasAttached !== nowAttached) {
+      try { handleHitsoundRoutingRebase(); } catch {}
+    }
+  } catch {}
   applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
@@ -1104,9 +1139,28 @@ const setPlaybackSpeedControlEnabled = (enabled) => {
   syncPlaybackSpeedControls();
 };
 
+const hitsoundPlayer = createHitsoundPlayer({ onLog: addDebugLog });
+// Only route music through WebAudio when hitsounds are enabled — otherwise the shared
+// outputLatency adds an audible delay with no benefit (hitsounds off by default).
+try {
+  hitsoundPlayer.setMusicVolume(state.volume);
+  if (state.hitsounds) {
+    hitsoundPlayer.attachMediaElement(state.audio);
+  }
+} catch {}
+
 const timingController = createTimingController({
   state,
   clamp,
+  getOutputLatencySec: () => {
+    try { return hitsoundPlayer.getOutputLatencySec?.() || 0; } catch { return 0; }
+  },
+  getAttachedLatencySec: () => {
+    try { return hitsoundPlayer.getAttachedLatencySec?.() || 0; } catch { return 0; }
+  },
+  isMediaElementAttached: () => {
+    try { return hitsoundPlayer.isMediaElementAttached?.() || false; } catch { return false; }
+  },
 });
 const {
   getCurrentManualMapTime,
@@ -1116,7 +1170,25 @@ const {
   applyPlaybackRate,
 } = timingController;
 
-const hitsoundPlayer = createHitsoundPlayer({ onLog: addDebugLog });
+handleHitsoundRoutingRebase = () => {
+  // No explicit rebase — live latency compensation in getAudioMappedTimeMs() handles offset
+  // per-frame. Explicit syncTo() here would cancel and reschedule the same horizon hits
+  // causing a 5ms overlap that sounds doubled. BACKWARD_SEEK_TOLERANCE (60ms) absorbs the
+  // one-time latency jump without duplicate scheduling.
+};
+// Ensure a suspended AudioContext (autoplay policy) resumes on the same user gesture that
+// starts the media element. Patching play keeps every caller (playback controller, hotswap)
+// in sync without threading a helper through all layers.
+try {
+  const originalAudioPlay = state.audio.play.bind(state.audio);
+  state.audio.play = (...args) => {
+    try {
+      hitsoundPlayer.ensureContext?.();
+      hitsoundPlayer.resumeContext?.();
+    } catch {}
+    return originalAudioPlay(...args);
+  };
+} catch {}
 
 // Every jump in the clock -- a scrub, a restart, an audio resync -- funnels
 // through here, so it is the one place the hitsound cursor has to catch up.
@@ -1343,9 +1415,25 @@ const setAudioElementSource = (sourceUrl, anchorMapMs) => {
   }
 
   if (state.audio.src !== sourceUrl) {
+    try {
+      state.audio.crossOrigin = 'anonymous';
+    } catch {}
     state.audio.src = sourceUrl;
     state.audio.load();
     state.audio.playbackRate = state.playbackSpeed;
+    // Ensure routing is still in place after src change when hitsounds are on.
+    try {
+      if (state.hitsounds) {
+        if (!hitsoundPlayer.isMediaElementAttached()) {
+          hitsoundPlayer.attachMediaElement(state.audio);
+          hitsoundPlayer.setMusicVolume(state.volume);
+        } else {
+          hitsoundPlayer.resumeContext?.();
+        }
+      } else {
+        hitsoundPlayer.resumeContext?.();
+      }
+    } catch {}
     syncPlaybackDuration();
     return true;
   }

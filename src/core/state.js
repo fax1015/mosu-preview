@@ -88,6 +88,9 @@ const createInitialState = ({ audio = null } = {}) => {
 
 const state = createInitialState();
 state.audio.preload = 'auto';
+try {
+  state.audio.crossOrigin = 'anonymous';
+} catch {}
 
 const setPlaybackState = (patch = {}) => {
   if (Object.hasOwn(patch, 'isPlaying')) state.isPlaying = Boolean(patch.isPlaying);

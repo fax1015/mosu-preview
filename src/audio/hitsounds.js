@@ -33,9 +33,10 @@ const SCHEDULE_LOOKAHEAD_SEC = 0.35;
 const MAX_CATCHUP_MS = 180;
 
 // The playhead never really runs backwards during playback, but the media clock
-// can report a fraction of a millisecond of jitter across a frame. Resyncing on
-// that would cancel scheduled voices for no reason.
-const BACKWARD_SEEK_TOLERANCE_MS = 2;
+// can report a fraction of a millisecond of jitter across a frame, and the WebAudio
+// routing adds a one-time ~20-50ms backward jump when latency compensation kicks in.
+// Resyncing on that would cancel and reschedule the same voices, sounding doubled.
+const BACKWARD_SEEK_TOLERANCE_MS = 60;
 
 // Silencing a bus outright clicks; over 5ms it reads as an instant stop.
 const VOICE_BUS_FADE_SEC = 0.005;
@@ -543,6 +544,11 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
   let cursor = 0;
   let lastTimeMs = 0;
   let hasLoggedLatency = false;
+  let musicSource = null;
+  let musicGain = null;
+  let attachedMediaElement = null;
+  let musicVolume = 0.8;
+  let attachedLatencySec = 0;
 
   const ensureContext = () => {
     if (audioContext) {
@@ -907,7 +913,130 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
     }
   };
 
+  const setMusicVolume = (nextVolume) => {
+    const numeric = Number(nextVolume);
+    musicVolume = Number.isFinite(numeric) ? Math.min(1, Math.max(0, numeric)) : 0;
+    if (musicGain) {
+      const now = audioContext ? audioContext.currentTime : 0;
+      try {
+        musicGain.gain.setValueAtTime(musicVolume, now);
+      } catch {
+        musicGain.gain.value = musicVolume;
+      }
+    }
+  };
+
+  const ensureMusicGain = () => {
+    if (musicGain || !audioContext) {
+      return musicGain;
+    }
+    try {
+      musicGain = audioContext.createGain();
+      musicGain.gain.value = musicVolume;
+      musicGain.connect(audioContext.destination);
+    } catch {
+      musicGain = null;
+    }
+    return musicGain;
+  };
+
+  const attachMediaElement = (audioElement) => {
+    if (!audioElement || attachedMediaElement === audioElement) {
+      return Boolean(musicSource);
+    }
+    // Ensure we have a context to attach to — reuse the same context hitsounds use so both
+    // share outputLatency.
+    if (!ensureContext() && !audioContext) {
+      onLog?.('webaudio: could not create AudioContext for media element');
+      return false;
+    }
+    // One MediaElementSource per element for the lifetime of the context; creating a second
+    // throws. Detach previous if element changed.
+    if (musicSource && attachedMediaElement) {
+      try {
+        musicSource.disconnect();
+      } catch {}
+      musicSource = null;
+      attachedMediaElement = null;
+    }
+    const gain = ensureMusicGain();
+    if (!gain) {
+      return false;
+    }
+    try {
+      // Must be set before src assignment to take effect for CORS; if src already set, it still
+      // helps for the next load. Failures are caught below.
+      if (audioElement.crossOrigin !== 'anonymous') {
+        audioElement.crossOrigin = 'anonymous';
+      }
+    } catch {}
+    try {
+      musicSource = audioContext.createMediaElementSource(audioElement);
+      musicSource.connect(gain);
+      attachedMediaElement = audioElement;
+      // Snapshot latency at attach — reading it live each frame would jitter the visual clock.
+      try {
+        attachedLatencySec = getOutputLatencySec();
+      } catch {
+        attachedLatencySec = 0;
+      }
+      // Keep HTMLMediaElement volume at 1 so WebAudio gain is the single control; otherwise
+      // the level is doubled/attenuated twice.
+      try {
+        audioElement.volume = 1;
+      } catch {}
+      gain.gain.value = musicVolume;
+      onLog?.(`webaudio: media element attached (shared context, ${Math.round(audioContext.sampleRate)}Hz, latency ${(attachedLatencySec*1000).toFixed(1)}ms)`);
+      return true;
+    } catch (error) {
+      // CORS or already-attached error — fall back to plain HTMLMediaElement path.
+      onLog?.(`webaudio: media element attach failed (${error?.message || error}), falling back to element audio`);
+      try {
+        musicSource?.disconnect?.();
+      } catch {}
+      musicSource = null;
+      attachedMediaElement = null;
+      return false;
+    }
+  };
+
+  const detachMediaElement = () => {
+    if (musicSource) {
+      try {
+        musicSource.disconnect();
+      } catch {}
+    }
+    musicSource = null;
+    attachedMediaElement = null;
+    attachedLatencySec = 0;
+  };
+
+  const getAudioContextInstance = () => audioContext;
+
+  const isMediaElementAttached = () => Boolean(musicSource && attachedMediaElement);
+
+  // Latency snapshot at attach time — keeps visual clock stable. Reading live outputLatency each
+  // frame would make getAudioMappedTimeMs jitter and trigger false backward-seek resets in update().
+  const getAttachedLatencySec = () => attachedLatencySec;
+
+  // Exposed so the visual clock can be delayed by the same amount the WebAudio graph adds
+  // to the music when it is routed through the shared context. Keeps preview/hitsounds/music in sync.
+  const getOutputLatencySecExposed = () => getOutputLatencySec();
+
+  const resumeContext = () => {
+    if (audioContext?.state === 'suspended') {
+      void audioContext.resume().catch(() => {});
+    }
+  };
+
   const dispose = () => {
+    detachMediaElement();
+    if (musicGain) {
+      try {
+        musicGain.disconnect();
+      } catch {}
+    }
+    musicGain = null;
     if (audioContext) {
       void audioContext.close().catch(() => {});
     }
@@ -920,7 +1049,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
   };
 
   return {
-    setEnabled, setVolume, syncTo, update, dispose,
+    setEnabled, setVolume, setMusicVolume, attachMediaElement, detachMediaElement, getAudioContext: getAudioContextInstance, isMediaElementAttached, getOutputLatencySec: getOutputLatencySecExposed, getAttachedLatencySec, resumeContext, ensureContext, syncTo, update, dispose,
   };
 };
 

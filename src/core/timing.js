@@ -23,6 +23,28 @@ const createTimingController = ({
     }
   };
 
+  const getAudioOutputLatencyMapMs = () => {
+    try {
+      if (typeof isMediaElementAttached !== 'function' || !isMediaElementAttached()) {
+        return 0;
+      }
+      const liveLatency = Number(getOutputLatencySec?.());
+      const snapshotLatency = Number(getAttachedLatencySec?.());
+      const latencySec = Number.isFinite(liveLatency) && liveLatency > 0 && liveLatency < 1
+        ? liveLatency
+        : snapshotLatency;
+      if (!Number.isFinite(latencySec) || latencySec <= 0 || latencySec >= 1) {
+        return 0;
+      }
+      const speed = Number.isFinite(state.playbackSpeed) && state.playbackSpeed > 0
+        ? state.playbackSpeed
+        : 1;
+      return latencySec * 1000 * speed;
+    } catch {
+      return 0;
+    }
+  };
+
   const getAudioMappedTimeMs = () => {
     const rawMs = state.audioAnchorMapMs + ((state.audio?.currentTime || 0) * 1000);
     // When music is routed through the shared WebAudio graph, its audible output lags
@@ -31,24 +53,7 @@ const createTimingController = ({
     // timeline moves speed× wall time. Live reading is used (not snapshot) so the correct
     // latency is picked up once the context is running; BACKWARD_SEEK_TOLERANCE is widened
     // to absorb the one-time backward jump without double-scheduling hitsounds.
-    try {
-      if (typeof isMediaElementAttached === 'function' && isMediaElementAttached()) {
-        const latencySec = Number(getOutputLatencySec?.());
-        if (Number.isFinite(latencySec) && latencySec > 0 && latencySec < 1) {
-          const speed = Number.isFinite(state.playbackSpeed) && state.playbackSpeed > 0 ? state.playbackSpeed : 1;
-          return rawMs - (latencySec * 1000 * speed);
-        }
-        // Fallback to snapshot if live not yet known but attach already happened.
-        if (typeof getAttachedLatencySec === 'function') {
-          const snap = Number(getAttachedLatencySec?.());
-          if (Number.isFinite(snap) && snap > 0 && snap < 1) {
-            const speed = Number.isFinite(state.playbackSpeed) && state.playbackSpeed > 0 ? state.playbackSpeed : 1;
-            return rawMs - (snap * 1000 * speed);
-          }
-        }
-      }
-    } catch {}
-    return rawMs;
+    return rawMs - getAudioOutputLatencyMapMs();
   };
 
   // `audioAnchorMapMs` only describes the source it was set for. While a swap is
@@ -97,6 +102,7 @@ const createTimingController = ({
   return {
     getCurrentManualMapTime,
     syncVisualClockToMapTime,
+    getAudioOutputLatencyMapMs,
     getAudioMappedTimeMs,
     isAudioClockAuthoritative,
     getEffectiveMapTimeMs,

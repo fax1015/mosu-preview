@@ -1166,6 +1166,7 @@ const {
   getCurrentManualMapTime,
   syncVisualClockToMapTime: syncVisualClockToMapTimeRaw,
   getAudioMappedTimeMs,
+  getAudioOutputLatencyMapMs,
   isAudioClockAuthoritative,
   applyPlaybackRate,
 } = timingController;
@@ -1183,8 +1184,10 @@ try {
   const originalAudioPlay = state.audio.play.bind(state.audio);
   state.audio.play = (...args) => {
     try {
-      hitsoundPlayer.ensureContext?.();
-      hitsoundPlayer.resumeContext?.();
+      if (state.hitsounds) {
+        hitsoundPlayer.ensureContext?.();
+        hitsoundPlayer.resumeContext?.();
+      }
     } catch {}
     return originalAudioPlay(...args);
   };
@@ -1361,15 +1364,46 @@ const waitForAudioElementReady = (
   audioElement.addEventListener('error', onError);
 });
 
-const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise((resolve) => {
-  if (!audioElement?.src || audioElement.seeking === false) {
+const AUDIO_SEEK_SETTLE_TOLERANCE_SEC = 0.15;
+
+const waitForAudioElementSeek = (audioElement, options = {}) => new Promise((resolve) => {
+  const normalizedOptions = typeof options === 'number' ? { timeoutMs: options } : (options || {});
+  const {
+    expectedTimeSec = null,
+    timeoutMs = 2500,
+  } = normalizedOptions;
+  const getExpectedTimeSec = () => {
+    try {
+      return typeof expectedTimeSec === 'function' ? expectedTimeSec() : expectedTimeSec;
+    } catch {
+      return Number.NaN;
+    }
+  };
+  const isAtExpectedTime = () => {
+    const expected = getExpectedTimeSec();
+    return (
+      !Number.isFinite(expected)
+      || Math.abs(Number(audioElement?.currentTime) - expected) <= AUDIO_SEEK_SETTLE_TOLERANCE_SEC
+    );
+  };
+  const hasSettledAtExpectedTime = () => (
+    audioElement?.seeking === false && isAtExpectedTime()
+  );
+
+  // `currentTime = ...` can queue the media seek before the element flips its
+  // `seeking` flag. Treating that brief gap as completion let a one-shot click
+  // adopt the old audio position; a drag usually issued another seek in time to
+  // hide the race. With a target, only accept an idle element at that position.
+  if (!audioElement?.src || hasSettledAtExpectedTime()) {
     resolve(true);
     return;
   }
 
   const onSeeked = () => {
-    cleanup();
-    resolve(true);
+    if (hasSettledAtExpectedTime()) {
+      cleanup();
+      resolve(true);
+    }
   };
 
   const onError = () => {
@@ -1389,8 +1423,10 @@ const waitForAudioElementSeek = (audioElement, timeoutMs = 2500) => new Promise(
   };
 
   const timer = registry.addTimeout(setTimeout(onTimeout, timeoutMs));
-  audioElement.addEventListener('seeked', onSeeked, { once: true });
+  audioElement.addEventListener('seeked', onSeeked);
   audioElement.addEventListener('error', onError, { once: true });
+  // Cover a seek that completed between the initial check and listener setup.
+  onSeeked();
 });
 
 const setAudioElementSource = (sourceUrl, anchorMapMs) => {
@@ -1478,10 +1514,13 @@ const {
     ensureTimelineDurationAnimation,
     getCurrentManualMapTime,
     getAudioMappedTimeMs,
+    getAudioOutputLatencyMapMs,
     isAudioClockAuthoritative,
     syncVisualClockToMapTime,
     renderFrame,
-    waitForAudioSeek: (audioElement) => waitForAudioElementSeek(audioElement),
+    waitForAudioSeek: (audioElement, expectedTimeSec) => waitForAudioElementSeek(audioElement, {
+      expectedTimeSec,
+    }),
   },
 });
 
@@ -1687,7 +1726,12 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
       return false;
     }
 
-    const testSeekSettled = await waitForAudioElementSeek(testAudio);
+    const testSeekTargetSec = Math.max(0, Number.isFinite(testAudio.duration)
+      ? Math.min(preflightMapTimeMs / 1000, testAudio.duration)
+      : preflightMapTimeMs / 1000);
+    const testSeekSettled = await waitForAudioElementSeek(testAudio, {
+      expectedTimeSec: testSeekTargetSec,
+    });
     releaseTestAudio();
     if (!testSeekSettled || jobId !== state.fullAudioJobId) {
       addDebugLog('audio: hotswap failed, preflight seek did not settle');
@@ -1751,7 +1795,7 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     // rather than refuse when the playhead sits in that tail.
     hasSyncedSeek = seekAudioElementToMapTime(
       state.audio,
-      commitMapTimeMs,
+      commitMapTimeMs + getAudioOutputLatencyMapMs(),
       state.audioAnchorMapMs,
       { requireCoverage: false },
     );
@@ -1766,7 +1810,15 @@ const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, 
     return false;
   }
 
-  const seekSettled = await waitForAudioElementSeek(state.audio);
+  const rawSeekTargetSec = (
+    commitMapTimeMs + getAudioOutputLatencyMapMs() - state.audioAnchorMapMs
+  ) / 1000;
+  const seekTargetSec = Math.max(0, Number.isFinite(state.audio.duration)
+    ? Math.min(rawSeekTargetSec, state.audio.duration)
+    : rawSeekTargetSec);
+  const seekSettled = await waitForAudioElementSeek(state.audio, {
+    expectedTimeSec: seekTargetSec,
+  });
   const landedMapMs = getAudioMappedTimeMs();
   if (Math.abs(landedMapMs - commitMapTimeMs) > 1) {
     addDebugLog(

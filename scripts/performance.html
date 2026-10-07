@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>mosu! preview performance test</title>
+  <style>
+    :root { font: 16px/1.45 system-ui, sans-serif; color: #f1f1f3; background: #101114; }
+    body { max-width: 760px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 1.35rem; margin: 0 0 8px; }
+    p { color: #c1c1c8; }
+    button { min-height: 44px; padding: 8px 14px; border: 0; border-radius: 8px; background: #3b9b6a; color: white; font: inherit; font-weight: 650; }
+    button:disabled { opacity: .55; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+    .secondary { background: #393b43; }
+    .canvas-wrap { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 16px 0; }
+    canvas { display: block; width: 100%; height: auto; background: #08080a; border-radius: 6px; }
+    #timeline { height: 42px; }
+    #status { min-height: 1.5em; color: #b8d9c5; }
+    #results { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 8px 6px; border-bottom: 1px solid #34353b; text-align: right; white-space: nowrap; }
+    th:first-child, td:first-child { text-align: left; }
+    .note { font-size: .88rem; }
+    code { color: #c5e5d0; }
+  </style>
+</head>
+<body>
+  <h1>mosu! preview performance test</h1>
+  <p>This runs the real canvas renderer and synthesized hitsounds in this browser. Keep the page foregrounded and use the same device, browser, and power mode for comparisons.</p>
+  <div class="actions">
+    <button id="run">Run 8-second tests</button>
+    <button id="save" class="secondary" disabled>Save result as baseline</button>
+    <button id="clear" class="secondary">Clear baseline</button>
+  </div>
+  <div id="status" role="status">Ready. Audio begins only after you press Run.</div>
+  <div class="canvas-wrap">
+    <canvas id="playfield" width="512" height="384" aria-label="Beatmap playfield"></canvas>
+    <canvas id="timeline" width="512" height="42" aria-label="Beatmap timeline"></canvas>
+  </div>
+  <div id="results"></div>
+  <p class="note">Each pass reports observed FPS, requestAnimationFrame interval percentiles, and synchronous audio plus drawing work per frame. The audio pass also reports its change from the visual-only pass. A saved baseline stays in this browser’s local storage for before/after comparisons.</p>
+  <script type="module" src="./performance-browser.js"></script>
+</body>
+</html>

@@ -769,6 +769,7 @@ export class PreviewRenderer {
     this.durationMs = 0;
     this.currentTimeMs = 0;
     this.timelineDensity = [];
+    this.timelineDensityViewCache = null;
     this.visualTimelineDurationMs = 1;
     this.timelineDurationAnimation = null;
     this.timelineViewStartMs = 0;
@@ -801,6 +802,7 @@ export class PreviewRenderer {
     this.timelineDurationAnimation = null;
     this.resetTimelineZoom({ animate: false });
     this.timelineDensity = buildDensityBins(mapData?.objects || [], this.durationMs);
+    this.timelineDensityViewCache = null;
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours
       : DEFAULT_COLOURS;
@@ -887,6 +889,7 @@ export class PreviewRenderer {
     const previousDurationMs = this.durationMs;
     this.durationMs = nextDurationMs;
     this.timelineDensity = buildDensityBins(this.mapData?.objects || [], this.durationMs);
+    this.timelineDensityViewCache = null;
     if (this.timelineViewDurationMs !== null && this.timelineViewDurationMs >= nextDurationMs) {
       this.resetTimelineZoom({ animate: false });
     } else if (this.timelineViewDurationMs !== null) {
@@ -2901,9 +2904,17 @@ export class PreviewRenderer {
       }
     }
 
-    const density = this.isTimelineZoomed() || this.isTimelineDurationAnimating()
-      ? buildDensityBins(this.mapData?.objects || [], timelineDurationMs, 150, startMs)
-      : (this.timelineDensity || []);
+    const needsViewDensity = this.isTimelineZoomed() || this.isTimelineDurationAnimating();
+    let density = this.timelineDensity || [];
+    if (needsViewDensity) {
+      const cached = this.timelineDensityViewCache;
+      if (cached && cached.startMs === startMs && cached.durationMs === timelineDurationMs) {
+        density = cached.bins;
+      } else {
+        density = buildDensityBins(this.mapData?.objects || [], timelineDurationMs, 150, startMs);
+        this.timelineDensityViewCache = { startMs, durationMs: timelineDurationMs, bins: density };
+      }
+    }
     if (density.length > 0) {
       const barWidth = width / density.length;
       const usableHeight = Math.max(4, height * 0.56);

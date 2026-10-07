@@ -106,6 +106,50 @@ const parseSampleVolume = (value) => {
   return Math.min(100, Math.max(0, parsed));
 };
 
+// Precomputes the state that applies at each timing point, then answers slider
+// timing queries with binary search. Kept exported for the performance harness
+// so it measures the same lookup used by map parsing.
+export const createTimingLookup = (timingPoints) => {
+  const points = Array.isArray(timingPoints) ? timingPoints : [];
+  const first = points.find((tp) => tp.uninherited && tp.beatLength > 0);
+  const firstBeatLength = first ? first.beatLength : (60000 / 120);
+  const beatLengths = new Float64Array(points.length);
+  const svMultipliers = new Float64Array(points.length);
+
+  let activeBeatLength = firstBeatLength;
+  let activeSv = 1;
+  for (let index = 0; index < points.length; index += 1) {
+    const point = points[index];
+    if (point.uninherited && point.beatLength > 0) {
+      activeBeatLength = point.beatLength;
+      activeSv = 1;
+    } else if (!point.uninherited && point.beatLength < 0) {
+      activeSv = -100 / point.beatLength;
+    }
+    beatLengths[index] = activeBeatLength;
+    svMultipliers[index] = activeSv > 0 ? activeSv : 1;
+  }
+
+  return (time) => {
+    let low = 0;
+    let high = points.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (points[mid].time <= time) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+
+    const index = low - 1;
+    return {
+      beatLength: index >= 0 ? beatLengths[index] : firstBeatLength,
+      sv: index >= 0 ? svMultipliers[index] : 1,
+    };
+  };
+};
+
 export const parseMapPreviewData = (content, options = {}) => {
   const maxObjects = Number.isFinite(options?.maxObjects) && options.maxObjects > 0
     ? Math.floor(options.maxObjects)
@@ -131,33 +175,7 @@ export const parseMapPreviewData = (content, options = {}) => {
 
   const lines = content.split(/\r?\n/);
 
-  // osu!lazer's ControlPointInfo.TimingPointAt falls back to the *first* timing
-  // point for times before it, not to a fixed tempo. Sliders ahead of the first
-  // uninherited point were being given 120 BPM durations.
-  const getFirstBeatLength = () => {
-    const first = timingPoints.find((tp) => tp.uninherited && tp.beatLength > 0);
-    return first ? first.beatLength : (60000 / 120);
-  };
-
-  const getTiming = (time) => {
-    let activeBeatLength = getFirstBeatLength();
-    let activeSv = 1.0;
-
-    for (const tp of timingPoints) {
-      if (tp.time > time) {
-        break;
-      }
-
-      if (tp.uninherited && tp.beatLength > 0) {
-        activeBeatLength = tp.beatLength;
-        activeSv = 1.0;
-      } else if (!tp.uninherited && tp.beatLength < 0) {
-        activeSv = -100 / tp.beatLength;
-      }
-    }
-
-    return { beatLength: activeBeatLength, sv: activeSv > 0 ? activeSv : 1.0 };
-  };
+  let getTiming = () => ({ beatLength: 60000 / 120, sv: 1 });
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -267,6 +285,7 @@ export const parseMapPreviewData = (content, options = {}) => {
   }
 
   timingPoints.sort((a, b) => a.time - b.time);
+  getTiming = createTimingLookup(timingPoints);
 
   const parseSampleData = (sampleString) => {
     const parts = String(sampleString || '').split(':');

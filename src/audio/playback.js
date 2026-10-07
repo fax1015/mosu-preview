@@ -36,6 +36,7 @@ const createPlaybackController = ({
     ensureTimelineDurationAnimation,
     getCurrentManualMapTime,
     getAudioMappedTimeMs,
+    getAudioOutputLatencyMapMs = () => 0,
     isAudioClockAuthoritative = () => state.playbackMode === 'audio',
     syncVisualClockToMapTime,
     renderFrame,
@@ -47,7 +48,34 @@ const createPlaybackController = ({
   } = helpers;
 
   const seekAudioToMapTime = (mapTimeMs, options) => (
-    seekAudioElementToMapTime(state.audio, mapTimeMs, state.audioAnchorMapMs, options)
+    seekAudioElementToMapTime(
+      state.audio,
+      mapTimeMs + getAudioOutputLatencyMapMs(),
+      state.audioAnchorMapMs,
+      options,
+    )
+  );
+
+  const getAudioSeekTargetSec = (mapTimeMs) => {
+    const rawSec = (
+      mapTimeMs + getAudioOutputLatencyMapMs() - state.audioAnchorMapMs
+    ) / 1000;
+    if (!Number.isFinite(rawSec)) {
+      return Number.NaN;
+    }
+
+    const durationSec = Number(state.audio?.duration);
+    return Math.max(0, Number.isFinite(durationSec) && durationSec > 0
+      ? Math.min(rawSec, durationSec)
+      : rawSec);
+  };
+
+  // Seek validation concerns the media element's timeline position. Output
+  // latency is applied later when mapping that position to audible map time;
+  // including it here made high-latency Web Audio devices appear to miss every
+  // seek by more than the landing tolerance.
+  const getRawAudioMappedTimeMs = () => (
+    state.audioAnchorMapMs + ((Number(state.audio?.currentTime) || 0) * 1000)
   );
 
   const beginAudioOperation = () => {
@@ -62,7 +90,11 @@ const createPlaybackController = ({
   // audio out.
   const hasAudioLandedNear = (intendedMapMs) => (
     !Number.isFinite(intendedMapMs)
-    || Math.abs(getAudioMappedTimeMs() - intendedMapMs) <= AUDIO_SEEK_LANDING_TOLERANCE_MS
+    || Math.abs(
+      getRawAudioMappedTimeMs()
+      - intendedMapMs
+      - getAudioOutputLatencyMapMs()
+    ) <= AUDIO_SEEK_LANDING_TOLERANCE_MS
   );
 
   const pauseAudioElement = () => {
@@ -148,9 +180,12 @@ const createPlaybackController = ({
       return false;
     }
     if (Math.abs(getAudioMappedTimeMs() - state.currentTimeMs) > AUDIO_STALL_RECOVERY_TOLERANCE_MS) {
-      // Deliberately on the visual clock because the audio does not cover this
-      // part of the map, not because it stalled.
-      return false;
+      // A short preview clip may not cover the visual clock's current position;
+      // seekTo checks coverage and keeps that stretch on the manual clock. If a
+      // full track does cover it, re-seek instead of leaving music permanently
+      // seconds behind after a long stall.
+      seekTo(state.currentTimeMs);
+      return true;
     }
     adoptAudioClock();
     return true;
@@ -208,7 +243,9 @@ const createPlaybackController = ({
     }
 
     renderFrame();
-    state.rafId = requestFrame(playbackTick);
+    if (state.rafId === null) {
+      state.rafId = requestFrame(playbackTick);
+    }
   };
 
   // Only the newest seek matters. Each one supersedes the last, and the settle
@@ -272,7 +309,15 @@ const createPlaybackController = ({
     try {
       while (state.pendingSeekMapMs !== null) {
         const token = state.audioOpToken;
-        const settled = await waitForAudioSeek(state.audio);
+        const targetMapMs = state.pendingSeekMapMs;
+        // Keep the wait attached to the newest drag position. Browsers may
+        // coalesce several currentTime assignments into one `seeked` event;
+        // validating that event against this iteration's stale target would
+        // leave the settle loop waiting for its timeout before it can catch up.
+        const getLatestTargetSec = () => getAudioSeekTargetSec(
+          state.pendingSeekMapMs ?? targetMapMs,
+        );
+        const settled = await waitForAudioSeek(state.audio, getLatestTargetSec);
         if (!isCurrentAudioOperation(token)) {
           // Superseded while we waited: whatever the element just reported
           // belongs to a target the user has already moved past. Wait for the
@@ -384,7 +429,7 @@ const createPlaybackController = ({
     state.playbackMode = 'seeking';
     state.audio.playbackRate = state.playbackSpeed;
 
-    const settled = await waitForAudioSeek(state.audio);
+    const settled = await waitForAudioSeek(state.audio, getAudioSeekTargetSec(targetMapMs));
     if (!isCurrentAudioOperation(token)) {
       return 'superseded';
     }

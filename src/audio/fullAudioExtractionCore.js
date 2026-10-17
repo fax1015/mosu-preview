@@ -92,7 +92,10 @@ const extractFullBeatmapAudioToCache = async (options = {}) => {
     options.mapsetInfo,
   );
   if (!wroteRequested) {
-    return { ok: false, error: 'Could not write extracted audio to cache.' };
+    // The download worked, so this is no verdict on the mirrors: the audio just
+    // could not be handed over. A caller with its own copy of the pipeline can
+    // still get it by downloading where it can keep the bytes in memory.
+    return { ok: false, error: 'Could not write extracted audio to cache.', cacheWriteFailed: true };
   }
 
   return {
@@ -107,4 +110,18 @@ const extractFullBeatmapAudioToCache = async (options = {}) => {
   };
 };
 
-export { extractFullBeatmapAudio, extractFullBeatmapAudioToCache };
+/**
+ * Whether the popup should download the archive itself after asking the worker.
+ *
+ * Only when the worker never answered, or answered that it had the audio but
+ * could not cache it. A worker reporting a failed download has already been
+ * through every mirror; repeating that sweep from the popup fetched nothing new
+ * and roughly doubled the time before the failure was shown.
+ */
+const shouldRetryExtractionInPopup = (workerResult) => (
+  !workerResult
+  || typeof workerResult !== 'object'
+  || (!workerResult.ok && workerResult.cacheWriteFailed === true)
+);
+
+export { extractFullBeatmapAudio, extractFullBeatmapAudioToCache, shouldRetryExtractionInPopup };

@@ -179,19 +179,69 @@ const parseZipEntries = (archiveBytes) => {
   return entries;
 };
 
-const inflateWithFormat = async (compressedBytes, format) => {
+const INFLATE_LIMIT_ERROR_NAME = 'ZipInflateLimitError';
+
+/**
+ * Inflates into a buffer of exactly `maxBytes`, cancelling the stream the moment
+ * the output would overflow it.
+ *
+ * The sizes in the central directory come from whichever mirror served the
+ * archive, so they cannot bound the work on their own: an entry declaring 3MB
+ * can inflate to gigabytes. Buffering the whole output and comparing sizes
+ * afterwards let a single archive exhaust the worker's heap before the check
+ * ever ran.
+ *
+ * `maxBytes` is required, and allocated up front: callers pass the entry's
+ * declared size, which also spares the copy a growing buffer would need.
+ */
+const inflateWithFormat = async (compressedBytes, format, maxBytes) => {
   if (!('DecompressionStream' in globalThis)) {
     throw new Error('Browser does not support ZIP inflation for full audio.');
   }
-  const stream = new Blob([compressedBytes]).stream().pipeThrough(new DecompressionStream(format));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
+    throw new Error('ZIP inflation needs the expected output size.');
+  }
+  const limit = Math.min(Math.floor(maxBytes), MAX_ZIP_AUDIO_ENTRY_BYTES);
+  const reader = new Blob([compressedBytes]).stream()
+    .pipeThrough(new DecompressionStream(format))
+    .getReader();
+  const output = new Uint8Array(limit);
+  let written = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (written + value.byteLength > limit) {
+        await reader.cancel();
+        throw Object.assign(
+          new Error(`Inflated ZIP entry exceeds its declared size (${limit} bytes).`),
+          { name: INFLATE_LIMIT_ERROR_NAME },
+        );
+      }
+      output.set(value, written);
+      written += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return written === limit ? output : output.subarray(0, written);
 };
 
-const inflateDeflateRaw = async (compressedBytes) => {
+const inflateDeflateRaw = async (compressedBytes, maxBytes) => {
   try {
-    return await inflateWithFormat(compressedBytes, 'deflate-raw');
-  } catch {
-    return inflateWithFormat(compressedBytes, 'deflate');
+    return await inflateWithFormat(compressedBytes, 'deflate-raw', maxBytes);
+  } catch (error) {
+    // Overflowing is a verdict on the entry, not a hint that it might be
+    // zlib-wrapped: retrying would inflate the same payload a second time and
+    // replace this error with a misleading header-check failure.
+    if (error?.name === INFLATE_LIMIT_ERROR_NAME) {
+      throw error;
+    }
+    return inflateWithFormat(compressedBytes, 'deflate', maxBytes);
   }
 };
 
@@ -473,12 +523,11 @@ const extractZipEntry = async (archiveBytes, entry) => {
     return new Uint8Array(compressed);
   }
   if (entry.compressionMethod === 8) {
-    const inflated = await inflateDeflateRaw(compressed);
+    // The declared size was already held to MAX_ZIP_AUDIO_ENTRY_BYTES above, so
+    // bounding the inflate by it bounds it by the global ceiling too.
+    const inflated = await inflateDeflateRaw(compressed, uncompressedSize);
     if (inflated.byteLength !== uncompressedSize) {
       throw new Error('Inflated ZIP entry size mismatch.');
-    }
-    if (inflated.byteLength > MAX_ZIP_AUDIO_ENTRY_BYTES) {
-      throw new Error('Inflated ZIP entry exceeds maximum allowed size.');
     }
     return inflated;
   }

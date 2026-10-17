@@ -147,10 +147,21 @@ const createLegacyRandom = (seed) => {
   };
 };
 
+// .NET MathF.Round uses midpoint-to-even, while JavaScript Math.round sends
+// midpoint values toward positive infinity. Mania's legacy conversion seed is
+// sensitive to those ties, so mirror the lazer rounding rule here.
+const roundToEven = (value) => {
+  const lower = Math.floor(value);
+  const fraction = value - lower;
+  if (fraction < 0.5) return lower;
+  if (fraction > 0.5) return lower + 1;
+  return lower % 2 === 0 ? lower : lower + 1;
+};
+
 const getManiaConversionSeed = (mapData) => (
-  ((Math.round((numberOr(mapData?.hpDrainRate ?? mapData?.drainRate, 5) + numberOr(mapData?.circleSize, 5))) * 20)
+  ((roundToEven(numberOr(mapData?.hpDrainRate ?? mapData?.drainRate, 5) + numberOr(mapData?.circleSize, 5)) * 20)
     + Math.trunc(numberOr(mapData?.overallDifficulty, 5) * 41.2)
-    + Math.round(numberOr(mapData?.approachRate, 5))) | 0
+    + roundToEven(numberOr(mapData?.approachRate, 5))) | 0
 );
 
 const getManiaKeyCount = (mapData) => {
@@ -371,14 +382,21 @@ const convertToTaiko = (mapData) => {
       const distance = sliderDistance * TAIKO_VELOCITY_MULTIPLIER * spans;
       const scoringDistance = 100 * sliderMultiplier * TAIKO_VELOCITY_MULTIPLIER;
       const taikoVelocity = scoringDistance;
-      const conversionDuration = Math.max(1, Math.floor((distance / taikoVelocity) * timing.beatLength));
+      const svMultiplier = Math.max(0.001, Number(timing.svMultiplier) || 1);
+      // Lazer's legacy conversion emulates the stable precision-adjusted beat
+      // length, which clamps inverse SV to 10..10000 before scaling by 1/100.
+      const adjustedBeatLength = timing.beatLength
+        * (Math.min(10000, Math.max(10, 100 / svMultiplier)) / 100);
+      const conversionDuration = Math.max(1, Math.floor((distance / taikoVelocity) * adjustedBeatLength));
+      const beatmapVersion = Number(mapData.beatmapVersion) || 14;
+      const tickBeatLength = beatmapVersion >= 8 ? timing.beatLength : adjustedBeatLength;
+      const osuVelocity = taikoVelocity * (1000 / adjustedBeatLength);
       const tickSpacing = Math.min(
-        timing.beatLength / Math.max(0.1, Number(mapData.sliderTickRate) || 1),
+        tickBeatLength / Math.max(0.1, Number(mapData.sliderTickRate) || 1),
         conversionDuration / spans,
       );
-      const osuVelocity = taikoVelocity * (1000 / Math.max(1, timing.beatLength));
       const shouldSplitIntoHits = tickSpacing > 0
-        && ((distance / Math.max(0.001, osuVelocity)) * 1000 < (2 * timing.beatLength));
+        && ((distance / Math.max(0.001, osuVelocity)) * 1000 < (2 * tickBeatLength));
 
       if (shouldSplitIntoHits) {
         let edgeIndex = 0;
@@ -497,42 +515,109 @@ const buildCatchObjects = (mapData) => {
     if (source.kind === 'slider') {
       const spanTimes = getSliderSpanTimes(source);
       const spanCount = Math.max(1, spanTimes.length - 1);
-      const beatLength = getTimingState(mapData, source.time).beatLength;
-      const tickInterval = beatLength / Math.max(0.1, Number(mapData.sliderTickRate) || 1);
-      const tinyInterval = Math.max(45, Math.min(90, tickInterval / 4));
-      add(indexedSource, source.time, source.x, 'fruit');
+      const timing = getTimingState(mapData, source.time);
+      const beatLength = timing.beatLength;
+      const svMultiplier = Math.max(0.001, Number(timing.svMultiplier) || 1);
+      const beatmapVersion = Number(mapData.beatmapVersion) || 14;
+      const sliderMultiplier = Math.max(0.1, Number(mapData.sliderMultiplier) || 1.4);
+      const sliderVelocityBeatLength = beatLength
+        * (Math.min(1000, Math.max(10, 100 / svMultiplier)) / 100);
+      const velocity = (100 * sliderMultiplier) / sliderVelocityBeatLength;
+      const tickDistanceMultiplier = beatmapVersion < 8 ? (1 / svMultiplier) : 1;
+      const pathDistance = Math.min(100000, getSliderDistance(source));
+      const tickDistance = Math.min(
+        pathDistance,
+        (velocity * beatLength / Math.max(0.1, Number(mapData.sliderTickRate) || 1)) * tickDistanceMultiplier,
+      );
+      const minDistanceFromEnd = velocity * 10;
+      const events = [{ time: source.time, pathProgress: 0, type: 'fruit', sliderSpan: 0 }];
+
       for (let span = 0; span < spanCount; span += 1) {
+        if (events.length >= MAX_CATCH_OBJECTS) break;
         const start = spanTimes[span];
         const end = spanTimes[span + 1];
         const duration = Math.max(1, end - start);
         const direction = span % 2 === 0 ? 1 : -1;
-        const anchors = [start];
+        const spanTicks = [];
 
-        if (tickInterval > 0) {
-          for (let tickTime = start + tickInterval; tickTime < (end - 0.001); tickTime += tickInterval) {
-            const ratio = (tickTime - start) / duration;
-            const position = getPathPosition(source, direction > 0 ? ratio : 1 - ratio);
-            anchors.push(tickTime);
-            add(indexedSource, tickTime, position.x, 'droplet', { sliderSpan: span });
+        if (tickDistance > 0 && pathDistance > 0) {
+          for (let distance = tickDistance; distance <= pathDistance; distance += tickDistance) {
+            if (distance >= pathDistance - minDistanceFromEnd) break;
+            if ((events.length + spanTicks.length) >= MAX_CATCH_OBJECTS) break;
+            const pathProgress = distance / pathDistance;
+            const timeProgress = direction > 0 ? pathProgress : 1 - pathProgress;
+            spanTicks.push({
+              time: start + (timeProgress * duration),
+              pathProgress,
+              type: 'droplet',
+              sliderSpan: span,
+            });
           }
         }
 
-        anchors.push(end);
-        if (end > source.time && end <= source.endTime) {
-          const position = getPathPosition(source, direction > 0 ? 1 : 0);
-          add(indexedSource, end, position.x, 'fruit', { sliderSpan: span });
-        }
+        spanTicks.sort((a, b) => a.time - b.time);
+        events.push(...spanTicks);
 
-        anchors.sort((a, b) => a - b);
-        for (let anchorIndex = 1; anchorIndex < anchors.length; anchorIndex += 1) {
-          const segmentStart = anchors[anchorIndex - 1];
-          const segmentEnd = anchors[anchorIndex];
-          for (let tinyTime = segmentStart + tinyInterval; tinyTime < (segmentEnd - 0.001); tinyTime += tinyInterval) {
-            const ratio = (tinyTime - start) / duration;
-            const position = getPathPosition(source, direction > 0 ? ratio : 1 - ratio);
-            add(indexedSource, tinyTime, position.x, 'tinyDroplet', { sliderSpan: span });
+        if (span < spanCount - 1) {
+          events.push({
+            time: end,
+            pathProgress: (span + 1) % 2,
+            type: 'fruit',
+            sliderSpan: span,
+          });
+        }
+      }
+
+      const totalDuration = Math.max(0, source.endTime - source.time);
+      const finalSpanStart = spanTimes[spanCount - 1] ?? source.time;
+      const finalSpanDuration = Math.max(0, (spanTimes[spanCount] ?? source.endTime) - finalSpanStart);
+      const legacyLastTickTime = Math.max(
+        source.time + (totalDuration / 2),
+        (finalSpanStart + finalSpanDuration) - 36,
+      );
+      let legacyLastTickProgress = finalSpanDuration > 0
+        ? (legacyLastTickTime - finalSpanStart) / finalSpanDuration
+        : 0;
+      if (spanCount % 2 === 0) legacyLastTickProgress = 1 - legacyLastTickProgress;
+      events.push({
+        time: legacyLastTickTime,
+        pathProgress: legacyLastTickProgress,
+        type: 'legacyLastTick',
+        sliderSpan: spanCount - 1,
+      });
+      events.push({
+        time: source.time + totalDuration,
+        pathProgress: spanCount % 2,
+        type: 'fruit',
+        sliderSpan: spanCount - 1,
+      });
+
+      events.sort((a, b) => a.time - b.time);
+      let lastEvent = null;
+      for (const event of events) {
+        if (lastEvent) {
+          const sinceLastTick = Math.trunc(event.time) - Math.trunc(lastEvent.time);
+          if (sinceLastTick > 80) {
+            let tinyInterval = sinceLastTick;
+            while (tinyInterval > 100) tinyInterval /= 2;
+            for (let offset = tinyInterval; offset < sinceLastTick; offset += tinyInterval) {
+              if (result.length >= MAX_CATCH_OBJECTS) break;
+              const progress = lastEvent.pathProgress
+                + ((offset / sinceLastTick) * (event.pathProgress - lastEvent.pathProgress));
+              const position = getPathPosition(source, progress);
+              add(indexedSource, lastEvent.time + offset, position.x, 'tinyDroplet', {
+                sliderSpan: event.sliderSpan,
+              });
+            }
           }
         }
+
+        if (event.type !== 'legacyLastTick') {
+          const position = getPathPosition(source, event.pathProgress);
+          add(indexedSource, event.time, position.x, event.type, { sliderSpan: event.sliderSpan });
+        }
+        lastEvent = event;
+        if (result.length >= MAX_CATCH_OBJECTS) break;
       }
       continue;
     }

@@ -247,7 +247,18 @@ runButton.addEventListener('click', async () => {
     audio.pause();
     player.setEnabled(false);
 
-    latestResults = { visual, audio: audioPass, setupMs, signature: deviceSignature() };
+    latestResults = {
+      visual,
+      audio: audioPass,
+      setupMs,
+      signature: deviceSignature(),
+      device: {
+        userAgent: navigator.userAgent,
+        dpr: window.devicePixelRatio || 1,
+        screen: `${screen.width}x${screen.height}`,
+      },
+      benchmark: { runMs: RUN_MS, objectCount: OBJECT_COUNT },
+    };
     let baseline = null;
     try {
       const stored = JSON.parse(localStorage.getItem(BASELINE_KEY) || 'null');
@@ -255,7 +266,18 @@ runButton.addEventListener('click', async () => {
     } catch {}
     renderResults(latestResults, baseline);
     saveButton.disabled = false;
-    statusElement.textContent = 'Complete.';
+    try {
+      const response = await fetch('/api/results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(latestResults),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const saved = await response.json();
+      statusElement.textContent = `Complete. Results saved to ${saved.resultsPath}.`;
+    } catch (error) {
+      statusElement.textContent = `Complete, but run history could not be saved: ${error?.message || error}`;
+    }
   } catch (error) {
     statusElement.textContent = `Benchmark failed: ${error?.message || error}`;
   } finally {

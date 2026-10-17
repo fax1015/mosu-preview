@@ -84,6 +84,15 @@ test('uses the official mania conversion seed inputs and separates same-time not
   assert.equal(map.conversion.randomSeed, 473);
 });
 
+test('mania conversion seed matches lazer midpoint-to-even rounding', () => {
+  assert.equal(getManiaConversionSeed({
+    hpDrainRate: 4,
+    circleSize: 4.5,
+    overallDifficulty: 5,
+    approachRate: 2.5,
+  }), 368);
+});
+
 test('converts taiko sliders to hits or drumrolls and spinners to swells', () => {
   const source = {
     mode: 0,
@@ -103,6 +112,36 @@ test('converts taiko sliders to hits or drumrolls and spinners to swells', () =>
   assert.ok(map.objects.some((object) => object.taikoType === 'swell'));
   assert.ok(map.objects.some((object) => object.taikoType === 'hit'));
   assert.equal(map.conversion.velocityMultiplier, 1.4);
+});
+
+test('taiko slider conversion applies inherited SV and version-specific tick spacing', () => {
+  const source = {
+    mode: 0,
+    beatmapVersion: 14,
+    sliderMultiplier: 1.4,
+    sliderTickRate: 1,
+    timingControlPoints: [
+      { time: 0, beatLength: 500, uninherited: true, svMultiplier: 1 },
+      { time: 500, beatLength: -50, uninherited: false, svMultiplier: 2 },
+    ],
+    objects: [
+      { kind: 'slider', x: 64, y: 192, time: 500, endTime: 3000, slides: 1, length: 600, hitSound: 0 },
+    ],
+  };
+
+  const modern = convertMapForMode(source, 1).objects[0];
+  assert.equal(modern.kind, 'hold');
+  assert.equal(modern.endTime, 1571);
+  assert.equal(modern.taikoTickSpacing, 500);
+
+  const legacy = convertMapForMode({ ...source, beatmapVersion: 7 }, 1).objects[0];
+  assert.equal(legacy.kind, 'hold');
+  assert.equal(legacy.endTime, 1571);
+  assert.equal(legacy.taikoTickSpacing, 250);
+
+  const shorterSlider = { ...source, objects: [{ ...source.objects[0], length: 500 }] };
+  assert.equal(convertMapForMode(shorterSlider, 1).objects[0].taikoType, 'hit');
+  assert.equal(convertMapForMode({ ...shorterSlider, beatmapVersion: 7 }, 1).objects[0].kind, 'hold');
 });
 
 test('materializes catch fruits, slider droplets, repeats, and banana showers', () => {

@@ -84,7 +84,7 @@ import {
   setFullAudioCacheDebugLogger,
   writeCachedFullAudioBlob,
 } from './audio/cache.js';
-import { extractFullBeatmapAudio } from './audio/fullAudioExtractionCore.js';
+import { extractFullBeatmapAudio, shouldRetryExtractionInPopup } from './audio/fullAudioExtractionCore.js';
 import {
   PREVIEW_CLIP_LEAD_IN_MS,
   getPreviewClipAnchorMapMs,
@@ -1963,7 +1963,9 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
     }
     addDebugLog('audio: cache miss');
 
-    let extractionResult;
+    // Stays null when the worker never answers, which is the main case the
+    // popup's own download exists for.
+    let extractionResult = null;
     try {
       extractionResult = await sendRuntimeMessage({
         type: 'extractFullAudio',
@@ -1978,29 +1980,51 @@ const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
       });
     } catch (swMessageError) {
       addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
-      extractionResult = { ok: false, error: swMessageError?.message || 'runtime message failed' };
     }
 
-    if (!extractionResult?.ok) {
-      addDebugLog(`audio: worker path failed (${extractionResult?.error || 'unknown'}); retry download in popup`);
-      extractionResult = await extractFullBeatmapAudio({
-        setId,
-        audioFilename: audioFileName,
-        providerOverride: state.providerOverride,
-        userPriority: state.providerPriority,
-        disabledProviders: state.disabledProviders,
-        autoFallback: state.autoFallback,
-        onTryingSource: showTryingArchiveProviderBadge,
-        onDownloadProgress: (evt) => {
-          if (jobId !== state.fullAudioJobId) {
-            return;
-          }
-          showTryingArchiveProviderBadge(evt.providerLabel, {
-            loaded: evt.loaded,
-            total: evt.total,
-          });
-        },
-      });
+    if (shouldRetryExtractionInPopup(extractionResult)) {
+      addDebugLog(extractionResult?.cacheWriteFailed
+        ? 'audio: worker could not cache the audio; retry download in popup'
+        : 'audio: worker unreachable; retry download in popup');
+      // Tied to this job, so a map switch in the detached window stops a
+      // download nobody is waiting for instead of letting it run to completion.
+      const controller = registry.createAbortController();
+      const isSuperseded = () => {
+        if (jobId === state.fullAudioJobId) {
+          return false;
+        }
+        controller.abort();
+        return true;
+      };
+      try {
+        extractionResult = await extractFullBeatmapAudio({
+          setId,
+          audioFilename: audioFileName,
+          providerOverride: state.providerOverride,
+          userPriority: state.providerPriority,
+          disabledProviders: state.disabledProviders,
+          autoFallback: state.autoFallback,
+          signal: controller.signal,
+          onTryingSource: (providerLabel) => {
+            if (!isSuperseded()) {
+              showTryingArchiveProviderBadge(providerLabel);
+            }
+          },
+          onDownloadProgress: (evt) => {
+            if (isSuperseded()) {
+              return;
+            }
+            showTryingArchiveProviderBadge(evt.providerLabel, {
+              loaded: evt.loaded,
+              total: evt.total,
+            });
+          },
+        });
+      } finally {
+        registry.releaseAbortController(controller);
+      }
+    } else if (!extractionResult.ok) {
+      addDebugLog('audio: worker download failed; not repeating it in popup');
     }
     if (!extractionResult?.ok) {
       throw new Error(extractionResult?.error || 'background extraction failed');

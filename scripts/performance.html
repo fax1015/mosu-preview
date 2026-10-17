@@ -40,7 +40,7 @@
     <canvas id="timeline" width="512" height="42" aria-label="Beatmap timeline"></canvas>
   </div>
   <div id="results"></div>
-  <p class="note">Each pass reports observed FPS, requestAnimationFrame interval percentiles, and synchronous audio plus drawing work per frame. The audio pass also reports its change from the visual-only pass. A saved baseline stays in this browser’s local storage for before/after comparisons.</p>
+  <p class="note">Each completed run is appended to <code>performance-results/results.jsonl</code> with build and device details. The saved baseline stays in this browser’s local storage for same-device comparisons.</p>
   <script type="module" src="./performance-browser.js"></script>
 </body>
 </html>

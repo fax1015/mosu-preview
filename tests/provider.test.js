@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  downloadBeatmapArchive,
   getProviderSequenceForDownload,
   hydrateProviderRuntimeState,
+  mergeProviderRuntimeState,
   providerCooldowns,
   providerStats,
   serializeProviderRuntimeState,
@@ -83,6 +85,7 @@ test('provider runtime state serializes stats and live cooldowns', () => {
   resetProviderRuntimeState();
   const cooldownUntil = Date.now() + 60_000;
   hydrateProviderRuntimeState({
+    version: 2,
     stats: {
       mino: {
         successes: 2,
@@ -111,4 +114,89 @@ test('provider runtime state serializes stats and live cooldowns', () => {
   assert.equal(snapshot.stats.unknown, undefined);
   assert.equal(snapshot.cooldowns.nerinyan, cooldownUntil);
   assert.equal(snapshot.cooldowns.unknown, undefined);
+});
+
+// Headers arrive at once; the body takes `bodyDelayMs`, the way a large archive
+// does on a real connection.
+const withSlowArchiveFetch = async (bodyDelayMs, run) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    async start(controller) {
+      await new Promise((resolve) => { setTimeout(resolve, bodyDelayMs); });
+      controller.enqueue(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]));
+      controller.close();
+    },
+  }), { status: 200, headers: { 'content-type': 'application/zip' } });
+  try {
+    return await run();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+};
+
+const timedSuccessEntries = () => Object.entries(providerStats)
+  .filter(([, stats]) => stats.timedSuccesses > 0);
+
+test('a success is timed to the response headers, not the end of the body', async () => {
+  // Timing the body made one big archive sink the provider that delivered it
+  // below every provider that had never been tried.
+  resetProviderRuntimeState();
+  const bodyDelayMs = 300;
+
+  const result = await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', 'mino'));
+
+  assert.equal(result.sourceLabel, 'Mino');
+  assert.equal(providerStats.mino.timedSuccesses, 1);
+  assert.ok(
+    providerStats.mino.totalSuccessMs < bodyDelayMs / 2,
+    `recorded ${providerStats.mino.totalSuccessMs}ms for headers that arrived immediately`,
+  );
+});
+
+test('the multi-provider path also times a success to the headers', async () => {
+  // With more than one candidate the download goes through the adaptive fetch,
+  // which has its own return paths.
+  resetProviderRuntimeState();
+  const bodyDelayMs = 300;
+
+  await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive(
+    '123',
+    'auto',
+    {},
+    ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
+    [],
+    true,
+  ));
+
+  const timed = timedSuccessEntries();
+  assert.equal(timed.length, 1, 'exactly one provider should have served the archive');
+  const [id, stats] = timed[0];
+  assert.ok(stats.totalSuccessMs < bodyDelayMs / 2, `${id} recorded ${stats.totalSuccessMs}ms`);
+});
+
+test('timings stored before version 2 are dropped, counts are kept', () => {
+  // Version 1 averages are whole-download durations and would keep skewing
+  // the ranking for as long as they stayed in the mean.
+  resetProviderRuntimeState();
+  const legacy = {
+    version: 1,
+    stats: {
+      mino: {
+        successes: 3, failures: 1, timedSuccesses: 3, totalSuccessMs: 60000,
+      },
+    },
+  };
+
+  hydrateProviderRuntimeState(legacy);
+  assert.deepEqual(serializeProviderRuntimeState().stats.mino, {
+    successes: 3, failures: 1, timedSuccesses: 0, totalSuccessMs: 0,
+  });
+
+  // The other realm can still write the old snapshot back; merging it must not
+  // reintroduce what hydrate dropped.
+  const merged = mergeProviderRuntimeState(legacy);
+  assert.equal(merged.version, 2);
+  assert.deepEqual(merged.stats.mino, {
+    successes: 3, failures: 1, timedSuccesses: 0, totalSuccessMs: 0,
+  });
 });

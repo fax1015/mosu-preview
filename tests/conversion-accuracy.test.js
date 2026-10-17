@@ -86,6 +86,42 @@ test('catch droplets follow the slider curve, not the control polygon', () => {
   assert.ok(maxX > 150, `curve should still travel right, only reached ${maxX}`);
 });
 
+test('catch slider ticks and tiny droplets follow lazer event spacing', () => {
+  const modern = baseMap({
+    beatmapVersion: 14,
+    timingControlPoints: [
+      { time: 0, beatLength: 500, uninherited: true, svMultiplier: 1 },
+    ],
+    objects: [{
+      kind: 'slider', x: 100, y: 192, time: 0, endTime: 714.285714,
+      slides: 1, length: 200, newCombo: false, comboSkip: 0,
+    }],
+  });
+  const modernObjects = convertMapForMode(modern, 2).catchObjects;
+  assert.deepEqual(
+    modernObjects.filter((object) => object.type === 'droplet').map((object) => Math.round(object.time)),
+    [500],
+  );
+  assert.equal(modernObjects.filter((object) => object.type === 'tinyDroplet').length, 8);
+
+  const legacy = baseMap({
+    beatmapVersion: 7,
+    timingControlPoints: [
+      { time: 0, beatLength: 500, uninherited: true, svMultiplier: 1 },
+      { time: 0, beatLength: -50, uninherited: false, svMultiplier: 2 },
+    ],
+    objects: [{
+      kind: 'slider', x: 100, y: 192, time: 0, endTime: 357.142857,
+      slides: 1, length: 200, newCombo: false, comboSkip: 0,
+    }],
+  });
+  const legacyObjects = convertMapForMode(legacy, 2).catchObjects;
+  assert.deepEqual(
+    legacyObjects.filter((object) => object.type === 'droplet').map((object) => Math.round(object.time)),
+    [250],
+  );
+});
+
 test('a straight slider still places its tail at the declared distance', () => {
   const map = baseMap({
     objects: [{

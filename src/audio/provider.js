@@ -19,6 +19,12 @@ const FETCH_TIMEOUT_FAILOVER_MS = 20000;
 const FETCH_TIMEOUT_ARCHIVE_BODY_MS = 1000 * 180;
 const PROVIDER_FAILURE_COOLDOWN_MS = 1000 * 60 * 3;
 const PROVIDER_STATS_STORAGE_KEY = 'providerStatsV1';
+// Version 2 times a success to the response headers. Version 1 timed the whole
+// body, so its averages were download durations that grew with archive size, and
+// one marathon map was enough to sink the provider that delivered it below every
+// provider never tried. Those timings mean something else now and are dropped;
+// the success and failure counts are still valid and are kept.
+const PROVIDER_STATS_VERSION = 2;
 
 const mergeArchiveFetchOptions = (options = {}) => {
   const mergedHeaders = {
@@ -81,6 +87,19 @@ const sanitizeProviderStatsRecord = (record = {}) => ({
   totalSuccessMs: Math.max(0, Number(record.totalSuccessMs) || 0),
 });
 
+const readStoredProviderStats = (snapshot) => {
+  const stats = snapshot?.stats && typeof snapshot.stats === 'object' ? snapshot.stats : {};
+  if (snapshot?.version === PROVIDER_STATS_VERSION) {
+    return stats;
+  }
+  return Object.fromEntries(Object.entries(stats).map(([id, record]) => [id, {
+    successes: record?.successes,
+    failures: record?.failures,
+    timedSuccesses: 0,
+    totalSuccessMs: 0,
+  }]));
+};
+
 const hydrateProviderRuntimeState = (snapshot = {}) => {
   const knownIds = new Set(ARCHIVE_DOWNLOAD_SOURCES.map((source) => source.id));
   Object.keys(providerStats).forEach((id) => {
@@ -90,7 +109,7 @@ const hydrateProviderRuntimeState = (snapshot = {}) => {
     delete providerCooldowns[id];
   });
 
-  const statsSnapshot = snapshot.stats && typeof snapshot.stats === 'object' ? snapshot.stats : {};
+  const statsSnapshot = readStoredProviderStats(snapshot);
   Object.entries(statsSnapshot).forEach(([id, record]) => {
     if (knownIds.has(id)) {
       providerStats[id] = sanitizeProviderStatsRecord(record);
@@ -115,7 +134,9 @@ const cloneProviderStatsMap = (source) => Object.fromEntries(
 
 const mergeProviderRuntimeState = (storedSnapshot, nowMs = Date.now()) => {
   const stored = storedSnapshot && typeof storedSnapshot === 'object' ? storedSnapshot : {};
-  const storedStats = stored.stats && typeof stored.stats === 'object' ? stored.stats : {};
+  // The other realm may still have a version-1 snapshot on disk; its timings
+  // must not be merged back in after hydrate dropped them.
+  const storedStats = readStoredProviderStats(stored);
   const storedCooldowns = stored.cooldowns && typeof stored.cooldowns === 'object' ? stored.cooldowns : {};
 
   const stats = {};
@@ -150,11 +171,11 @@ const mergeProviderRuntimeState = (storedSnapshot, nowMs = Date.now()) => {
     }
   }
 
-  return { version: 1, savedAt: nowMs, stats, cooldowns };
+  return { version: PROVIDER_STATS_VERSION, savedAt: nowMs, stats, cooldowns };
 };
 
 const serializeProviderRuntimeState = () => ({
-  version: 1,
+  version: PROVIDER_STATS_VERSION,
   savedAt: Date.now(),
   stats: Object.fromEntries(
     Object.entries(providerStats).map(([id, record]) => [id, sanitizeProviderStatsRecord(record)]),
@@ -442,10 +463,12 @@ const fetchArrayBufferWithTimeout = async (
   const mergedSignal = combineSignals(externalSignal, controller);
 
   try {
+    const startedAtMs = performance.now();
     const response = await fetch(url, mergeArchiveFetchOptions({
       ...options,
       signal: mergedSignal,
     }));
+    const headerLatencyMs = performance.now() - startedAtMs;
     clearTimeout(timer);
     timer = null;
 
@@ -455,7 +478,7 @@ const fetchArrayBufferWithTimeout = async (
       FETCH_TIMEOUT_ARCHIVE_BODY_MS,
       onBodyProgress,
     );
-    return { response, buffer };
+    return { response, buffer, headerLatencyMs };
   } finally {
     if (timer !== null) {
       clearTimeout(timer);
@@ -475,6 +498,7 @@ const fetchBeatmapArchiveAdaptive = async (
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
   const mergedSignal = combineSignals(externalSignal, controller);
+  const startedAtMs = performance.now();
   let response;
   try {
     response = await fetch(url, mergeArchiveFetchOptions({
@@ -484,6 +508,7 @@ const fetchBeatmapArchiveAdaptive = async (
   } finally {
     clearTimeout(timer);
   }
+  const headerLatencyMs = performance.now() - startedAtMs;
 
   if (!response.ok) {
     try {
@@ -491,7 +516,7 @@ const fetchBeatmapArchiveAdaptive = async (
     } catch {
       // ignore cancel errors from hosts that omit a body stream
     }
-    return { response, buffer: new ArrayBuffer(0) };
+    return { response, buffer: new ArrayBuffer(0), headerLatencyMs };
   }
 
   if (responseLooksLikeBeatmapArchiveDownload(response)) {
@@ -501,7 +526,7 @@ const fetchBeatmapArchiveAdaptive = async (
       FETCH_TIMEOUT_ARCHIVE_BODY_MS,
       onBodyProgress,
     );
-    return { response, buffer };
+    return { response, buffer, headerLatencyMs };
   }
 
   const buffer = await readResponseArrayBufferLimitedWithInitialZipProbe(
@@ -511,7 +536,7 @@ const fetchBeatmapArchiveAdaptive = async (
     FETCH_TIMEOUT_ARCHIVE_BODY_MS,
     onBodyProgress,
   );
-  return { response, buffer };
+  return { response, buffer, headerLatencyMs };
 };
 
 const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIMEOUT_MS, 12000)) => {
@@ -624,12 +649,11 @@ const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures,
       const attemptTimeoutMs = attemptTimeouts[attemptIndex];
 
       try {
-        const requestStartMs = performance.now();
         const fetchOpts = mergeArchiveFetchOptions({
           method: 'GET',
           credentials: source.credentials || 'omit',
         });
-        const { response, buffer } = sources.length > 1
+        const { response, buffer, headerLatencyMs } = sources.length > 1
           ? await fetchBeatmapArchiveAdaptive(
             requestUrl,
             fetchOpts,
@@ -667,7 +691,10 @@ const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures,
           continue;
         }
 
-        markProviderSuccess(source.id, performance.now() - requestStartMs);
+        // Time to headers, not to the last byte: the body's length is the
+        // archive's size, not the provider's speed, and scoring it against
+        // `averageStartupLatency` punished whichever provider served a big map.
+        markProviderSuccess(source.id, headerLatencyMs);
         return { archiveBuffer, sourceLabel: source.label };
       } catch (error) {
         if (signal?.aborted) {

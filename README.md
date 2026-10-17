@@ -114,6 +114,10 @@ run `npm run package` to create release archives in `dist/`:
 
 to build just one target, run `npm run package:chrome` or `npm run package:firefox`.
 
+## performance benchmarks
+
+run `npm run performance:micro` for the Node microbenchmarks. Run `npm run performance` to open the browser benchmark, then press **Run 8-second tests**. Each completed run is appended to `performance-results/results.jsonl` with its timestamp, benchmark metrics, build revision, and environment details. Keep this file with the build history to compare results across revisions. The browser benchmark's **Save result as baseline** button separately stores a same-device comparison baseline in that browser's local storage.
+
 ## notes
 
 this extension is kinda like a "refreshed" version of [osu! preview](https://github.com/JerryZhu99/osu-preview), updated to fit chrome's manifest V3 and firefox's webextension APIs. 

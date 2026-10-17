@@ -251,7 +251,7 @@ SliderMultiplier:1.4
     for (const mode of [0, 1, 2, 3]) {
       const map = convertMapForMode(source, mode);
       const renderer = new PreviewRenderer(canvas, canvas);
-      renderer.setBeatmap(map, [], 7000);
+      renderer.setBeatmap(map, 7000);
       renderer.setTime(2000);
       assert.doesNotThrow(() => renderer.renderPlayfield(), `mode ${mode} should render`);
     }
@@ -349,4 +349,58 @@ test('stacking is stable when run again over the same objects', () => {
   const second = stackIndicesFor(mapData);
 
   assert.deepEqual(second, first);
+});
+
+test('catch hyperdash indicators are worked out once per map, not once per frame', () => {
+  const context = new Proxy({}, {
+    get(target, property) {
+      if (!(property in target)) {
+        target[property] = () => {};
+      }
+      return target[property];
+    },
+  });
+  const canvas = {
+    clientWidth: 512, clientHeight: 384, width: 512, height: 384, getContext: () => context,
+  };
+  const previousWindow = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1 };
+
+  try {
+    const source = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,192,1000,1,0,0:0:0:0:
+448,192,1100,1,0,0:0:0:0:
+256,192,1500,2,0,B|356:192,1,100
+`);
+    const renderer = new PreviewRenderer(canvas, canvas);
+    let passes = 0;
+    const apply = renderer.applyCatchHyperDashIndicators.bind(renderer);
+    renderer.applyCatchHyperDashIndicators = (...args) => {
+      passes += 1;
+      return apply(...args);
+    };
+
+    renderer.setBeatmap(convertMapForMode(source, 2), 3000);
+    for (const time of [900, 1000, 1050, 1200]) {
+      renderer.setTime(time);
+      renderer.renderPlayfield();
+    }
+    assert.equal(passes, 1);
+
+    renderer.setBeatmap(convertMapForMode(source, 2), 3000);
+    renderer.renderPlayfield();
+    assert.equal(passes, 2, 'a new map gets its own pass');
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });

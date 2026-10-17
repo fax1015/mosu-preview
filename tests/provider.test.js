@@ -143,7 +143,9 @@ test('a success is timed to the response headers, not the end of the body', asyn
   resetProviderRuntimeState();
   const bodyDelayMs = 300;
 
-  const result = await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', 'mino'));
+  const result = await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
+    providerOverride: 'mino',
+  }));
 
   assert.equal(result.sourceLabel, 'Mino');
   assert.equal(providerStats.mino.timedSuccesses, 1);
@@ -159,14 +161,9 @@ test('the multi-provider path also times a success to the headers', async () => 
   resetProviderRuntimeState();
   const bodyDelayMs = 300;
 
-  await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive(
-    '123',
-    'auto',
-    {},
-    ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
-    [],
-    true,
-  ));
+  await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
+    userPriority: ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
+  }));
 
   const timed = timedSuccessEntries();
   assert.equal(timed.length, 1, 'exactly one provider should have served the archive');
@@ -199,4 +196,32 @@ test('timings stored before version 2 are dropped, counts are kept', () => {
   assert.deepEqual(merged.stats.mino, {
     successes: 3, failures: 1, timedSuccesses: 0, totalSuccessMs: 0,
   });
+});
+
+const countFetches = async (status, run) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('nope', { status });
+  };
+  try {
+    await run().catch(() => {});
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  return calls;
+};
+
+test('a provider that answers 4xx is not asked again', async () => {
+  // A 404 means it does not have the set; a second, longer attempt gets the same answer.
+  resetProviderRuntimeState();
+  const calls = await countFetches(404, () => downloadBeatmapArchive('123', { providerOverride: 'mino' }));
+  assert.equal(calls, 1);
+});
+
+test('a provider that answers 5xx gets its second attempt', async () => {
+  resetProviderRuntimeState();
+  const calls = await countFetches(503, () => downloadBeatmapArchive('123', { providerOverride: 'mino' }));
+  assert.equal(calls, 2);
 });

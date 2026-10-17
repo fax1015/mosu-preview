@@ -1,7 +1,6 @@
-const normalizeCachedSetId = (value) => {
-  const setId = String(value || '').trim();
-  return /^\d+$/.test(setId) ? setId : '';
-};
+import { normalizeNumericId } from './beatmapUrl.js';
+
+const normalizeCachedSetId = normalizeNumericId;
 
 const normalizeInfoField = (value) => String(value ?? '').trim();
 

@@ -1,3 +1,5 @@
+import { getTimingStateAt } from './core/controlPoints.js';
+
 export const parseMetadata = (content) => {
   const data = {};
   let section = '';
@@ -106,49 +108,21 @@ const parseSampleVolume = (value) => {
   return Math.min(100, Math.max(0, parsed));
 };
 
-// Precomputes the state that applies at each timing point, then answers slider
-// timing queries with binary search. Kept exported for the performance harness
-// so it measures the same lookup used by map parsing.
-export const createTimingLookup = (timingPoints) => {
-  const points = Array.isArray(timingPoints) ? timingPoints : [];
-  const first = points.find((tp) => tp.uninherited && tp.beatLength > 0);
-  const firstBeatLength = first ? first.beatLength : (60000 / 120);
-  const beatLengths = new Float64Array(points.length);
-  const svMultipliers = new Float64Array(points.length);
-
-  let activeBeatLength = firstBeatLength;
-  let activeSv = 1;
-  for (let index = 0; index < points.length; index += 1) {
-    const point = points[index];
-    if (point.uninherited && point.beatLength > 0) {
-      activeBeatLength = point.beatLength;
-      activeSv = 1;
-    } else if (!point.uninherited && point.beatLength < 0) {
-      activeSv = -100 / point.beatLength;
-    }
-    beatLengths[index] = activeBeatLength;
-    svMultipliers[index] = activeSv > 0 ? activeSv : 1;
-  }
-
-  return (time) => {
-    let low = 0;
-    let high = points.length;
-    while (low < high) {
-      const mid = (low + high) >> 1;
-      if (points[mid].time <= time) {
-        low = mid + 1;
-      } else {
-        high = mid;
-      }
-    }
-
-    const index = low - 1;
-    return {
-      beatLength: index >= 0 ? beatLengths[index] : firstBeatLength,
-      sv: index >= 0 ? svMultipliers[index] : 1,
-    };
-  };
-};
+// The shape every consumer of timing reads: the parser's own slider timing, the
+// converters and the renderer all look these up through core/controlPoints.js.
+const toTimingControlPoint = (tp) => ({
+  time: tp.time,
+  beatLength: tp.beatLength,
+  meter: Number.isFinite(tp.meter) && tp.meter > 0 ? tp.meter : 4,
+  sampleSet: tp.sampleSet,
+  sampleIndex: tp.sampleIndex,
+  volume: tp.volume,
+  uninherited: Boolean(tp.uninherited),
+  bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
+  svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,
+  omitFirstBarLine: Boolean((tp.effects || 0) & 8),
+  kiai: Boolean((tp.effects || 0) & 1),
+});
 
 export const parseMapPreviewData = (content, options = {}) => {
   const maxObjects = Number.isFinite(options?.maxObjects) && options.maxObjects > 0
@@ -174,8 +148,6 @@ export const parseMapPreviewData = (content, options = {}) => {
   let defaultSampleSet = SAMPLE_SET_NONE;
 
   const lines = content.split(/\r?\n/);
-
-  let getTiming = () => ({ beatLength: 60000 / 120, sv: 1 });
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -285,7 +257,9 @@ export const parseMapPreviewData = (content, options = {}) => {
   }
 
   timingPoints.sort((a, b) => a.time - b.time);
-  getTiming = createTimingLookup(timingPoints);
+  // Built before the hit objects so slider durations are timed by the same
+  // lookup the converters and the renderer use afterwards.
+  const timingControlPoints = timingPoints.map(toTimingControlPoint);
 
   const parseSampleData = (sampleString) => {
     const parts = String(sampleString || '').split(':');
@@ -354,8 +328,8 @@ export const parseMapPreviewData = (content, options = {}) => {
           .filter((set) => set.length >= 2 && set.every((component) => Number.isFinite(component)));
         sampleData = parseSampleData(parts[10]);
 
-        const timing = getTiming(time);
-        const duration = (length / (sliderMultiplier * 100 * timing.sv)) * timing.beatLength * slides;
+        const timing = getTimingStateAt(timingControlPoints, time);
+        const duration = (length / (sliderMultiplier * 100 * timing.svMultiplier)) * timing.beatLength * slides;
         endTime = time + Math.max(0, Math.round(duration));
 
         sliderPoints = parseSliderPath(pathString)
@@ -478,19 +452,7 @@ export const parseMapPreviewData = (content, options = {}) => {
     primaryBpm: Number.isFinite(primaryBpm) && primaryBpm > 0 ? primaryBpm : 0,
     timingPoints: uninheritedTimingPoints,
     defaultSampleSet,
-    timingControlPoints: timingPoints.map((tp) => ({
-      time: tp.time,
-      beatLength: tp.beatLength,
-      meter: Number.isFinite(tp.meter) && tp.meter > 0 ? tp.meter : 4,
-      sampleSet: tp.sampleSet,
-      sampleIndex: tp.sampleIndex,
-      volume: tp.volume,
-      uninherited: Boolean(tp.uninherited),
-      bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
-      svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,
-      omitFirstBarLine: Boolean((tp.effects || 0) & 8),
-      kiai: Boolean((tp.effects || 0) & 1),
-    })),
+    timingControlPoints,
     comboColours: parseColours(content),
     maxObjectTime,
     hitObjectCount: hitObjectLines.length,

@@ -574,7 +574,9 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo =
         },
       }),
     );
-    void updateFullAudioCacheAliases(setId, audioFilename);
+    // Awaited: the prune below rewrites the same storage key, and starting it
+    // before this lands could write back an alias map without the new entry.
+    await updateFullAudioCacheAliases(setId, audioFilename);
 
     // A throttled prune can be up to 30 minutes away, during which the cache
     // would keep growing past its ceiling. Force one as soon as we know we are

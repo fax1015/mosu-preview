@@ -4,6 +4,7 @@ import {
   SAMPLE_SET_SOFT,
   SAMPLE_SET_DRUM,
 } from '../parser.js';
+import { findFirstIndexAtOrAfter } from '../core/math.js';
 
 // Experimental hitsounds.
 //
@@ -468,20 +469,6 @@ const buildHitsoundEvents = (objects, { samplePoints = [], defaultSampleSet = 0 
   return resolveEventSamples(events, samplePoints, defaultSampleSet);
 };
 
-const findFirstIndexAtOrAfter = (objects, timeMs) => {
-  let low = 0;
-  let high = objects.length;
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    if (objects[mid].time < timeMs) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-  return low;
-};
-
 /**
  * The events a frame has to place: everything from `cursor` up to the horizon.
  *
@@ -532,7 +519,16 @@ const buildSaturationCurve = (drive) => {
   return curve;
 };
 
-const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
+/**
+ * @param {object} [options]
+ * @param {AudioContextLatencyCategory} [options.latencyHint] Passed to the
+ *   context. 'playback' asks for bigger buffers, which a phone needs: with the
+ *   default, a busy device misses buffer deadlines and the synthesised voices
+ *   crackle. It costs nothing in sync -- voices are placed against the music in
+ *   this same graph, and the visual clock subtracts the context's live
+ *   outputLatency, which is where Firefox reports the extra buffering.
+ */
+const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   let audioContext = null;
   let masterGain = null;
   let mixBus = null;
@@ -563,7 +559,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
     }
 
     try {
-      audioContext = new AudioContextCtor();
+      audioContext = latencyHint ? new AudioContextCtor({ latencyHint }) : new AudioContextCtor();
       const { sampleRate } = audioContext;
 
       // voices -> voiceBus -+-> mixBus -> saturator -> masterGain -> out
@@ -879,7 +875,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
     if (!hasLoggedLatency) {
       hasLoggedLatency = true;
       onLog?.(`hitsounds: ${Math.round(audioContext.sampleRate)}Hz, compensating `
-        + `${(latencySec * 1000).toFixed(1)}ms of output latency`);
+        + `${(latencySec * 1000).toFixed(1)}ms of output latency `
+        + `(base ${((Number(audioContext.baseLatency) || 0) * 1000).toFixed(1)}ms, `
+        + `${latencyHint || 'interactive'} buffers)`);
     }
 
     for (const object of due) {
@@ -940,87 +938,78 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
     return musicGain;
   };
 
+  // disconnect() throws when a node has no connections left, which is the state
+  // the caller wanted anyway.
+  const disconnectQuietly = (node) => {
+    try {
+      node?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  };
+
+  /**
+   * Routes the music through the shared context, so it reaches the speakers
+   * with the same output latency as the hitsounds.
+   *
+   * This is one way. Once an element has a MediaElementSource it plays only
+   * through the graph, and a second source for it throws. Disconnecting to "turn
+   * routing off" therefore silenced the music instead of handing it back to the
+   * element -- and turning hitsounds on again could not recover it -- so the
+   * music stays routed until dispose().
+   */
   const attachMediaElement = (audioElement) => {
     if (!audioElement || attachedMediaElement === audioElement) {
       return Boolean(musicSource);
     }
-    // Ensure we have a context to attach to — reuse the same context hitsounds use so both
-    // share outputLatency.
-    if (!ensureContext() && !audioContext) {
+    if (!ensureContext()) {
       onLog?.('webaudio: could not create AudioContext for media element');
       return false;
-    }
-    // One MediaElementSource per element for the lifetime of the context; creating a second
-    // throws. Detach previous if element changed.
-    if (musicSource && attachedMediaElement) {
-      try {
-        musicSource.disconnect();
-      } catch {}
-      musicSource = null;
-      attachedMediaElement = null;
     }
     const gain = ensureMusicGain();
     if (!gain) {
       return false;
     }
+    // Only takes effect for the next load, which is why state.js sets it on the
+    // element before any source is assigned.
+    if (audioElement.crossOrigin !== 'anonymous') {
+      audioElement.crossOrigin = 'anonymous';
+    }
+
+    let nextSource;
     try {
-      // Must be set before src assignment to take effect for CORS; if src already set, it still
-      // helps for the next load. Failures are caught below.
-      if (audioElement.crossOrigin !== 'anonymous') {
-        audioElement.crossOrigin = 'anonymous';
-      }
-    } catch {}
-    try {
-      musicSource = audioContext.createMediaElementSource(audioElement);
-      musicSource.connect(gain);
-      attachedMediaElement = audioElement;
-      // Snapshot latency at attach — reading it live each frame would jitter the visual clock.
-      try {
-        attachedLatencySec = getOutputLatencySec();
-      } catch {
-        attachedLatencySec = 0;
-      }
-      // Keep HTMLMediaElement volume at 1 so WebAudio gain is the single control; otherwise
-      // the level is doubled/attenuated twice.
-      try {
-        audioElement.volume = 1;
-      } catch {}
-      gain.gain.value = musicVolume;
-      onLog?.(`webaudio: media element attached (shared context, ${Math.round(audioContext.sampleRate)}Hz, latency ${(attachedLatencySec*1000).toFixed(1)}ms)`);
-      return true;
+      nextSource = audioContext.createMediaElementSource(audioElement);
     } catch (error) {
-      // CORS or already-attached error — fall back to plain HTMLMediaElement path.
-      onLog?.(`webaudio: media element attach failed (${error?.message || error}), falling back to element audio`);
-      try {
-        musicSource?.disconnect?.();
-      } catch {}
-      musicSource = null;
-      attachedMediaElement = null;
+      onLog?.(`webaudio: media element attach failed (${error?.message || error}), playing through the element`);
       return false;
     }
-  };
 
-  const detachMediaElement = () => {
-    if (musicSource) {
-      try {
-        musicSource.disconnect();
-      } catch {}
-    }
-    musicSource = null;
-    attachedMediaElement = null;
-    attachedLatencySec = 0;
+    // A different element was routed before; it is being replaced.
+    disconnectQuietly(musicSource);
+    musicSource = nextSource;
+    musicSource.connect(gain);
+    attachedMediaElement = audioElement;
+    attachedLatencySec = getOutputLatencySec();
+    // The gain node is the single volume control from here on; leaving the
+    // element's own volume in place would attenuate the music twice.
+    audioElement.volume = 1;
+    gain.gain.value = musicVolume;
+    onLog?.(`webaudio: media element attached (shared context, ${Math.round(audioContext.sampleRate)}Hz, `
+      + `latency ${(attachedLatencySec * 1000).toFixed(1)}ms, ${latencyHint || 'interactive'} buffers)`);
+    return true;
   };
 
   const getAudioContextInstance = () => audioContext;
 
   const isMediaElementAttached = () => Boolean(musicSource && attachedMediaElement);
 
-  // Latency snapshot at attach time — keeps visual clock stable. Reading live outputLatency each
-  // frame would make getAudioMappedTimeMs jitter and trigger false backward-seek resets in update().
+  // The latency as it read when the music was attached. The visual clock prefers
+  // the live value (core/timing.js) and only falls back to this one, because
+  // some browsers report zero until the context is actually running.
   const getAttachedLatencySec = () => attachedLatencySec;
 
-  // Exposed so the visual clock can be delayed by the same amount the WebAudio graph adds
-  // to the music when it is routed through the shared context. Keeps preview/hitsounds/music in sync.
+  // Exposed so the visual clock can be delayed by the same amount the WebAudio
+  // graph adds to the music while it is routed through the shared context.
   const getOutputLatencySecExposed = () => getOutputLatencySec();
 
   const resumeContext = () => {
@@ -1030,12 +1019,11 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
   };
 
   const dispose = () => {
-    detachMediaElement();
-    if (musicGain) {
-      try {
-        musicGain.disconnect();
-      } catch {}
-    }
+    disconnectQuietly(musicSource);
+    disconnectQuietly(musicGain);
+    musicSource = null;
+    attachedMediaElement = null;
+    attachedLatencySec = 0;
     musicGain = null;
     if (audioContext) {
       void audioContext.close().catch(() => {});
@@ -1049,7 +1037,19 @@ const createHitsoundPlayer = ({ getAudioContext, onLog } = {}) => {
   };
 
   return {
-    setEnabled, setVolume, setMusicVolume, attachMediaElement, detachMediaElement, getAudioContext: getAudioContextInstance, isMediaElementAttached, getOutputLatencySec: getOutputLatencySecExposed, getAttachedLatencySec, resumeContext, ensureContext, syncTo, update, dispose,
+    setEnabled,
+    setVolume,
+    setMusicVolume,
+    attachMediaElement,
+    getAudioContext: getAudioContextInstance,
+    isMediaElementAttached,
+    getOutputLatencySec: getOutputLatencySecExposed,
+    getAttachedLatencySec,
+    resumeContext,
+    ensureContext,
+    syncTo,
+    update,
+    dispose,
   };
 };
 
@@ -1065,6 +1065,5 @@ export {
   SCHEDULE_LOOKAHEAD_SEC,
   DEFAULT_SAMPLE_VOLUME,
   collectScheduledEvents,
-  findFirstIndexAtOrAfter,
   createHitsoundPlayer,
 };

@@ -87,7 +87,7 @@ const createToneWavUrl = () => {
 
 const makeRenderer = (mapData) => {
   const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
-  renderer.setBeatmap(mapData, [], mapData.durationMs);
+  renderer.setBeatmap(mapData, mapData.durationMs);
   renderer.setPreviewSettings({
     standardSnakingSliders: true,
     standardSliderSnakeOut: true,
@@ -263,7 +263,9 @@ runButton.addEventListener('click', async () => {
     try {
       const stored = JSON.parse(localStorage.getItem(BASELINE_KEY) || 'null');
       if (stored?.signature === latestResults.signature) baseline = stored;
-    } catch {}
+    } catch {
+      // No usable baseline stored: compare against nothing.
+    }
     renderResults(latestResults, baseline);
     saveButton.disabled = false;
     try {

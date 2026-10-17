@@ -1,16 +1,5 @@
 import {
   PROVIDER_OVERRIDE_KEY,
-  MANIA_SCROLL_SPEED_KEY,
-  MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-  MANIA_SCROLL_DIRECTION_KEY,
-  MANIA_TIMING_NOTE_COLOURS_KEY,
-  STANDARD_SNAKING_SLIDERS_KEY,
-  STANDARD_SLIDER_SNAKE_OUT_KEY,
-  STANDARD_SLIDER_END_CIRCLES_KEY,
-  POPUP_SIZE_KEY,
-  PROVIDER_PRIORITY_KEY,
-  DISABLED_PROVIDERS_KEY,
-  AUTO_FALLBACK_KEY,
   PREVIEW_SETTING_KEYS,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
@@ -51,17 +40,11 @@ const readSettings = async () => {
 
     return {
       providerOverride: normalizeProviderOverride(items?.[PROVIDER_OVERRIDE_KEY]),
-      providerPriority: items?.[PROVIDER_PRIORITY_KEY] || [],
-      disabledProviders: items?.[DISABLED_PROVIDERS_KEY] || [],
-      autoFallback: items?.[AUTO_FALLBACK_KEY] ?? true,
       ...normalizePreviewSettings(items),
     };
   } catch {
     return {
       providerOverride: 'auto',
-      providerPriority: [],
-      disabledProviders: [],
-      autoFallback: true,
       ...normalizePreviewSettings(),
     };
   }
@@ -652,7 +635,10 @@ const initialize = async () => {
   });
 };
 
-initialize();
+initialize().catch((error) => {
+  // Otherwise the page sits there with every control unbound and no sign why.
+  showStatus(`Could not load settings (${error?.message || error})`, true);
+});
 
 mobileWidthQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);
 coarsePointerQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 import { PreviewRenderer } from '../src/renderer.js';
-import { createTimingLookup } from '../src/parser.js';
+import { getTimingStateAt } from '../src/core/controlPoints.js';
 import { appendPerformanceResult } from './performance-results.mjs';
 
 const SAMPLE_COUNT = 9;
@@ -47,7 +47,16 @@ const referenceTimingAt = (time) => {
   return { beatLength, sv: sv > 0 ? sv : 1 };
 };
 
-const optimizedTimingAt = createTimingLookup(timingPoints);
+// The parser times sliders through the shared control point index, which reads
+// the parsed shape: SV as a positive multiplier rather than a negative length.
+const controlPoints = timingPoints.map((point) => ({
+  ...point,
+  svMultiplier: !point.uninherited && point.beatLength < 0 ? -100 / point.beatLength : 1,
+}));
+const optimizedTimingAt = (time) => {
+  const timing = getTimingStateAt(controlPoints, time);
+  return { beatLength: timing.beatLength, sv: timing.svMultiplier };
+};
 for (const time of queryTimes.slice(0, 100)) {
   assert.deepEqual(optimizedTimingAt(time), referenceTimingAt(time));
 }

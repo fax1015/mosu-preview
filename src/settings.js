@@ -1,3 +1,5 @@
+import { clamp } from './core/math.js';
+
 export const PROVIDER_OVERRIDE_KEY = 'providerOverride';
 export const AUDIO_VOLUME_KEY = 'audioVolume';
 export const MANIA_SCROLL_SPEED_KEY = 'maniaScrollSpeed';
@@ -189,21 +191,26 @@ export const POPUP_SIZE_PRESETS = Object.freeze({
   }),
 });
 
-export const clampSetting = (value, min, max) => Math.min(max, Math.max(min, value));
-
 export const normalizeManiaScrollSpeed = (value) => {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return DEFAULT_MANIA_SCROLL_SPEED;
   }
-  return clampSetting(Math.round(numeric), MIN_MANIA_SCROLL_SPEED, MAX_MANIA_SCROLL_SPEED);
+  return clamp(Math.round(numeric), MIN_MANIA_SCROLL_SPEED, MAX_MANIA_SCROLL_SPEED);
+};
+
+// Storage holds real booleans, but older builds and hand-edited sync data have
+// written the string and numeric spellings too. Anything else is false; an
+// absent value takes the setting's own default.
+const normalizeBooleanSetting = (value, fallback) => {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  return value === true || value === 'true' || value === 1 || value === '1';
 };
 
 export const normalizeManiaScrollScaleWithBpm = (value) => (
-  value === true
-  || value === 'true'
-  || value === 1
-  || value === '1'
+  normalizeBooleanSetting(value, DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM)
 );
 
 export const normalizeManiaScrollDirection = (value) => (
@@ -211,33 +218,19 @@ export const normalizeManiaScrollDirection = (value) => (
 );
 
 export const normalizeManiaTimingNoteColours = (value) => (
-  value === true
-  || value === 'true'
-  || value === 1
-  || value === '1'
+  normalizeBooleanSetting(value, DEFAULT_MANIA_TIMING_NOTE_COLOURS)
 );
 
 export const normalizeStandardSnakingSliders = (value) => (
-  value === true
-  || value === 'true'
-  || value === 1
-  || value === '1'
+  normalizeBooleanSetting(value, DEFAULT_STANDARD_SNAKING_SLIDERS)
 );
 
 export const normalizeStandardSliderSnakeOut = (value) => (
-  value === true
-  || value === 'true'
-  || value === 1
-  || value === '1'
+  normalizeBooleanSetting(value, DEFAULT_STANDARD_SLIDER_SNAKE_OUT)
 );
 
 export const normalizeStandardSliderEndCircles = (value) => (
-  value === true
-  || value === 'true'
-  || value === 1
-  || value === '1'
-  || value === undefined
-  || value === null
+  normalizeBooleanSetting(value, DEFAULT_STANDARD_SLIDER_END_CIRCLES)
 );
 
 export const normalizePopupSize = (value) => {
@@ -253,23 +246,16 @@ export const normalizeDisabledProviders = (value) => {
   return [...new Set(value.filter((id) => validIds.has(id)))];
 };
 
-export const normalizeAutoFallback = (value) => (
-  value === undefined || value === null ? DEFAULT_AUTO_FALLBACK : Boolean(value)
-);
-
-const normalizeBooleanSetting = (value, fallback) => {
-  if (value === undefined || value === null) {
-    return fallback;
-  }
-  return value === true || value === 'true' || value === 1 || value === '1';
-};
+// Read like every other toggle: it used to be `Boolean(value)`, which turned a
+// stored 'false' into true.
+export const normalizeAutoFallback = (value) => normalizeBooleanSetting(value, DEFAULT_AUTO_FALLBACK);
 
 const normalizeUnitRange = (value, fallback) => {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return fallback;
   }
-  return clampSetting(Math.round(numeric * 100) / 100, 0, 1);
+  return clamp(Math.round(numeric * 100) / 100, 0, 1);
 };
 
 export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFAULT_HITSOUNDS);
@@ -339,7 +325,31 @@ export const toPreviewSettingsStorage = (settings = {}) => {
   };
 };
 
-export const calculateManiaScrollTimeMs = (scrollSpeed, bpm = 120, scaleWithBpm = false) => {
+/** Whether a storage.onChanged payload touches any preview setting. */
+export const hasPreviewSettingChange = (changes = {}) => (
+  PREVIEW_SETTING_KEYS.some((key) => Object.hasOwn(changes || {}, key))
+);
+
+/**
+ * The preview settings after a storage change. Keys the change does not mention
+ * keep their current value; a key it removed falls back to its default, rather
+ * than silently keeping whatever the page had before.
+ *
+ * Driven by PREVIEW_SETTING_KEYS for the same reason the readers are: the
+ * listener used to spell all thirteen keys out by hand, which is how a setting
+ * added in one place goes missing in another.
+ */
+export const applyPreviewSettingChanges = (currentSettings = {}, changes = {}) => {
+  const items = toPreviewSettingsStorage(currentSettings);
+  for (const key of PREVIEW_SETTING_KEYS) {
+    if (Object.hasOwn(changes || {}, key)) {
+      items[key] = changes[key]?.newValue;
+    }
+  }
+  return normalizePreviewSettings(items);
+};
+
+export const calculateManiaScrollTimeMs =(scrollSpeed, bpm = 120, scaleWithBpm = false) => {
   const normalizedSpeed = normalizeManiaScrollSpeed(scrollSpeed);
   let scrollTimeMs = 11485 / normalizedSpeed;
 

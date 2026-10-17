@@ -11,7 +11,6 @@ const createInitialState = ({ audio = null } = {}) => {
   return {
     metadata: null,
     mapData: null,
-    breaks: [],
     mappedDurationMs: 0,
     durationMs: 0,
     currentTimeMs: 0,
@@ -42,6 +41,11 @@ const createInitialState = ({ audio = null } = {}) => {
     fullAudioCacheKey: '',
     fullAudioJobId: 0,
     fullAudioObjectUrl: null,
+    // An MP3 or Ogg Vorbis track plays from a slice of itself after each seek
+    // (see audio/frameSeeker.js); this is the slice playing now, and the
+    // track's exact length, which a slice cannot report for itself.
+    fullAudioSliceUrl: null,
+    fullAudioDurationMs: 0,
     fullAudioError: '',
     debugLogs: [],
     debugPanelOpen: false,
@@ -88,9 +92,9 @@ const createInitialState = ({ audio = null } = {}) => {
 
 const state = createInitialState();
 state.audio.preload = 'auto';
-try {
-  state.audio.crossOrigin = 'anonymous';
-} catch {}
+// Before any source is assigned, so every load runs in CORS mode: WebAudio hears
+// only silence from a cross-origin source that was not fetched that way.
+state.audio.crossOrigin = 'anonymous';
 
 const setPlaybackState = (patch = {}) => {
   if (Object.hasOwn(patch, 'isPlaying')) state.isPlaying = Boolean(patch.isPlaying);

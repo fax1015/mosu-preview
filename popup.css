@@ -1548,10 +1548,15 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    width: 100%;
+    margin: 0;
     padding: 0.6rem;
     border-radius: 0.6rem;
     background: rgba(255, 255, 255, 0.03);
     border: 1px solid rgba(255, 255, 255, 0.04);
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
     transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
@@ -1559,6 +1564,11 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 .map-preview-recent-item:hover {
     background: rgba(255, 255, 255, 0.06);
     border-color: rgba(255, 255, 255, 0.1);
+}
+
+.map-preview-recent-item:focus-visible {
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: 2px;
 }
 
 .map-preview-recent-thumbnail {

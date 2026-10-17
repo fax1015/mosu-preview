@@ -32,14 +32,15 @@ const extractFullBeatmapAudio = async ({
   }
 
   try {
-    const { archiveBuffer, sourceLabel } = await downloadBeatmapArchive(
-      normalizedSetId,
-      normalizedOverride,
-      { onTryingSource, onDownloadProgress, signal },
+    const { archiveBuffer, sourceLabel } = await downloadBeatmapArchive(normalizedSetId, {
+      providerOverride: normalizedOverride,
       userPriority,
       disabledProviders,
       autoFallback,
-    );
+      onTryingSource,
+      onDownloadProgress,
+      signal,
+    });
     const archiveBytes = new Uint8Array(archiveBuffer);
     const entries = parseZipEntries(archiveBytes);
     const pickedEntry = pickAudioEntryFromZip(entries, normalizedAudio);

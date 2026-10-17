@@ -6,8 +6,8 @@ import {
   SAMPLE_BANKS,
   buildHitsoundEvents,
   collectScheduledEvents,
-  findFirstIndexAtOrAfter,
 } from '../src/audio/hitsounds.js';
+import { findFirstIndexAtOrAfter } from '../src/core/math.js';
 import {
   SAMPLE_SET_NORMAL,
   SAMPLE_SET_SOFT,

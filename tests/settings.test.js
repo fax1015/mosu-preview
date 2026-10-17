@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {
   PREVIEW_SETTING_KEYS,
   DEFAULT_DISABLED_PROVIDERS,
+  applyPreviewSettingChanges,
+  hasPreviewSettingChange,
+  normalizeAutoFallback,
   normalizeDisabledProviders,
   normalizePreviewSettings,
   toPreviewSettingsStorage,
@@ -54,4 +57,45 @@ test('a stored hitsound preference survives a read', () => {
 
   assert.equal(readBack.hitsounds, true);
   assert.equal(readBack.hitsoundVolume, 0.25);
+});
+
+test('a storage change only moves the settings it names', () => {
+  const current = normalizePreviewSettings({ maniaScrollSpeed: 12, hitsounds: true, popupSize: 'large' });
+
+  const next = applyPreviewSettingChanges(current, {
+    maniaScrollSpeed: { oldValue: 12, newValue: 30 },
+    providerOverride: { newValue: 'mino' },
+  });
+
+  assert.equal(next.maniaScrollSpeed, 30);
+  assert.equal(next.hitsounds, true, 'untouched settings keep their current value');
+  assert.equal(next.popupSize, 'large');
+});
+
+test('a setting removed from storage falls back to its default', () => {
+  // The old listener kept whatever the page had, so clearing a setting did nothing.
+  const current = normalizePreviewSettings({ hitsounds: true, standardSliderEndCircles: false });
+
+  const next = applyPreviewSettingChanges(current, {
+    hitsounds: { oldValue: true },
+    standardSliderEndCircles: { oldValue: false },
+  });
+
+  assert.equal(next.hitsounds, false);
+  assert.equal(next.standardSliderEndCircles, true);
+});
+
+test('every preview setting is one the change listener reacts to', () => {
+  for (const key of PREVIEW_SETTING_KEYS) {
+    assert.equal(hasPreviewSettingChange({ [key]: { newValue: null } }), true, key);
+  }
+  assert.equal(hasPreviewSettingChange({ audioVolume: { newValue: 0.4 } }), false);
+  assert.equal(hasPreviewSettingChange({}), false);
+});
+
+test('auto-fallback reads a stored string the same way every other toggle does', () => {
+  assert.equal(normalizeAutoFallback('false'), false);
+  assert.equal(normalizeAutoFallback(false), false);
+  assert.equal(normalizeAutoFallback(undefined), true);
+  assert.equal(normalizeAutoFallback('true'), true);
 });

@@ -6,7 +6,6 @@ import {
 import {
   MAX_ARCHIVE_DOWNLOAD_BYTES,
   readResponseArrayBufferLimited,
-  readResponseArrayBufferLimitedWithInitialZipProbe,
   responseLooksLikeBeatmapArchiveDownload,
 } from './zip.js';
 import { hasStorageArea, storageGet, storageSet } from '../webextension.js';
@@ -446,63 +445,44 @@ const combineSignals = (signal, controller) => {
   return controller.signal;
 };
 
-const fetchArrayBufferWithTimeout = async (
-  url,
-  options = {},
-  timeoutMs = FETCH_TIMEOUT_MS,
-  maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
-  onBodyProgress,
-  externalSignal,
-) => {
-  const controller = new AbortController();
-  // The timeout covers the response headers only. Applying it to the body too
-  // meant a large archive on a slow connection could never finish: at 18s a
-  // 40MB .osz needs roughly twice that just to transfer. The body gets its own
-  // (much longer) budget below, matching the multi-provider adaptive path.
-  let timer = setTimeout(() => controller.abort(), timeoutMs);
-  const mergedSignal = combineSignals(externalSignal, controller);
-
+const cancelResponseBody = async (response) => {
   try {
-    const startedAtMs = performance.now();
-    const response = await fetch(url, mergeArchiveFetchOptions({
-      ...options,
-      signal: mergedSignal,
-    }));
-    const headerLatencyMs = performance.now() - startedAtMs;
-    clearTimeout(timer);
-    timer = null;
-
-    const buffer = await readResponseArrayBufferLimited(
-      response,
-      maxBytes,
-      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
-      onBodyProgress,
-    );
-    return { response, buffer, headerLatencyMs };
-  } finally {
-    if (timer !== null) {
-      clearTimeout(timer);
-    }
+    await response.body?.cancel();
+  } catch {
+    // Some hosts send no body stream to cancel.
   }
 };
 
-const fetchBeatmapArchiveAdaptive = async (
-  url,
-  options,
-  headerTimeoutMs,
-  bodyProbeDeadlineMs,
-  maxBytes,
+/**
+ * Fetches one archive. The timeout covers the response headers only: applying
+ * it to the body too meant a large archive on a slow connection could never
+ * finish -- at 18s a 40MB .osz needs roughly twice that just to transfer -- so
+ * the body gets its own, much longer budget.
+ *
+ * Every body is checked for the ZIP signature on its first bytes, so an HTML
+ * error page served with a 200 is dropped there instead of downloaded in full.
+ * `zipProbeMs` also limits how long those bytes may take, for a caller with
+ * another provider to move on to; a response that announces itself as an
+ * archive has earned the full budget either way.
+ *
+ * @returns {Promise<{ response: Response, buffer: ArrayBuffer, headerLatencyMs: number }>}
+ */
+const fetchBeatmapArchive = async (url, {
+  fetchOptions = {},
+  headerTimeoutMs = FETCH_TIMEOUT_MS,
+  zipProbeMs = null,
+  maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
   onBodyProgress,
-  externalSignal,
-) => {
+  signal,
+} = {}) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), headerTimeoutMs);
-  const mergedSignal = combineSignals(externalSignal, controller);
+  const mergedSignal = combineSignals(signal, controller);
   const startedAtMs = performance.now();
   let response;
   try {
     response = await fetch(url, mergeArchiveFetchOptions({
-      ...options,
+      ...fetchOptions,
       signal: mergedSignal,
     }));
   } finally {
@@ -511,31 +491,17 @@ const fetchBeatmapArchiveAdaptive = async (
   const headerLatencyMs = performance.now() - startedAtMs;
 
   if (!response.ok) {
-    try {
-      await response.body?.cancel();
-    } catch {
-      // ignore cancel errors from hosts that omit a body stream
-    }
+    await cancelResponseBody(response);
     return { response, buffer: new ArrayBuffer(0), headerLatencyMs };
   }
 
-  if (responseLooksLikeBeatmapArchiveDownload(response)) {
-    const buffer = await readResponseArrayBufferLimited(
-      response,
-      maxBytes,
-      FETCH_TIMEOUT_ARCHIVE_BODY_MS,
-      onBodyProgress,
-    );
-    return { response, buffer, headerLatencyMs };
-  }
-
-  const buffer = await readResponseArrayBufferLimitedWithInitialZipProbe(
-    response,
+  const buffer = await readResponseArrayBufferLimited(response, {
     maxBytes,
-    bodyProbeDeadlineMs,
-    FETCH_TIMEOUT_ARCHIVE_BODY_MS,
-    onBodyProgress,
-  );
+    bodyBudgetMs: FETCH_TIMEOUT_ARCHIVE_BODY_MS,
+    requireZipSignature: true,
+    zipProbeMs: responseLooksLikeBeatmapArchiveDownload(response) ? null : zipProbeMs,
+    onProgress: onBodyProgress,
+  });
   return { response, buffer, headerLatencyMs };
 };
 
@@ -583,35 +549,42 @@ const probeArchiveSource = async (source, setId, timeoutMs = Math.min(FETCH_TIME
   }
 };
 
-const downloadBeatmapArchive = async (
-  setId,
+/**
+ * Downloads a beatmapset archive from the first provider that delivers one.
+ *
+ * @param {string} setId
+ * @param {object} [options]
+ * @param {string} [options.providerOverride] A provider id, or 'auto'.
+ * @param {string[]} [options.userPriority] Provider ids in the user's order.
+ * @param {string[]} [options.disabledProviders]
+ * @param {boolean} [options.autoFallback] Whether to move on past the first provider.
+ * @param {(label: string) => void} [options.onTryingSource]
+ * @param {(progress: object) => void} [options.onDownloadProgress]
+ * @param {AbortSignal} [options.signal]
+ */
+const downloadBeatmapArchive = async (setId, {
   providerOverride = 'auto',
-  hooks = {},
   userPriority = [],
   disabledProviders = [],
   autoFallback = true,
-) => {
+  onTryingSource,
+  onDownloadProgress,
+  signal,
+} = {}) => {
   await loadProviderRuntimeState();
-  const { onTryingSource, onDownloadProgress, signal } = hooks;
-  const failures = [];
   const sources = getProviderSequenceForDownload(
     providerOverride,
     userPriority,
     disabledProviders,
     autoFallback,
   );
-  const fetchTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
 
   if (!sources.length) {
     throw new Error('no providers available');
   }
 
   try {
-    return await attemptProviderSequence(sources, setId, fetchTimeoutMs, failures, {
-      onTryingSource,
-      onDownloadProgress,
-      signal,
-    });
+    return await attemptProviderSequence(sources, setId, { onTryingSource, onDownloadProgress, signal });
   } finally {
     // Persist before the caller (or a service-worker teardown) can drop the
     // debounced write.
@@ -619,8 +592,18 @@ const downloadBeatmapArchive = async (
   }
 };
 
-const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures, hooks) => {
-  const { onTryingSource, onDownloadProgress, signal } = hooks;
+// A 4xx is the provider's answer -- it does not have this set, or will not
+// serve it -- and asking again a moment later gets the same one. Timeouts,
+// network errors and 5xx are worth the second, longer attempt.
+const isRetryableStatus = (status) => !(status >= 400 && status < 500);
+
+const attemptProviderSequence = async (sources, setId, { onTryingSource, onDownloadProgress, signal }) => {
+  const hasFallback = sources.length > 1;
+  const fetchTimeoutMs = hasFallback ? FETCH_TIMEOUT_FAILOVER_MS : FETCH_TIMEOUT_MS;
+  const attemptTimeouts = hasFallback
+    ? [fetchTimeoutMs, Math.min(45000, FETCH_TIMEOUT_ARCHIVE_BODY_MS)]
+    : [fetchTimeoutMs, Math.min(fetchTimeoutMs * 2, 90000)];
+  const failures = [];
 
   for (const source of sources) {
     if (signal?.aborted) {
@@ -633,59 +616,47 @@ const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures,
       onDownloadProgress,
       source.label,
     );
-
     const requestUrl = source.buildArchiveUrl({ setId });
-    const attemptTimeouts = sources.length > 1
-      ? [fetchTimeoutMs, Math.min(45000, FETCH_TIMEOUT_ARCHIVE_BODY_MS)]
-      : [fetchTimeoutMs, Math.min(fetchTimeoutMs * 2, 90000)];
+    const fetchOptions = mergeArchiveFetchOptions({
+      method: 'GET',
+      credentials: source.credentials || 'omit',
+    });
 
-    let sourceSucceeded = false;
-
-    for (let attemptIndex = 0; attemptIndex < attemptTimeouts.length && !sourceSucceeded; attemptIndex += 1) {
+    for (let attemptIndex = 0; attemptIndex < attemptTimeouts.length; attemptIndex += 1) {
       if (signal?.aborted) {
         throw new Error('download cancelled');
       }
 
       const attemptTimeoutMs = attemptTimeouts[attemptIndex];
+      const retrySuffix = attemptIndex > 0 ? '(retry)' : '';
+      const isLastAttempt = attemptIndex === attemptTimeouts.length - 1;
 
       try {
-        const fetchOpts = mergeArchiveFetchOptions({
-          method: 'GET',
-          credentials: source.credentials || 'omit',
+        const { response, buffer, headerLatencyMs } = await fetchBeatmapArchive(requestUrl, {
+          fetchOptions,
+          headerTimeoutMs: attemptTimeoutMs,
+          // With another provider to fall back on, one slow to show it is
+          // serving an archive is given up on early.
+          zipProbeMs: hasFallback ? attemptTimeoutMs : null,
+          maxBytes: MAX_ARCHIVE_DOWNLOAD_BYTES,
+          onBodyProgress: reportProgress ?? undefined,
+          signal,
         });
-        const { response, buffer, headerLatencyMs } = sources.length > 1
-          ? await fetchBeatmapArchiveAdaptive(
-            requestUrl,
-            fetchOpts,
-            attemptTimeoutMs,
-            attemptTimeoutMs,
-            MAX_ARCHIVE_DOWNLOAD_BYTES,
-            reportProgress ?? undefined,
-            signal,
-          )
-          : await fetchArrayBufferWithTimeout(
-            requestUrl,
-            fetchOpts,
-            attemptTimeoutMs,
-            MAX_ARCHIVE_DOWNLOAD_BYTES,
-            reportProgress ?? undefined,
-            signal,
-          );
 
         if (!response.ok) {
-          failures.push(`${source.label}:${response.status}${attemptIndex > 0 ? '(retry)' : ''}`);
-          if (attemptIndex === attemptTimeouts.length - 1) {
+          failures.push(`${source.label}:${response.status}${retrySuffix}`);
+          if (isLastAttempt || !isRetryableStatus(response.status)) {
             markProviderFailure(source.id);
+            break;
           }
           continue;
         }
 
-        const archiveBuffer = buffer;
-        const header = new Uint8Array(archiveBuffer.slice(0, 4));
+        const header = new Uint8Array(buffer.slice(0, 4));
         const isZip = header.length === 4 && header[0] === 0x50 && header[1] === 0x4b;
         if (!isZip) {
-          failures.push(`${source.label}:non-zip${attemptIndex > 0 ? '(retry)' : ''}`);
-          if (attemptIndex === attemptTimeouts.length - 1) {
+          failures.push(`${source.label}:non-zip${retrySuffix}`);
+          if (isLastAttempt) {
             markProviderFailure(source.id);
           }
           continue;
@@ -695,14 +666,14 @@ const attemptProviderSequence = async (sources, setId, fetchTimeoutMs, failures,
         // archive's size, not the provider's speed, and scoring it against
         // `averageStartupLatency` punished whichever provider served a big map.
         markProviderSuccess(source.id, headerLatencyMs);
-        return { archiveBuffer, sourceLabel: source.label };
+        return { archiveBuffer: buffer, sourceLabel: source.label };
       } catch (error) {
         if (signal?.aborted) {
           throw new Error('download cancelled');
         }
         const isTimeout = error?.name === 'AbortError';
-        failures.push(`${source.label}:${isTimeout ? 'timeout' : (error?.message || 'network error')}${attemptIndex > 0 ? '(retry)' : ''}`);
-        if (attemptIndex === attemptTimeouts.length - 1) {
+        failures.push(`${source.label}:${isTimeout ? 'timeout' : (error?.message || 'network error')}${retrySuffix}`);
+        if (isLastAttempt) {
           markProviderFailure(source.id);
         }
       }
@@ -731,8 +702,7 @@ export {
   flushProviderRuntimeState,
   mergeProviderRuntimeState,
   downloadBeatmapArchive,
-  fetchArrayBufferWithTimeout,
-  fetchBeatmapArchiveAdaptive,
+  fetchBeatmapArchive,
   probeArchiveSource,
   providerStats,
   providerCooldowns,

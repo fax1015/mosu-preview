@@ -1,13 +1,26 @@
-const MODE_NAMES = ['osu', 'taiko', 'fruits', 'mania'];
+// Ruleset names as osu.ppy.sh spells them in URLs, indexed by mode number.
+const MODE_URL_NAMES = Object.freeze(['osu', 'taiko', 'fruits', 'mania']);
 
+/** A beatmap or beatmapset id: digits only, as a string, or '' when it is not one. */
+const normalizeNumericId = (value) => {
+  const candidate = String(value ?? '').trim();
+  return /^\d+$/.test(candidate) ? candidate : '';
+};
+
+/**
+ * A ruleset from a URL fragment, a query parameter or a stored mode: its URL
+ * name, 'catch', or the number 0-3 (as a number or a string). Null otherwise.
+ * The URL parser, the detached window and the converters each used to keep a
+ * copy of this, with different spellings of catch.
+ */
 const parseModeToken = (token) => {
-  const normalized = String(token || '').trim().toLowerCase();
+  const normalized = String(token ?? '').trim().toLowerCase();
   if (normalized === 'catch') {
     return 2;
   }
 
-  if (MODE_NAMES.includes(normalized)) {
-    return MODE_NAMES.indexOf(normalized);
+  if (MODE_URL_NAMES.includes(normalized)) {
+    return MODE_URL_NAMES.indexOf(normalized);
   }
 
   if (/^\d+$/.test(normalized)) {
@@ -91,4 +104,9 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
   };
 };
 
-export { extractBeatmapInfoFromUrl };
+export {
+  MODE_URL_NAMES,
+  extractBeatmapInfoFromUrl,
+  normalizeNumericId,
+  parseModeToken,
+};

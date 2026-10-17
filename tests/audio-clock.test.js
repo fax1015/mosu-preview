@@ -382,7 +382,7 @@ test('a seek the audio never settles hands the clock back instead of freezing', 
   assert.equal(state.currentTimeMs, 46_000);
 });
 
-test('a paused seek settles on the media position and starts no clock', async () => {
+test('a paused seek stays where it was sent and starts no clock', async () => {
   const harness = createHarness();
   const {
     audio, state, controller, gate,
@@ -392,10 +392,11 @@ test('a paused seek settles on the media position and starts no clock', async ()
   assert.equal(state.playbackMode, 'seeking');
   assert.equal(state.currentTimeMs, 75_000);
 
-  audio.currentTime = 74.98;
+  // A slice seek starts a little early on purpose; the playhead must not follow.
+  audio.currentTime = 74.94;
   await gate.settleNext(true);
   assert.equal(state.playbackMode, 'none');
-  assert.equal(state.currentTimeMs, 74_980);
+  assert.equal(state.currentTimeMs, 75_000);
   assert.equal(state.isPlaying, false);
   assert.equal(audio.paused, true);
   assert.equal(audio.playCount, 0, 'a paused seek must never start playback');

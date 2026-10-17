@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
-import { decodeZipName, extractZipEntry, pickAudioEntryFromZip } from '../src/audio/zip.js';
+import {
+  decodeZipName,
+  extractZipEntry,
+  pickAudioEntryFromZip,
+  readResponseArrayBufferLimited,
+} from '../src/audio/zip.js';
 
 // A deflated entry behind a bare local header, which is all extractZipEntry
 // reads. `declaredSize` stands in for the central directory's claim.
@@ -118,4 +123,82 @@ test('does not guess among multiple unmatched audio entries', () => {
   ];
 
   assert.equal(pickAudioEntryFromZip(entries, 'missing.mp3'), null);
+});
+
+// A body delivered in fixed chunks, counting how much of it was ever pulled.
+const chunkedResponse = (chunks, headers = {}) => {
+  const stats = { pulled: 0, cancelled: false };
+  let index = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      if (index >= chunks.length) {
+        controller.close();
+        return;
+      }
+      stats.pulled += 1;
+      controller.enqueue(chunks[index]);
+      index += 1;
+    },
+    cancel() {
+      stats.cancelled = true;
+    },
+  });
+  return { response: new Response(body, { headers }), stats };
+};
+
+const zipChunks = (count, size = 1024) => Array.from({ length: count }, (_, i) => {
+  const chunk = new Uint8Array(size).fill(i % 251);
+  if (i === 0) {
+    chunk[0] = 0x50;
+    chunk[1] = 0x4b;
+  }
+  return chunk;
+});
+
+const concat = (chunks) => Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+
+test('a body of announced size comes back byte for byte', async () => {
+  const chunks = zipChunks(8);
+  const { response } = chunkedResponse(chunks, { 'content-length': String(8 * 1024) });
+
+  const buffer = await readResponseArrayBufferLimited(response, { requireZipSignature: true });
+
+  assert.deepEqual(Buffer.from(buffer), concat(chunks));
+});
+
+test('a body longer than announced is kept whole, not cut at the announcement', async () => {
+  // A compressed transfer reports its encoded size, so this really happens.
+  const chunks = zipChunks(6);
+  const { response } = chunkedResponse(chunks, { 'content-length': String(2 * 1024) });
+
+  const buffer = await readResponseArrayBufferLimited(response);
+
+  assert.deepEqual(Buffer.from(buffer), concat(chunks));
+});
+
+test('a body shorter than announced returns only what arrived', async () => {
+  const chunks = zipChunks(3);
+  const { response } = chunkedResponse(chunks, { 'content-length': String(10 * 1024) });
+
+  const buffer = await readResponseArrayBufferLimited(response);
+
+  assert.equal(buffer.byteLength, 3 * 1024);
+  assert.deepEqual(Buffer.from(buffer), concat(chunks));
+});
+
+test('an error page served as 200 is abandoned after its first bytes', async () => {
+  const page = new TextEncoder().encode('<!DOCTYPE html><title>rate limited</title>');
+  const rest = Array.from({ length: 50 }, () => new Uint8Array(4096));
+  const { response, stats } = chunkedResponse([page, ...rest]);
+
+  const buffer = await readResponseArrayBufferLimited(response, { requireZipSignature: true });
+
+  assert.equal(stats.cancelled, true);
+  assert.ok(stats.pulled <= 2, `pulled ${stats.pulled} chunks of a page that was never going to be an archive`);
+  assert.notEqual(new Uint8Array(buffer)[0], 0x50);
+});
+
+test('a body past the cap is refused', async () => {
+  const { response } = chunkedResponse(zipChunks(4));
+  await assert.rejects(readResponseArrayBufferLimited(response, { maxBytes: 3000 }), /exceeds limit/);
 });

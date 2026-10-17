@@ -9,6 +9,9 @@
 //
 // This module stays free of extension and DOM APIs so it can be unit tested.
 
+import { MODE_URL_NAMES, normalizeNumericId, parseModeToken } from './beatmapUrl.js';
+import { clamp } from './math.js';
+
 // Same document as the toolbar popup: the `detached` flag switches the layout,
 // which keeps one copy of the preview markup rather than two that drift apart.
 const DETACHED_PAGE = 'popup.html';
@@ -21,8 +24,6 @@ const PAUSED_PARAM = 'paused';
 
 // A preview can run for well over an hour; this only needs to reject junk.
 const MAX_RESUME_TIME_MS = 24 * 60 * 60 * 1000;
-
-const MODE_NAMES = ['osu', 'taiko', 'fruits', 'mania'];
 
 const DETACHED_WINDOW_ID_KEY = 'mosuDetachedWindowIdV1';
 const DETACHED_WINDOW_BOUNDS_KEY = 'mosuDetachedWindowBoundsV1';
@@ -37,12 +38,6 @@ const MAX_DETACHED_DIMENSION = 4096;
 // positions are bounded rather than trusted.
 const MIN_DETACHED_COORDINATE = -MAX_DETACHED_DIMENSION;
 
-const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
-
-const normalizeNumericId = (value) => {
-  const candidate = String(value ?? '').trim();
-  return /^\d+$/.test(candidate) ? candidate : '';
-};
 
 /** Returns -1 for "not carried", so 0 stays a real, distinct resume point. */
 const normalizeResumeTimeMs = (value) => {
@@ -57,24 +52,6 @@ const normalizeResumeTimeMs = (value) => {
     return -1;
   }
   return Math.round(numeric);
-};
-
-const normalizeMode = (value) => {
-  const candidate = String(value ?? '').trim().toLowerCase();
-  if (!candidate) {
-    return null;
-  }
-  if (candidate === 'catch') {
-    return 2;
-  }
-  if (MODE_NAMES.includes(candidate)) {
-    return MODE_NAMES.indexOf(candidate);
-  }
-  if (/^\d+$/.test(candidate)) {
-    const numeric = Number.parseInt(candidate, 10);
-    return numeric >= 0 && numeric <= 3 ? numeric : null;
-  }
-  return null;
 };
 
 /**
@@ -105,7 +82,7 @@ const readDetachedParams = (search = '') => {
     isDetached: (flag === '1' || flag === 'true') && beatmapId !== '',
     beatmapId,
     setId: normalizeNumericId(params.get(SET_ID_PARAM)),
-    mode: normalizeMode(params.get(MODE_PARAM)),
+    mode: parseModeToken(params.get(MODE_PARAM)),
     // Where the popup left off, so the window picks the preview up rather than
     // restarting it at the beatmap's preview point.
     resumeTimeMs: normalizeResumeTimeMs(params.get(TIME_PARAM)),
@@ -124,17 +101,17 @@ const buildBeatmapSourceUrl = ({ beatmapId, setId, mode } = {}) => {
   }
 
   const normalizedSetId = normalizeNumericId(setId);
-  const normalizedMode = normalizeMode(mode);
+  const normalizedMode = parseModeToken(mode);
 
   if (normalizedSetId) {
     return normalizedMode === null
       ? `https://osu.ppy.sh/beatmapsets/${normalizedSetId}?b=${normalizedBeatmapId}`
-      : `https://osu.ppy.sh/beatmapsets/${normalizedSetId}#${MODE_NAMES[normalizedMode]}/${normalizedBeatmapId}`;
+      : `https://osu.ppy.sh/beatmapsets/${normalizedSetId}#${MODE_URL_NAMES[normalizedMode]}/${normalizedBeatmapId}`;
   }
 
   return normalizedMode === null
     ? `https://osu.ppy.sh/beatmaps/${normalizedBeatmapId}`
-    : `https://osu.ppy.sh/beatmaps/${normalizedBeatmapId}?mode=${MODE_NAMES[normalizedMode]}`;
+    : `https://osu.ppy.sh/beatmaps/${normalizedBeatmapId}?mode=${MODE_URL_NAMES[normalizedMode]}`;
 };
 
 /**
@@ -157,9 +134,9 @@ const buildDetachedPageUrl = ({ beatmapId, setId, mode, resumeTimeMs, resumePaus
     params.set(SET_ID_PARAM, normalizedSetId);
   }
 
-  const normalizedMode = normalizeMode(mode);
+  const normalizedMode = parseModeToken(mode);
   if (normalizedMode !== null) {
-    params.set(MODE_PARAM, MODE_NAMES[normalizedMode]);
+    params.set(MODE_PARAM, MODE_URL_NAMES[normalizedMode]);
   }
 
   const normalizedResumeTimeMs = normalizeResumeTimeMs(resumeTimeMs);
@@ -182,18 +159,18 @@ const normalizeDetachedBounds = (bounds = {}) => {
   const height = Number(bounds?.height);
   const normalized = {
     width: Number.isFinite(width)
-      ? Math.round(clampNumber(width, MIN_DETACHED_WIDTH, MAX_DETACHED_DIMENSION))
+      ? Math.round(clamp(width, MIN_DETACHED_WIDTH, MAX_DETACHED_DIMENSION))
       : DEFAULT_DETACHED_BOUNDS.width,
     height: Number.isFinite(height)
-      ? Math.round(clampNumber(height, MIN_DETACHED_HEIGHT, MAX_DETACHED_DIMENSION))
+      ? Math.round(clamp(height, MIN_DETACHED_HEIGHT, MAX_DETACHED_DIMENSION))
       : DEFAULT_DETACHED_BOUNDS.height,
   };
 
   const left = Number(bounds?.left);
   const top = Number(bounds?.top);
   if (Number.isFinite(left) && Number.isFinite(top)) {
-    normalized.left = Math.round(clampNumber(left, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
-    normalized.top = Math.round(clampNumber(top, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
+    normalized.left = Math.round(clamp(left, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
+    normalized.top = Math.round(clamp(top, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
   }
 
   return normalized;

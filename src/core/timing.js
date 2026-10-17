@@ -1,16 +1,24 @@
+import { createMediaClockSmoother } from '../audio/mediaClock.js';
+
 // Whenever audio is playing the media element *is* the clock. `currentTime`
 // already advances at the effective `playbackRate`, so reading it back is exact
-// by construction and there is nothing to correct. The performance-clock
-// extrapolation below only covers the stretches that have no audio behind them:
-// a b.ppy.sh preview clip spans ~10s of the map, and the rest of the timeline
-// still has to move.
+// by construction and there is nothing to correct; it is only smoothed where
+// the browser moves it in steps, which leaves its average where it was. The
+// performance-clock extrapolation below only covers the stretches that have no
+// audio behind them: a b.ppy.sh preview clip spans ~10s of the map, and the
+// rest of the timeline still has to move.
 const createTimingController = ({
   state,
   clamp,
   getOutputLatencySec = null,
   getAttachedLatencySec = null,
   isMediaElementAttached = null,
+  now = () => performance.now(),
 }) => {
+  // Firefox's currentTime moves in ~40ms steps; this reads it without them
+  // (see audio/mediaClock.js). Chromium's barely steps, so it barely changes.
+  const mediaClock = createMediaClockSmoother({ now });
+
   const getCurrentManualMapTime = (nowPerfMs) => (
     state.playStartMapMs + ((nowPerfMs - state.playStartPerfMs) * state.playbackSpeed)
   );
@@ -46,7 +54,7 @@ const createTimingController = ({
   };
 
   const getAudioMappedTimeMs = () => {
-    const rawMs = state.audioAnchorMapMs + ((state.audio?.currentTime || 0) * 1000);
+    const rawMs = state.audioAnchorMapMs + mediaClock.read(state.audio, state.playbackSpeed);
     // When music is routed through the shared WebAudio graph, its audible output lags
     // `currentTime` by `outputLatency`. Visuals and hitsounds must lag by the same amount
     // or the preview appears ahead of the music. Scale by playbackSpeed because the map

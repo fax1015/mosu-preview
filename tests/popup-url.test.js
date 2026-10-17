@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractBeatmapInfoFromUrl } from '../src/core/beatmapUrl.js';
+import { extractBeatmapInfoFromUrl, normalizeNumericId, parseModeToken } from '../src/core/beatmapUrl.js';
 
 test('parses direct beatmap URLs', () => {
   assert.deepEqual(
@@ -59,4 +59,25 @@ test('marks non-osu URLs as unsupported', () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.unsupportedSite, true);
+});
+
+test('one mode parser accepts every spelling the extension meets', () => {
+  // URL names, the alias osu! uses for catch, and stored mode numbers -- the
+  // three copies this replaced disagreed on catch and on a numeric 0.
+  assert.equal(parseModeToken('osu'), 0);
+  assert.equal(parseModeToken('fruits'), 2);
+  assert.equal(parseModeToken('catch'), 2);
+  assert.equal(parseModeToken('Mania'), 3);
+  assert.equal(parseModeToken(0), 0);
+  assert.equal(parseModeToken('1'), 1);
+  assert.equal(parseModeToken(4), null);
+  assert.equal(parseModeToken(''), null);
+  assert.equal(parseModeToken(undefined), null);
+});
+
+test('ids are digits only', () => {
+  assert.equal(normalizeNumericId(' 123 '), '123');
+  assert.equal(normalizeNumericId(456), '456');
+  assert.equal(normalizeNumericId('12a'), '');
+  assert.equal(normalizeNumericId(null), '');
 });

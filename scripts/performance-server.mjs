@@ -44,7 +44,9 @@ const saveBrowserResult = async (request, response) => {
   let sameOrigin = false;
   try {
     sameOrigin = new URL(origin).origin === `http://${request.headers.host}`;
-  } catch {}
+  } catch {
+    // A missing or malformed Origin is not same-origin.
+  }
   if (!sameOrigin) {
     response.writeHead(403).end('Same-origin requests only');
     return;
@@ -157,13 +159,23 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(port, '0.0.0.0', () => {
+// Loopback unless asked otherwise. The same-origin check on the save endpoint
+// trusts the Host header, which any client on the network can set, so listening
+// on every interface let anyone on the same Wi-Fi append to the results file.
+const exposeOnNetwork = process.env.MOSU_PERF_LAN === '1';
+const host = exposeOnNetwork ? '0.0.0.0' : '127.0.0.1';
+
+server.listen(port, host, () => {
   console.log(`Performance page: http://localhost:${port}/`);
-  const addresses = Object.values(networkInterfaces()).flatMap((entries) => entries || [])
-    .filter((entry) => entry.family === 'IPv4' && !entry.internal)
-    .map((entry) => entry.address);
-  for (const address of new Set(addresses)) {
-    console.log(`On the same Wi-Fi: http://${address}:${port}/`);
+  if (exposeOnNetwork) {
+    const addresses = Object.values(networkInterfaces()).flatMap((entries) => entries || [])
+      .filter((entry) => entry.family === 'IPv4' && !entry.internal)
+      .map((entry) => entry.address);
+    for (const address of new Set(addresses)) {
+      console.log(`On the same Wi-Fi: http://${address}:${port}/`);
+    }
+  } else {
+    console.log('Only this machine can reach it. Set MOSU_PERF_LAN=1 to test from another device on the network.');
   }
   console.log('Stop with Ctrl+C. This server exposes the benchmark page, JavaScript modules under src/, and a validated result-save endpoint.');
 });

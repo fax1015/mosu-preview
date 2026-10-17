@@ -1,0 +1,7 @@
+# One line ending everywhere. The repository is LF already; this keeps Windows
+# checkouts with core.autocrlf from mixing CRLF files into the working tree.
+* text=auto eol=lf
+
+*.png binary
+*.otf binary
+*.ttf binary

@@ -13,7 +13,9 @@ const readBuildInfo = async () => {
   try {
     const packageJson = JSON.parse(await readFile(resolve(projectRoot, 'package.json'), 'utf8'));
     version = packageJson.version || version;
-  } catch {}
+  } catch {
+    // Recorded as 'unknown' rather than failing the run.
+  }
 
   let gitCommit = null;
   let gitBranch = null;
@@ -52,7 +54,9 @@ const readBuildInfo = async () => {
       }
       workingTreeFingerprint = fingerprint.digest('hex');
     }
-  } catch {}
+  } catch {
+    // Not a git checkout, or git is unavailable: the revision fields stay null.
+  }
 
   return { version, gitCommit, gitBranch, workingTreeClean, workingTreeFingerprint };
 };

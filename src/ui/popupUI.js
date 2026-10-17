@@ -216,6 +216,31 @@ const bindPopupUiEvents = ({
       return;
     }
 
+    // Ctrl+R, Cmd+W and the like belong to the browser; in the detached window
+    // Ctrl+R used to restart the preview as well as reload it. AltGr arrives as
+    // Ctrl+Alt on Windows, and is how several layouts type `[` and `]`.
+    const hasCommandModifier = (event.ctrlKey || event.metaKey || event.altKey)
+      && !event.getModifierState?.('AltGraph');
+    if (hasCommandModifier) {
+      return;
+    }
+
+    const isShortcutsKey = key === '?' || (key === '/' && shiftKey);
+
+    // A dialog is modal: the preview behind it must not react, and Space on one
+    // of its buttons has to reach that button instead of toggling playback.
+    if (state.infoMenuOpen || state.shortcutsMenuOpen) {
+      if (isShortcutsKey) {
+        setShortcutsMenuOpen(!state.shortcutsMenuOpen);
+      }
+      return;
+    }
+
+    // The cached-mapsets rows are buttons too.
+    if ((key === ' ' || key === 'Enter') && recentPanel?.contains(event.target)) {
+      return;
+    }
+
     // Prevention of browser scrolling for specific keys
     if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
       event.preventDefault();
@@ -286,7 +311,7 @@ const bindPopupUiEvents = ({
         break;
       case '?':
       case '/':
-        if (key === '?' || (key === '/' && shiftKey)) {
+        if (isShortcutsKey) {
           setShortcutsMenuOpen(!state.shortcutsMenuOpen);
         }
         break;

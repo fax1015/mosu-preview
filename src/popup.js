@@ -1,24 +1,14 @@
 import { parseMetadata, parseMapPreviewData, parseBreakPeriods } from './parser.js';
-import { PreviewRenderer, clamp, formatTime } from './renderer.js';
+import { PreviewRenderer, formatTime } from './renderer.js';
+import { clamp } from './core/math.js';
 import {
   PROVIDER_OVERRIDE_KEY,
   AUDIO_VOLUME_KEY,
   DEFAULT_AUDIO_VOLUME,
-  MANIA_SCROLL_SPEED_KEY,
-  MANIA_SCROLL_SCALE_WITH_BPM_KEY,
-  MANIA_SCROLL_DIRECTION_KEY,
-  MANIA_TIMING_NOTE_COLOURS_KEY,
-  STANDARD_SNAKING_SLIDERS_KEY,
-  STANDARD_SLIDER_SNAKE_OUT_KEY,
-  STANDARD_SLIDER_END_CIRCLES_KEY,
-  POPUP_SIZE_KEY,
-  PROVIDER_PRIORITY_KEY,
-  DISABLED_PROVIDERS_KEY,
-  AUTO_FALLBACK_KEY,
   PREVIEW_SETTING_KEYS,
-  HITSOUNDS_KEY,
-  HITSOUND_VOLUME_KEY,
   POPUP_SIZE_PRESETS,
+  applyPreviewSettingChanges,
+  hasPreviewSettingChange,
   normalizeProviderOverride,
   normalizePreviewSettings,
 } from './settings.js';
@@ -26,84 +16,46 @@ import {
   addRuntimeMessageListener,
   addStorageChangedListener,
   createTab,
-  createWindow,
-  getExtensionUrl,
-  getWindow,
   hasStorageArea,
-  hasWindowsApi,
   openOptionsPage,
   queryTabs,
-  removeWindow,
-  sendRuntimeMessage,
   storageGet,
   storageSet,
-  updateWindow,
-  WINDOW_ID_NONE,
-  addTabsActivatedListener,
-  addTabsUpdatedListener,
-  addWindowsFocusChangedListener,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
-import { extractBeatmapInfoFromUrl } from './core/beatmapUrl.js';
-import {
-  DETACHED_WINDOW_BOUNDS_KEY,
-  DETACHED_WINDOW_ID_KEY,
-  MIN_DETACHED_HEIGHT,
-  MIN_DETACHED_WIDTH,
-  buildBeatmapSourceUrl,
-  buildDetachedPageUrl,
-  normalizeDetachedBounds,
-  isBoundsRejection,
-  withoutDetachedPosition,
-  hasDetachedPosition,
-  readDetachedParams,
-} from './core/detachedWindow.js';
-import { isSameFollowTarget, pickBeatmapTabInfo, toFollowTarget } from './core/tabFollow.js';
+import { extractBeatmapInfoFromUrl, normalizeNumericId } from './core/beatmapUrl.js';
+import { buildBeatmapSourceUrl, readDetachedParams } from './core/detachedWindow.js';
+import { toFollowTarget } from './core/tabFollow.js';
 import { convertMapForMode } from './core/beatmapConversion.js';
 import { getHistory, addToHistory, clearHistory, setHistoryDebugLogger } from './core/history.js';
 import {
   state,
   resetState,
-  setPlaybackState,
   setTimelineState,
   setUiState,
   setProviderState,
-  setFullAudioState,
 } from './core/state.js';
 import { createTimingController } from './core/timing.js';
 import {
-  ensureCachedMapsetInfo,
   getCachedMapsetSummaries,
-  getAudioMimeType,
   clearFullAudioCache,
   getFullAudioCacheUsage,
-  normalizePath,
   pruneFullAudioCache,
-  readCachedFullAudioBlob,
   setFullAudioCacheDebugLogger,
-  writeCachedFullAudioBlob,
 } from './audio/cache.js';
-import { extractFullBeatmapAudio, shouldRetryExtractionInPopup } from './audio/fullAudioExtractionCore.js';
-import {
-  PREVIEW_CLIP_LEAD_IN_MS,
-  getPreviewClipAnchorMapMs,
-  isPreviewClipAnchorable,
-  seekAudioElementToMapTime,
-} from './audio/seek.js';
-import {
-  getProviderDisplayName,
-  getProviderSequenceForDownload,
-  loadProviderRuntimeState,
-  probeArchiveSource,
-  FETCH_TIMEOUT_MS,
-  FETCH_TIMEOUT_FAILOVER_MS,
-} from './audio/provider.js';
+import { isPreviewClipAnchorable } from './audio/seek.js';
+import { getProviderDisplayName, loadProviderRuntimeState } from './audio/provider.js';
 import { createPlaybackController } from './audio/playback.js';
+import { PREVIEW_AUDIO_PROVIDER_LABEL, createFullAudioController } from './audio/fullAudioController.js';
+import { waitForAudioElementSeek } from './audio/mediaEvents.js';
 import { buildHitsoundEvents, createHitsoundPlayer } from './audio/hitsounds.js';
+import { createAudioBadgeController } from './ui/audioBadge.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
+import { createDetachController } from './ui/detachController.js';
 import { bindPopupUiEvents } from './ui/popupUI.js';
 import { createUnsupportedViewController } from './ui/unsupportedView.js';
+import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from './core/playbackSpeed.js';
 
 // Resolved and applied before anything else renders: the detached flag decides
 // whether the document is sized as a toolbar popup or as a window, and a late
@@ -227,44 +179,34 @@ const setModalShellVisible = (modalShell, isVisible) => {
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
 const CACHE_KEY = 'mosuPreviewCacheV1';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
-const AUDIO_PREVIEW_BASE = 'https://b.ppy.sh/preview';
-const AUDIO_BADGE_AUTO_HIDE_DELAY_MS = 3500;
 const DEBUG_LOG_LIMIT = 80;
-const PREVIEW_AUDIO_PROVIDER_LABEL = 'b.ppy.sh';
-const CACHE_AUDIO_PROVIDER_LABEL = 'cache';
 // Matches lazer's rate adjust range and precision.
-const MIN_PLAYBACK_SPEED = 0.1;
-const MAX_PLAYBACK_SPEED = 2;
-const PLAYBACK_SPEED_STEP = 0.05;
 const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
 // Marathon maps run well past 12k objects (a 60-minute map is comfortably over
 // 20k). Parsing all of them costs ~40MB and ~300ms, and rendering is windowed,
 // so the old cap only served to cut the timeline short.
 const MAX_PREVIEW_OBJECTS = 40000;
-// Long enough to collapse a burst of hash rewrites, short enough that clicking a
-// difficulty feels like it loads immediately.
-const FOLLOW_SYNC_DEBOUNCE_MS = 250;
+const BEATMAP_FETCH_TIMEOUT_MS = 15000;
 const SUPPORT_LINKS = {
   issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
 };
+// Display names, indexed by mode number.
+const MODE_LABELS = Object.freeze(['osu!', 'taiko', 'catch', 'mania']);
 const UNSUPPORTED_ASCII_TICK_MS = 240;
 const UNSUPPORTED_ASCII_CHAR_WIDTH_PX = 6.2;
 const UNSUPPORTED_ASCII_CHAR_HEIGHT_PX = 11.2;
 const UNSUPPORTED_ASCII_XY_RATIO = UNSUPPORTED_ASCII_CHAR_WIDTH_PX / UNSUPPORTED_ASCII_CHAR_HEIGHT_PX;
 
-const setFullAudioObjectUrl = (newUrl) => {
-  if (state.fullAudioObjectUrl) {
-    URL.revokeObjectURL(state.fullAudioObjectUrl);
-  }
-  state.fullAudioObjectUrl = newUrl || null;
-};
-
+// The full track, or the slice of it playback runs from after a seek.
 const hasFullAudioSource = () => (
   state.audioSyncEnabled
   && Boolean(state.fullAudioObjectUrl)
   && typeof state.audio?.src === 'string'
-  && state.audio.src === state.fullAudioObjectUrl
+  && (
+    state.audio.src === state.fullAudioObjectUrl
+    || (Boolean(state.fullAudioSliceUrl) && state.audio.src === state.fullAudioSliceUrl)
+  )
 );
 
 // True while the visual preview should keep advancing even though the audio
@@ -286,9 +228,13 @@ const getResolvedPlaybackDurationMs = () => {
     return mappedDurationMs;
   }
 
-  const audioDurationMs = Number.isFinite(state.audio?.duration) && state.audio.duration > 0
-    ? Math.round((state.audio.duration * 1000) + state.audioAnchorMapMs)
-    : 0;
+  // A slice cannot be trusted to know the track's length -- an MP3 slice has
+  // no header to measure itself by -- but the index does.
+  const audioDurationMs = state.fullAudioDurationMs > 0
+    ? Math.round(state.fullAudioDurationMs)
+    : (Number.isFinite(state.audio?.duration) && state.audio.duration > 0
+      ? Math.round((state.audio.duration * 1000) + state.audioAnchorMapMs)
+      : 0);
 
   return Math.max(mappedDurationMs, audioDurationMs, 1);
 };
@@ -437,7 +383,6 @@ const unsupportedViewController = createUnsupportedViewController({
   unsupportedAscii,
   state,
   registry,
-  clamp,
   config: {
     tickMs: UNSUPPORTED_ASCII_TICK_MS,
     charWidthPx: UNSUPPORTED_ASCII_CHAR_WIDTH_PX,
@@ -571,25 +516,29 @@ const renderRecentPanel = async () => {
   recentList.innerHTML = '';
 
   cachedEntries.forEach((entry) => {
-    const item = document.createElement('div');
+    // A real button, so the list can be reached and opened from the keyboard.
+    // Its parts are spans because a button may only hold phrasing content.
+    const item = document.createElement('button');
+    item.type = 'button';
     item.className = 'map-preview-recent-item';
-    const thumbnail = document.createElement('div');
+    const thumbnail = document.createElement('span');
     thumbnail.className = 'map-preview-recent-thumbnail';
-    const safeSetId = /^\d+$/.test(String(entry.beatmapSetId || ''))
-      ? String(entry.beatmapSetId)
-      : '';
+    thumbnail.setAttribute('aria-hidden', 'true');
+    const safeSetId = normalizeNumericId(entry.beatmapSetId);
     if (safeSetId) {
       thumbnail.style.backgroundImage = `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`;
+    } else {
+      item.disabled = true;
     }
 
-    const info = document.createElement('div');
+    const info = document.createElement('span');
     info.className = 'map-preview-recent-info';
 
-    const title = document.createElement('div');
+    const title = document.createElement('span');
     title.className = 'map-preview-recent-item-title';
     title.textContent = entry.title || `Beatmap set #${safeSetId || 'unknown'}`;
 
-    const meta = document.createElement('div');
+    const meta = document.createElement('span');
     meta.className = 'map-preview-recent-item-meta';
     meta.textContent = entry.artist || entry.creator
       ? `${entry.artist || 'Unknown artist'} // ${entry.creator || 'Unknown creator'}`
@@ -603,7 +552,9 @@ const renderRecentPanel = async () => {
       if (!safeSetId) {
         return;
       }
-      createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` });
+      createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` }).catch((error) => {
+        addDebugLog(`cached: could not open set ${safeSetId} (${error?.message || error})`);
+      });
     });
     recentList.appendChild(item);
   });
@@ -664,284 +615,6 @@ const openExtensionOptions = async () => {
   }
 };
 
-const setDetachContext = ({ beatmapId, setId, mode } = {}) => {
-  state.detachContext = {
-    beatmapId: String(beatmapId || ''),
-    setId: String(setId || ''),
-    mode: Number.isInteger(mode) ? mode : null,
-  };
-
-  if (detachButton) {
-    detachButton.disabled = !state.detachContext.beatmapId;
-  }
-};
-
-const readStoredDetachedWindowId = async () => {
-  try {
-    const items = await storageGet('session', [DETACHED_WINDOW_ID_KEY], { fallbackAreaName: 'local' });
-    const windowId = Number(items?.[DETACHED_WINDOW_ID_KEY]);
-    return Number.isInteger(windowId) ? windowId : null;
-  } catch {
-    return null;
-  }
-};
-
-const writeStoredDetachedWindowId = async (windowId) => {
-  try {
-    await storageSet('session', { [DETACHED_WINDOW_ID_KEY]: windowId ?? null }, { fallbackAreaName: 'local' });
-  } catch (error) {
-    addDebugLog(`detach: could not persist window id (${error?.message || error})`);
-  }
-};
-
-const readDetachedBounds = async () => {
-  try {
-    const items = await storageGet('local', [DETACHED_WINDOW_BOUNDS_KEY]);
-    return normalizeDetachedBounds(items?.[DETACHED_WINDOW_BOUNDS_KEY] || {});
-  } catch {
-    return normalizeDetachedBounds({});
-  }
-};
-
-/**
- * Focuses the previously opened detached window if it is still around, so the
- * button never leaves the user with two windows fighting over the same audio.
- */
-const focusExistingDetachedWindow = async () => {
-  const windowId = await readStoredDetachedWindowId();
-  if (windowId === null) {
-    return false;
-  }
-
-  const existingWindow = await getWindow(windowId);
-  if (!existingWindow) {
-    await writeStoredDetachedWindowId(null);
-    return false;
-  }
-
-  try {
-    // `drawAttention` is deliberately omitted: Firefox ignores it on a window
-    // that is being focused in the same call.
-    await updateWindow(windowId, { focused: true });
-    return true;
-  } catch {
-    await writeStoredDetachedWindowId(null);
-    return false;
-  }
-};
-
-/**
- * Opening the toolbar popup while a detached window is up closes that window.
- * The action has a `default_popup`, so clicking the icon always opens this page;
- * without this the two previews would play over each other.
- */
-const closeDetachedWindowIfOpen = async () => {
-  try {
-    const windowId = await readStoredDetachedWindowId();
-    if (windowId === null) {
-      return false;
-    }
-
-    const existingWindow = await getWindow(windowId);
-    if (!existingWindow) {
-      await writeStoredDetachedWindowId(null);
-      return false;
-    }
-
-    const closed = await removeWindow(windowId);
-    await writeStoredDetachedWindowId(null);
-    if (closed) {
-      addDebugLog('detach: closed the detached window on popup open');
-    }
-    return closed;
-  } catch (error) {
-    addDebugLog(`detach: could not close detached window (${error?.message || error})`);
-    return false;
-  }
-};
-
-const openDetachedWindow = async () => {
-  const pagePath = buildDetachedPageUrl({
-    beatmapId: state.detachContext.beatmapId,
-    setId: state.detachContext.setId,
-    mode: state.detachContext.mode,
-    // Hand over the playhead so the window picks up where the popup left off.
-    resumeTimeMs: state.mapData ? state.currentTimeMs : -1,
-    resumePaused: !state.isPlaying,
-  });
-
-  if (!pagePath) {
-    showPopupToast('No beatmap to detach yet');
-    return;
-  }
-
-  const pageUrl = getExtensionUrl(pagePath);
-
-  // Firefox for Android has no window management, so the preview opens as a tab
-  // there instead of failing outright.
-  if (!hasWindowsApi()) {
-    try {
-      await createTab({ url: pageUrl });
-      window.close();
-    } catch (error) {
-      addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
-      showPopupToast('Could not open a separate view');
-    }
-    return;
-  }
-
-  try {
-    if (await focusExistingDetachedWindow()) {
-      window.close();
-      return;
-    }
-
-    const bounds = await readDetachedBounds();
-    let createdWindow = null;
-    try {
-      createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...bounds });
-    } catch (error) {
-      if (!isBoundsRejection(error) || !hasDetachedPosition(bounds)) {
-        throw error;
-      }
-      // The remembered position is not on a screen any more -- a monitor was
-      // unplugged, or the resolution changed under it. Keep the size, let the
-      // browser choose where, and forget the position so it cannot strand the
-      // detach button again.
-      addDebugLog('detach: remembered position is off-screen, letting the browser place it');
-      const size = withoutDetachedPosition(bounds);
-      createdWindow = await createWindow({ url: pageUrl, type: 'popup', ...size });
-      void storageSet('local', { [DETACHED_WINDOW_BOUNDS_KEY]: size }).catch(() => {});
-    }
-    await writeStoredDetachedWindowId(createdWindow?.id ?? null);
-    window.close();
-  } catch (error) {
-    addDebugLog(`detach: failed (${error?.message || error})`);
-    showPopupToast('Could not open a separate window');
-  }
-};
-
-const setFollowEnabled = (isEnabled) => {
-  state.followEnabled = Boolean(isEnabled);
-
-  if (followButton) {
-    followButton.classList.toggle('is-following', state.followEnabled);
-    followButton.setAttribute('aria-pressed', state.followEnabled ? 'true' : 'false');
-    const label = state.followEnabled
-      ? 'Following the browser — click to pin this map'
-      : 'Pinned to this map — click to follow the browser';
-    followButton.title = label;
-    followButton.setAttribute('aria-label', label);
-  }
-};
-
-const toggleFollowEnabled = () => {
-  setFollowEnabled(!state.followEnabled);
-  showPopupToast(state.followEnabled ? 'Following the browser' : 'Pinned to this map');
-
-  // Catch up immediately: the user may have browsed elsewhere while pinned.
-  if (state.followEnabled) {
-    void syncPreviewWithBrowsingTabs();
-  }
-};
-
-/**
- * Loads whichever beatmap the user is looking at in a normal browsing window.
- * Staying put when no beatmap tab is open is deliberate: browsing away to an
- * unrelated page should leave the current preview alone rather than blank it.
- */
-const syncPreviewWithBrowsingTabs = async () => {
-  if (!state.followEnabled) {
-    return;
-  }
-
-  let tabs = [];
-  try {
-    // Extension popup windows report as type 'popup', so this cannot match the
-    // detached window itself.
-    tabs = await queryTabs({ active: true, windowType: 'normal' });
-  } catch (error) {
-    addDebugLog(`follow: tab query failed (${error?.message || error})`);
-    return;
-  }
-
-  const picked = pickBeatmapTabInfo(tabs, {
-    preferredWindowId: state.lastFocusedBrowsingWindowId,
-    excludeWindowId: state.detachedWindowId,
-  });
-
-  if (!picked) {
-    return;
-  }
-
-  if (isSameFollowTarget(state.followTarget, toFollowTarget(picked.info))) {
-    return;
-  }
-
-  addDebugLog(`follow: switching to beatmap ${picked.info.beatmapId}`);
-  await initializePreviewForCurrentTab({ sourceUrlOverride: picked.tab.url });
-};
-
-const scheduleFollowSync = () => {
-  // Difficulty clicks rewrite the hash in bursts; the debounce collapses those
-  // into the one map the user actually settled on.
-  state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
-  state.followSyncTimer = registry.addTimeout(setTimeout(() => {
-    void syncPreviewWithBrowsingTabs();
-  }, FOLLOW_SYNC_DEBOUNCE_MS));
-};
-
-const startFollowingBrowsingTabs = () => {
-  setFollowEnabled(true);
-
-  // Needed to exclude this window from the tab scan, and harmless if it fails.
-  void (async () => {
-    try {
-      state.detachedWindowId = await readStoredDetachedWindowId();
-    } catch {
-      state.detachedWindowId = null;
-    }
-  })();
-
-  addTabsUpdatedListener((_tabId, changeInfo) => {
-    // Fires for hash changes too, which is how in-page difficulty switching on a
-    // beatmapset page reaches us.
-    if (changeInfo?.url || changeInfo?.status === 'complete') {
-      scheduleFollowSync();
-    }
-  });
-
-  addTabsActivatedListener(() => {
-    scheduleFollowSync();
-  });
-
-  addWindowsFocusChangedListener((windowId) => {
-    if (windowId === WINDOW_ID_NONE) {
-      return;
-    }
-    if (windowId !== state.detachedWindowId) {
-      state.lastFocusedBrowsingWindowId = windowId;
-    }
-    // Syncing on focus of either window is the safety net: if a hash change ever
-    // fails to raise onUpdated, clicking back to the preview still picks it up.
-    scheduleFollowSync();
-  });
-};
-
-const persistDetachedBounds = () => {
-  state.detachedBoundsTimer = registry.clearTimeout(state.detachedBoundsTimer);
-  state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
-  state.detachedBoundsTimer = registry.addTimeout(setTimeout(() => {
-    const bounds = normalizeDetachedBounds({
-      width: window.outerWidth,
-      height: window.outerHeight,
-      left: window.screenX,
-      top: window.screenY,
-    });
-    void storageSet('local', { [DETACHED_WINDOW_BOUNDS_KEY]: bounds }).catch(() => {});
-  }, 400));
-};
-
 const showPopupToast = (message, hideDelayMs = 3500) => {
   if (!popupToast) {
     return;
@@ -957,6 +630,24 @@ const showPopupToast = (message, hideDelayMs = 3500) => {
   }, hideDelayMs));
 };
 
+
+const {
+  setDetachContext,
+  openDetachedWindow,
+  closeDetachedWindowIfOpen,
+  setFollowEnabled,
+  toggleFollowEnabled,
+  startFollowingBrowsingTabs,
+  persistDetachedBounds,
+} = createDetachController({
+  state,
+  registry,
+  elements: { detachButton, followButton },
+  addDebugLog,
+  showPopupToast,
+  // Declared further down; resolved when a followed tab actually changes.
+  loadPreview: (options) => initializePreviewForCurrentTab(options),
+});
 
 const readProviderOverrideSetting = async () => {
   try {
@@ -1001,21 +692,12 @@ const writeAudioVolumeSetting = async (volume) => {
 const applyAudioVolume = (volume) => {
   const nextVolume = clamp(Number.isFinite(volume) ? volume : DEFAULT_AUDIO_VOLUME, 0, 1);
   state.volume = nextVolume;
-  // When the media element is routed through WebAudio, volume is controlled by a GainNode
-  // so the element itself must stay at 1 to avoid double attenuation (element volume is applied
-  // before MediaElementSource).
-  if (hitsoundPlayer?.isMediaElementAttached?.()) {
-    try {
-      state.audio.volume = 1;
-    } catch {}
-    hitsoundPlayer.setMusicVolume(nextVolume);
-  } else {
-    state.audio.volume = nextVolume;
-    // Keep the WebAudio gain in sync for when an attach later succeeds.
-    try {
-      hitsoundPlayer?.setMusicVolume?.(nextVolume);
-    } catch {}
-  }
+  // Once the music is routed through WebAudio its gain node is the volume
+  // control and the element stays at 1, or the level would be applied twice.
+  // The gain is kept current either way, so an attach later starts at the
+  // right level.
+  hitsoundPlayer.setMusicVolume(nextVolume);
+  state.audio.volume = hitsoundPlayer.isMediaElementAttached() ? 1 : nextVolume;
 
   if (volumeSlider) {
     volumeSlider.value = String(Math.round(nextVolume * 100));
@@ -1037,10 +719,6 @@ const applyPopupSize = (popupSize) => {
   document.documentElement.style.setProperty('--popup-content-width-mobile', `${preset.mobileContentWidth}px`);
 };
 
-// Called after WebAudio routing changes mid-play to rebase clocks without a jump that
-// would look like a backward seek. Set after timingController is created.
-let handleHitsoundRoutingRebase = () => {};
-
 const applyPreviewSettings = (settings = {}) => {
   const normalized = normalizePreviewSettings(settings);
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
@@ -1057,23 +735,19 @@ const applyPreviewSettings = (settings = {}) => {
   state.hitsoundVolume = normalized.hitsoundVolume;
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
-  // Keep music routed through WebAudio only while hitsounds need it. Default off (experimental)
-  // avoids the extra outputLatency delay for the common case.
-  try {
-    const wasAttached = hitsoundPlayer.isMediaElementAttached?.() || false;
-    if (normalized.hitsounds) {
-      hitsoundPlayer.setMusicVolume(state.volume);
-      hitsoundPlayer.attachMediaElement(state.audio);
-    } else {
-      hitsoundPlayer.detachMediaElement();
-      // Restore element volume control when not using WebAudio gain.
-      try { state.audio.volume = clamp(state.volume, 0, 1); } catch {}
-    }
-    const nowAttached = hitsoundPlayer.isMediaElementAttached?.() || false;
-    if (wasAttached !== nowAttached) {
-      try { handleHitsoundRoutingRebase(); } catch {}
-    }
-  } catch {}
+  // The music joins the WebAudio graph the first time hitsounds are on, so the
+  // two share one output latency; until then it plays straight from the
+  // element, without that delay. It does not leave again when they are switched
+  // off: an element cannot be taken back out of the graph, and disconnecting it
+  // silenced the music (see attachMediaElement).
+  //
+  // Joining needs no clock rebase. The visual clock applies the live latency
+  // every frame, and the hitsound player's backward-seek tolerance absorbs the
+  // one-time step -- an explicit syncTo() here would cancel and reschedule the
+  // hits already queued, which sounds doubled.
+  if (normalized.hitsounds) {
+    hitsoundPlayer.attachMediaElement(state.audio);
+  }
   applyPopupSize(normalized.popupSize);
   renderer.setPreviewSettings(normalized);
 };
@@ -1087,15 +761,6 @@ const formatPlaybackSpeedLabel = (speed) => {
     ? String(value)
     : String(value).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
   return `${text}x`;
-};
-
-const normalizePlaybackSpeed = (speed) => {
-  const value = Number(speed);
-  if (!Number.isFinite(value)) {
-    return 1;
-  }
-  const stepped = Math.round(value / PLAYBACK_SPEED_STEP) * PLAYBACK_SPEED_STEP;
-  return Number(clamp(stepped, MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED).toFixed(2));
 };
 
 const syncPlaybackSpeedControls = () => {
@@ -1139,28 +804,21 @@ const setPlaybackSpeedControlEnabled = (enabled) => {
   syncPlaybackSpeedControls();
 };
 
-const hitsoundPlayer = createHitsoundPlayer({ onLog: addDebugLog });
-// Only route music through WebAudio when hitsounds are enabled — otherwise the shared
-// outputLatency adds an audible delay with no benefit (hitsounds off by default).
-try {
-  hitsoundPlayer.setMusicVolume(state.volume);
-  if (state.hitsounds) {
-    hitsoundPlayer.attachMediaElement(state.audio);
-  }
-} catch {}
+// Phones get bigger audio buffers: with the default ones, Firefox for Android
+// crackled through the synthesised hitsounds whenever the device was busy.
+// Desktop keeps the default, which is what its latency compensation was
+// measured against.
+const hitsoundPlayer = createHitsoundPlayer({
+  onLog: addDebugLog,
+  latencyHint: IS_MOBILE_VIEW ? 'playback' : undefined,
+});
 
 const timingController = createTimingController({
   state,
   clamp,
-  getOutputLatencySec: () => {
-    try { return hitsoundPlayer.getOutputLatencySec?.() || 0; } catch { return 0; }
-  },
-  getAttachedLatencySec: () => {
-    try { return hitsoundPlayer.getAttachedLatencySec?.() || 0; } catch { return 0; }
-  },
-  isMediaElementAttached: () => {
-    try { return hitsoundPlayer.isMediaElementAttached?.() || false; } catch { return false; }
-  },
+  getOutputLatencySec: hitsoundPlayer.getOutputLatencySec,
+  getAttachedLatencySec: hitsoundPlayer.getAttachedLatencySec,
+  isMediaElementAttached: hitsoundPlayer.isMediaElementAttached,
 });
 const {
   getCurrentManualMapTime,
@@ -1171,27 +829,19 @@ const {
   applyPlaybackRate,
 } = timingController;
 
-handleHitsoundRoutingRebase = () => {
-  // No explicit rebase — live latency compensation in getAudioMappedTimeMs() handles offset
-  // per-frame. Explicit syncTo() here would cancel and reschedule the same horizon hits
-  // causing a 5ms overlap that sounds doubled. BACKWARD_SEEK_TOLERANCE (60ms) absorbs the
-  // one-time latency jump without duplicate scheduling.
+// A suspended AudioContext (autoplay policy) has to be resumed from the same
+// user gesture that starts the media element, and music routed through it is
+// silent until it is -- including after hitsounds were switched back off.
+// Wrapping play() covers every caller (the playback controller, the hotswap)
+// without threading a helper through each of them.
+const playAudioElement = state.audio.play.bind(state.audio);
+state.audio.play = (...args) => {
+  if (state.hitsounds || hitsoundPlayer.isMediaElementAttached()) {
+    hitsoundPlayer.ensureContext();
+    hitsoundPlayer.resumeContext();
+  }
+  return playAudioElement(...args);
 };
-// Ensure a suspended AudioContext (autoplay policy) resumes on the same user gesture that
-// starts the media element. Patching play keeps every caller (playback controller, hotswap)
-// in sync without threading a helper through all layers.
-try {
-  const originalAudioPlay = state.audio.play.bind(state.audio);
-  state.audio.play = (...args) => {
-    try {
-      if (state.hitsounds) {
-        hitsoundPlayer.ensureContext?.();
-        hitsoundPlayer.resumeContext?.();
-      }
-    } catch {}
-    return originalAudioPlay(...args);
-  };
-} catch {}
 
 // Every jump in the clock -- a scrub, a restart, an audio resync -- funnels
 // through here, so it is the one place the hitsound cursor has to catch up.
@@ -1221,260 +871,20 @@ const cyclePlaybackSpeed = () => {
   applyPlaybackSpeed(PLAYBACK_SPEED_CYCLE[nextIndex]);
 };
 
-const setFullAudioLoading = (isLoading) => {
-  if (!audioStatusBadge) {
-    return;
-  }
-  audioStatusBadge.classList.toggle('is-spinning', Boolean(isLoading));
-};
-
-const setAudioBadge = (stateName, label, tooltip = '') => {
-  if (!audioStatusBadge) {
-    return;
-  }
-
-  state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
-
-  audioStatusBadge.classList.remove('is-hidden');
-  audioStatusBadge.classList.remove('is-preview', 'is-loading', 'is-ready', 'is-failed');
-  audioStatusBadge.classList.add(`is-${stateName}`);
-  audioStatusBadge.textContent = label;
-  audioStatusBadge.title = tooltip || label;
-
-  if (stateName === 'ready') {
-    state.audioBadgeHideTimer = registry.addTimeout(setTimeout(() => {
-      audioStatusBadge.classList.add('is-hidden');
-      state.audioBadgeHideTimer = null;
-    }, AUDIO_BADGE_AUTO_HIDE_DELAY_MS));
-  }
-
-  renderDebugPanel();
-};
-
-// For states with nothing true to say: no map loaded, or the load failed. An
-// optimistic "Preview audio" label over silence is worse than no label at all.
-const hideAudioBadge = () => {
-  if (!audioStatusBadge) {
-    return;
-  }
-
-  state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
-  audioStatusBadge.classList.add('is-hidden');
-  audioStatusBadge.classList.remove('is-spinning');
-  renderDebugPanel();
-};
-
-const formatAudioBadgeLabel = (label, providerLabel) => {
-  if (!providerLabel) {
-    return label;
-  }
-  return `${label} - ${providerLabel}`;
-};
-
-const setAudioBadgeWithProvider = (stateName, label, providerLabel, tooltip = '') => {
-  const finalLabel = formatAudioBadgeLabel(label, providerLabel);
-  const finalTooltip = tooltip || finalLabel;
-  setAudioBadge(stateName, finalLabel, finalTooltip);
-};
-
-const formatArchiveDownloadSize = (bytes) => {
-  if (!(typeof bytes === 'number') || bytes < 0) {
-    return '';
-  }
-  if (bytes >= 1024 * 1024) {
-    const mb = bytes / (1024 * 1024);
-    return mb >= 10 ? `${mb.toFixed(1)} MB` : `${mb.toFixed(2)} MB`;
-  }
-  return `${Math.round(bytes / 1024)} KB`;
-};
-
-const buildArchiveProviderProgressParts = (progress) => {
-  if (!progress || typeof progress.loaded !== 'number' || progress.loaded < 0) {
-    return { providerSuffix: '', tooltipDownload: '' };
-  }
-  const { loaded } = progress;
-  const total = typeof progress.total === 'number' && progress.total > 0 ? progress.total : null;
-  if (total !== null) {
-    const pct = Math.min(100, Math.round((100 * loaded) / total));
-    return {
-      providerSuffix: ` · ${pct}%`,
-      tooltipDownload: `${formatArchiveDownloadSize(loaded)} / ${formatArchiveDownloadSize(total)}`,
-    };
-  }
-  return {
-    providerSuffix: ` · ${formatArchiveDownloadSize(loaded)}`,
-    tooltipDownload: `${formatArchiveDownloadSize(loaded)} received`,
-  };
-};
-
-const showTryingArchiveProviderBadge = (providerLabel, progress) => {
-  const label = String(providerLabel || '').trim()
-    || getProviderDisplayName(state.providerOverride);
-  setProviderState({ currentArchiveProviderLabel: label });
-  const { providerSuffix, tooltipDownload } = buildArchiveProviderProgressParts(progress);
-  const providerLine = `${label}${providerSuffix}`;
-  const title = tooltipDownload
-    ? `Fetching beatmap archive from ${label} — ${tooltipDownload}`
-    : `Fetching beatmap archive from ${label}`;
-  setAudioBadgeWithProvider(
-    'loading',
-    'Loading full audio',
-    providerLine,
-    title,
-  );
-};
-
-// `requireFreshEvent` is for the case where the source was just swapped: the
-// element can still report the previous source's readyState for a tick, so the
-// caller has to wait for an actual event rather than trust it.
-const waitForAudioElementReady = (
-  audioElement,
-  { timeoutMs = 10000, requireFreshEvent = false } = {},
-) => new Promise((resolve) => {
-  if (!requireFreshEvent && audioElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    resolve(true);
-    return;
-  }
-
-  const onReady = () => {
-    cleanup();
-    resolve(true);
-  };
-
-  const onError = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const onTimeout = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const cleanup = () => {
-    registry.clearTimeout(timer);
-    audioElement.removeEventListener('canplay', onReady);
-    audioElement.removeEventListener('loadeddata', onReady);
-    audioElement.removeEventListener('error', onError);
-  };
-
-  const timer = registry.addTimeout(setTimeout(onTimeout, timeoutMs));
-  audioElement.addEventListener('canplay', onReady);
-  audioElement.addEventListener('loadeddata', onReady);
-  audioElement.addEventListener('error', onError);
+const {
+  setFullAudioLoading,
+  setAudioBadge,
+  hideAudioBadge,
+  setAudioBadgeWithProvider,
+  showTryingArchiveProviderBadge,
+} = createAudioBadgeController({
+  badge: audioStatusBadge,
+  state,
+  registry,
+  renderDebugPanel,
+  getProviderDisplayName,
+  setProviderState,
 });
-
-const AUDIO_SEEK_SETTLE_TOLERANCE_SEC = 0.15;
-
-const waitForAudioElementSeek = (audioElement, options = {}) => new Promise((resolve) => {
-  const normalizedOptions = typeof options === 'number' ? { timeoutMs: options } : (options || {});
-  const {
-    expectedTimeSec = null,
-    timeoutMs = 2500,
-  } = normalizedOptions;
-  const getExpectedTimeSec = () => {
-    try {
-      return typeof expectedTimeSec === 'function' ? expectedTimeSec() : expectedTimeSec;
-    } catch {
-      return Number.NaN;
-    }
-  };
-  const isAtExpectedTime = () => {
-    const expected = getExpectedTimeSec();
-    return (
-      !Number.isFinite(expected)
-      || Math.abs(Number(audioElement?.currentTime) - expected) <= AUDIO_SEEK_SETTLE_TOLERANCE_SEC
-    );
-  };
-  const hasSettledAtExpectedTime = () => (
-    audioElement?.seeking === false && isAtExpectedTime()
-  );
-
-  // `currentTime = ...` can queue the media seek before the element flips its
-  // `seeking` flag. Treating that brief gap as completion let a one-shot click
-  // adopt the old audio position; a drag usually issued another seek in time to
-  // hide the race. With a target, only accept an idle element at that position.
-  if (!audioElement?.src || hasSettledAtExpectedTime()) {
-    resolve(true);
-    return;
-  }
-
-  const onSeeked = () => {
-    if (hasSettledAtExpectedTime()) {
-      cleanup();
-      resolve(true);
-    }
-  };
-
-  const onError = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const onTimeout = () => {
-    cleanup();
-    resolve(false);
-  };
-
-  const cleanup = () => {
-    registry.clearTimeout(timer);
-    audioElement.removeEventListener('seeked', onSeeked);
-    audioElement.removeEventListener('error', onError);
-  };
-
-  const timer = registry.addTimeout(setTimeout(onTimeout, timeoutMs));
-  audioElement.addEventListener('seeked', onSeeked);
-  audioElement.addEventListener('error', onError, { once: true });
-  // Cover a seek that completed between the initial check and listener setup.
-  onSeeked();
-});
-
-const setAudioElementSource = (sourceUrl, anchorMapMs) => {
-  // Replacing the source invalidates anything still waiting on the old one: its
-  // seeks can never land now, and its anchor no longer describes this element.
-  beginAudioOperation();
-  state.pendingSeekMapMs = null;
-  if (state.playbackMode === 'seeking') {
-    // Whatever the preview was frozen on is unreachable, and a new source can
-    // take minutes to arrive. Let the visual clock carry it in the meantime.
-    releaseAudioClock();
-  }
-  state.audioSyncEnabled = Boolean(sourceUrl);
-  state.audioAnchorMapMs = Math.max(0, Number.isFinite(anchorMapMs) ? anchorMapMs : 0);
-  state.audioAnchorSrc = sourceUrl || '';
-  state.audio.playbackRate = state.playbackSpeed;
-  if (!sourceUrl) {
-    state.audio.removeAttribute('src');
-    state.audio.load();
-    syncPlaybackDuration();
-    return;
-  }
-
-  if (state.audio.src !== sourceUrl) {
-    try {
-      state.audio.crossOrigin = 'anonymous';
-    } catch {}
-    state.audio.src = sourceUrl;
-    state.audio.load();
-    state.audio.playbackRate = state.playbackSpeed;
-    // Ensure routing is still in place after src change when hitsounds are on.
-    try {
-      if (state.hitsounds) {
-        if (!hitsoundPlayer.isMediaElementAttached()) {
-          hitsoundPlayer.attachMediaElement(state.audio);
-          hitsoundPlayer.setMusicVolume(state.volume);
-        } else {
-          hitsoundPlayer.resumeContext?.();
-        }
-      } else {
-        hitsoundPlayer.resumeContext?.();
-      }
-    } catch {}
-    syncPlaybackDuration();
-    return true;
-  }
-  return false;
-};
 
 let lastTimeLabelText = '';
 
@@ -1521,7 +931,43 @@ const {
     waitForAudioSeek: (audioElement, expectedTimeSec) => waitForAudioElementSeek(audioElement, {
       expectedTimeSec,
     }),
+    // Declared just below; the full-audio controller needs this one first.
+    seekAudio: (targetMs, options) => seekAudioToTrackTime(targetMs, options),
   },
+});
+
+const {
+  configureAudioPreview,
+  upgradeToFullAudioIfPossible,
+  runAudioFetchProbe,
+  releaseFullAudioObjectUrl,
+  seekAudioToTrackTime,
+} = createFullAudioController({
+  state,
+  registry,
+  hitsoundPlayer,
+  addDebugLog,
+  badge: {
+    setAudioBadge,
+    setAudioBadgeWithProvider,
+    hideAudioBadge,
+    setFullAudioLoading,
+    showTryingArchiveProviderBadge,
+  },
+  playback: {
+    beginAudioOperation,
+    isCurrentAudioOperation,
+    holdForAudioSeek,
+    adoptAudioClock,
+    releaseAudioClock,
+  },
+  timing: {
+    getAudioMappedTimeMs,
+    getAudioOutputLatencyMapMs,
+  },
+  syncPlaybackDuration,
+  renderFrame,
+  getCurrentMapsetInfo,
 });
 
 const showCanvasToggleFeedback = (action) => {
@@ -1571,8 +1017,7 @@ const setMetadataText = () => {
   versionLine.title = state.metadata.version || '';
 
   const objectCount = state.mapData.objects.length;
-  const modeNames = ['osu!', 'taiko', 'catch', 'mania'];
-  const modeLabel = modeNames[state.mapData.mode] || 'unknown';
+  const modeLabel = MODE_LABELS[state.mapData.mode] || 'unknown';
 
   const bpmLabel = state.mapData.bpmMin > 0
     ? (Math.round(state.mapData.bpmMin) === Math.round(state.mapData.bpmMax)
@@ -1586,542 +1031,12 @@ const extractSetIdFromMetadata = (beatmapSetID) => {
   if (typeof beatmapSetID !== 'string' || !beatmapSetID) {
     return null;
   }
-  const direct = beatmapSetID.trim();
-  if (/^\d+$/.test(direct)) {
+  const direct = normalizeNumericId(beatmapSetID);
+  if (direct) {
     return direct;
   }
-  const match = direct.match(/beatmapsets\/(\d+)/i);
+  const match = beatmapSetID.match(/beatmapsets\/(\d+)/i);
   return match ? match[1] : null;
-};
-
-const configureAudioPreview = (setId, previewTimeMs, { skipPreviewClip = false } = {}) => {
-  setFullAudioState({
-    previewSetId: null,
-    activeSetId: null,
-    fullAudioSetId: null,
-    fullAudioStatus: 'idle',
-    fullAudioCacheKey: '',
-    fullAudioError: '',
-  });
-  setProviderState({ currentArchiveProviderLabel: '' });
-  setFullAudioLoading(false);
-  setAudioBadgeWithProvider('preview', 'Preview audio', PREVIEW_AUDIO_PROVIDER_LABEL);
-
-  setFullAudioObjectUrl(null);
-
-  if (!setId || !/^\d+$/.test(String(setId))) {
-    setAudioElementSource('', 0);
-    hideAudioBadge();
-    return;
-  }
-
-  const normalizedSetId = String(setId);
-  setFullAudioState({
-    previewSetId: normalizedSetId,
-    activeSetId: normalizedSetId,
-  });
-
-  // PreviewTime is only known once the .osu file has been fetched and parsed, so
-  // the first call of a load passes null. Reporting a verdict about the preview
-  // point here would be guessing, and on a slow connection that guess stays on
-  // screen for the whole download.
-  if (previewTimeMs === null || previewTimeMs === undefined) {
-    setAudioElementSource('', 0);
-    setFullAudioLoading(true);
-    setAudioBadge('loading', 'Loading audio', 'Reading the beatmap to line the audio up.');
-    return;
-  }
-
-  // Resuming lands mid-map, and the b.ppy.sh clip only spans ~10s around the
-  // beatmap's preview point, so it essentially never covers that position.
-  // Attaching it anyway was actively harmful: the clip's duration is still
-  // unknown when playback starts, so the seek out to the resume point is
-  // accepted unvalidated, the element clamps to the end of the clip, and the
-  // forced resync then reports that clamped position back as the playhead --
-  // landing the preview seconds into the map instead of where it left off.
-  if (skipPreviewClip) {
-    setAudioElementSource('', 0);
-    setAudioBadge(
-      'loading',
-      'Waiting for full audio',
-      'Picking the preview up mid-map, past what the short preview clip covers. Waiting for the full track.',
-    );
-    return;
-  }
-
-  // The b.ppy.sh clip is a ~10s excerpt with a 100ms lead-in before the
-  // beatmap's PreviewTime. When PreviewTime is -1 (or absent) osu! generates the
-  // clip from ~40% into the track instead, and that offset is not derivable from
-  // the .osu file. Anchoring it at 0 anyway played the middle of the song over
-  // the start of the map — a large, constant desync. Better to stay silent until
-  // full audio arrives.
-  //
-  // Named for what happens next rather than for the missing metadata: the full
-  // track is already on its way, and the b.ppy.sh clip being unusable is a
-  // detail, not a failure the user has to act on.
-  if (!isPreviewClipAnchorable(previewTimeMs)) {
-    setAudioElementSource('', 0);
-    setAudioBadge(
-      'loading',
-      'Waiting for full audio',
-      'This beatmap has no preview point, so the short preview clip cannot be lined up with the map. Waiting for the full track.',
-    );
-    return;
-  }
-
-  // Worth logging in full, because this is the only anchor in the app that is
-  // inferred rather than known: the clip belongs to the beatmapset while
-  // PreviewTime is read from this difficulty, and b.ppy.sh's lead-in is a
-  // constant we assume rather than one the file states.
-  const previewAnchorMapMs = getPreviewClipAnchorMapMs(previewTimeMs);
-  addDebugLog(
-    `audio: preview clip anchored at ${Math.round(previewAnchorMapMs)}ms `
-    + `(PreviewTime ${Math.round(previewTimeMs)}ms, assumed ${PREVIEW_CLIP_LEAD_IN_MS}ms lead-in)`,
-  );
-  const nextSrc = `${AUDIO_PREVIEW_BASE}/${normalizedSetId}.mp3`;
-  setAudioElementSource(nextSrc, previewAnchorMapMs);
-};
-
-const hotswapToFullAudio = async (audioBlob, setId, sourceAudioFilename, jobId, providerLabel = '') => {
-  if (!audioBlob || !setId || jobId !== state.fullAudioJobId) {
-    return false;
-  }
-
-  addDebugLog(`audio: hotswap start (${sourceAudioFilename}, ${Math.round(audioBlob.size / 1024)} KB)`);
-  // Only used for the preflight probe below, which just needs *some* valid
-  // position. The real commit re-reads the playhead (see commitMapTimeMs).
-  const preflightMapTimeMs = state.currentTimeMs;
-  const wasPlaying = state.isPlaying;
-  const fullAudioUrl = URL.createObjectURL(audioBlob);
-
-  try {
-    const testAudio = new Audio();
-    const releaseTestAudio = () => {
-      testAudio.removeAttribute('src');
-      testAudio.load();
-    };
-    testAudio.preload = 'auto';
-    testAudio.src = fullAudioUrl;
-    testAudio.load();
-
-    const ready = await waitForAudioElementReady(testAudio);
-    if (!ready || jobId !== state.fullAudioJobId) {
-      addDebugLog('audio: hotswap failed, media element not ready');
-      releaseTestAudio();
-      URL.revokeObjectURL(fullAudioUrl);
-      return false;
-    }
-
-    let testSeekOk = false;
-    try {
-      testSeekOk = seekAudioElementToMapTime(testAudio, preflightMapTimeMs, 0, { requireCoverage: false });
-    } catch {
-      testSeekOk = false;
-    }
-
-    if (!testSeekOk) {
-      addDebugLog('audio: hotswap failed, preflight seek rejected');
-      releaseTestAudio();
-      URL.revokeObjectURL(fullAudioUrl);
-      return false;
-    }
-
-    const testSeekTargetSec = Math.max(0, Number.isFinite(testAudio.duration)
-      ? Math.min(preflightMapTimeMs / 1000, testAudio.duration)
-      : preflightMapTimeMs / 1000);
-    const testSeekSettled = await waitForAudioElementSeek(testAudio, {
-      expectedTimeSec: testSeekTargetSec,
-    });
-    releaseTestAudio();
-    if (!testSeekSettled || jobId !== state.fullAudioJobId) {
-      addDebugLog('audio: hotswap failed, preflight seek did not settle');
-      URL.revokeObjectURL(fullAudioUrl);
-      return false;
-    }
-  } catch (error) {
-    addDebugLog(`audio: hotswap preflight failed (${error?.message || 'unknown error'})`);
-    URL.revokeObjectURL(fullAudioUrl);
-    return false;
-  }
-
-  if (state.audio && !state.audio.paused) {
-    state.audio.pause();
-  }
-
-  const previousAudioState = {
-    src: state.audio?.src || '',
-    anchorMapMs: state.audioAnchorMapMs,
-    syncEnabled: state.audioSyncEnabled,
-    fullAudioObjectUrl: state.fullAudioObjectUrl,
-  };
-  const rollbackCommittedSwap = () => {
-    URL.revokeObjectURL(fullAudioUrl);
-    state.fullAudioObjectUrl = previousAudioState.fullAudioObjectUrl || null;
-    setAudioElementSource(previousAudioState.src, previousAudioState.anchorMapMs);
-    state.audioSyncEnabled = previousAudioState.syncEnabled;
-  };
-
-  state.fullAudioObjectUrl = fullAudioUrl;
-  const sourceChanged = setAudioElementSource(fullAudioUrl, 0);
-  const realReady = await waitForAudioElementReady(state.audio, { requireFreshEvent: sourceChanged });
-  if (!realReady || jobId !== state.fullAudioJobId) {
-    addDebugLog('audio: hotswap failed, media element not ready after commit');
-    rollbackCommittedSwap();
-    return false;
-  }
-
-  syncPlaybackDuration();
-
-  // Re-read the playhead instead of reusing the value captured before the four
-  // awaits above. The visual timeline keeps running while the element loads and
-  // seeks, and the user can scrub during that window, so committing the stale
-  // timestamp silently threw their seek away and dropped the map back to
-  // wherever it was when the swap started.
-  const commitMapTimeMs = state.currentTimeMs;
-  if (Math.abs(commitMapTimeMs - preflightMapTimeMs) > 1) {
-    addDebugLog(`audio: playhead moved during hotswap, committing at ${Math.round(commitMapTimeMs)}ms`);
-  }
-
-  // From here the swap goes through the same operation controller as a user
-  // seek, so the two cannot both claim the playhead: whichever started last
-  // wins, and the loser's continuation drops out below instead of resuming from
-  // a timestamp the user has already left.
-  const commitToken = beginAudioOperation();
-  holdForAudioSeek(commitMapTimeMs);
-
-  let hasSyncedSeek = false;
-  try {
-    // Full audio may be marginally shorter than the mapped duration, so clamp
-    // rather than refuse when the playhead sits in that tail.
-    hasSyncedSeek = seekAudioElementToMapTime(
-      state.audio,
-      commitMapTimeMs + getAudioOutputLatencyMapMs(),
-      state.audioAnchorMapMs,
-      { requireCoverage: false },
-    );
-  } catch {
-    hasSyncedSeek = false;
-  }
-
-  if (!hasSyncedSeek) {
-    addDebugLog('audio: hotswap failed, seek sync rejected after commit');
-    rollbackCommittedSwap();
-    releaseAudioClock();
-    return false;
-  }
-
-  const rawSeekTargetSec = (
-    commitMapTimeMs + getAudioOutputLatencyMapMs() - state.audioAnchorMapMs
-  ) / 1000;
-  const seekTargetSec = Math.max(0, Number.isFinite(state.audio.duration)
-    ? Math.min(rawSeekTargetSec, state.audio.duration)
-    : rawSeekTargetSec);
-  const seekSettled = await waitForAudioElementSeek(state.audio, {
-    expectedTimeSec: seekTargetSec,
-  });
-  const landedMapMs = getAudioMappedTimeMs();
-  if (Math.abs(landedMapMs - commitMapTimeMs) > 1) {
-    addDebugLog(
-      `audio: full audio landed at ${Math.round(landedMapMs)}ms for a `
-      + `${Math.round(commitMapTimeMs)}ms seek`,
-    );
-  }
-  // A seek issued after ours has already moved this element and owns the
-  // playhead. Its own continuation will position and resume it, so the swap
-  // stops here rather than rolling back a source that is perfectly good.
-  const isSupersededCommit = !isCurrentAudioOperation(commitToken);
-  if (!isSupersededCommit && (!seekSettled || jobId !== state.fullAudioJobId)) {
-    addDebugLog('audio: hotswap failed, seek did not settle after commit');
-    rollbackCommittedSwap();
-    releaseAudioClock();
-    return false;
-  }
-
-  if (previousAudioState.fullAudioObjectUrl && previousAudioState.fullAudioObjectUrl !== fullAudioUrl) {
-    URL.revokeObjectURL(previousAudioState.fullAudioObjectUrl);
-  }
-
-  setFullAudioState({
-    fullAudioSetId: String(setId),
-    fullAudioStatus: 'ready',
-    fullAudioCacheKey: `${setId}:${normalizePath(sourceAudioFilename).toLowerCase()}`,
-    fullAudioError: '',
-  });
-  setAudioBadgeWithProvider(
-    'ready',
-    'Full audio ready',
-    providerLabel,
-    `Using full audio: ${sourceAudioFilename}`,
-  );
-
-  if (isSupersededCommit) {
-    addDebugLog('audio: hotswap committed, a newer seek owns the playhead');
-    return true;
-  }
-
-  const shouldResumePlayback = wasPlaying || state.isPlaying;
-  if (!shouldResumePlayback) {
-    releaseAudioClock();
-    addDebugLog('audio: hotswap success (paused state)');
-    renderFrame();
-    return true;
-  }
-
-  try {
-    state.audio.playbackRate = state.playbackSpeed;
-    await state.audio.play();
-    if (!isCurrentAudioOperation(commitToken)) {
-      addDebugLog('audio: hotswap resume superseded by a newer seek');
-      return true;
-    }
-    setPlaybackState({ isPlaying: true });
-    adoptAudioClock();
-    renderFrame();
-    addDebugLog('audio: hotswap success, playback resumed');
-    return true;
-  } catch {
-    if (!isCurrentAudioOperation(commitToken)) {
-      return false;
-    }
-    setPlaybackState({ isPlaying: true });
-    releaseAudioClock();
-    addDebugLog('audio: hotswap fallback to manual timeline');
-    return false;
-  }
-};
-
-const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
-  if (!setId || !audioFilename || !/^\d+$/.test(String(setId))) {
-    return;
-  }
-
-  const audioFileName = String(audioFilename).trim();
-  if (!audioFileName) {
-    return;
-  }
-
-  const cacheKey = `${setId}:${normalizePath(audioFileName).toLowerCase()}`;
-  if (
-    state.fullAudioStatus === 'loading'
-    && state.fullAudioCacheKey === cacheKey
-  ) {
-    return;
-  }
-
-  if (
-    state.fullAudioStatus === 'ready'
-    && state.fullAudioCacheKey === cacheKey
-    && state.fullAudioSetId === String(setId)
-  ) {
-    return;
-  }
-
-  state.fullAudioJobId += 1;
-  const jobId = state.fullAudioJobId;
-  setFullAudioState({
-    fullAudioStatus: 'loading',
-    fullAudioCacheKey: cacheKey,
-    fullAudioError: '',
-  });
-  setFullAudioLoading(true);
-  const firstTrySequence = getProviderSequenceForDownload(
-    state.providerOverride,
-    state.providerPriority,
-    state.disabledProviders,
-    state.autoFallback,
-  );
-  showTryingArchiveProviderBadge(
-    firstTrySequence[0]?.label ?? getProviderDisplayName(state.providerOverride),
-  );
-  addDebugLog(`audio: full-load start set=${setId} file=${audioFileName}`);
-
-  try {
-    const cachedBlob = await readCachedFullAudioBlob(setId, audioFileName);
-
-    // Staleness is checked on its own, before the cache result is interpreted.
-    // Folding the two together meant a superseded job that had *found* its audio
-    // fell through to the download path and reported a cache miss: the entry was
-    // there, it just belonged to a job nobody was waiting for any more. Worse,
-    // the service worker aborts whatever extraction is in flight when a new
-    // request arrives, so a stale job reaching that path cancels the download
-    // the live job is waiting on. The newer job does its own cache read, so
-    // there is nothing to hand over here.
-    if (jobId !== state.fullAudioJobId) {
-      addDebugLog('audio: full-load superseded before it could start');
-      return;
-    }
-
-    if (cachedBlob) {
-      setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
-      setAudioBadgeWithProvider('loading', 'Loading full audio', CACHE_AUDIO_PROVIDER_LABEL, 'Using cached full audio');
-      addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB)`);
-      // Entries cached before names were stored only ever get one chance to pick
-      // theirs up, since the write path is skipped for a hit.
-      void ensureCachedMapsetInfo(setId, audioFileName, getCurrentMapsetInfo(), cachedBlob);
-      await hotswapToFullAudio(cachedBlob, setId, audioFileName, jobId, CACHE_AUDIO_PROVIDER_LABEL);
-      return;
-    }
-    addDebugLog('audio: cache miss');
-
-    // Stays null when the worker never answers, which is the main case the
-    // popup's own download exists for.
-    let extractionResult = null;
-    try {
-      extractionResult = await sendRuntimeMessage({
-        type: 'extractFullAudio',
-        jobId,
-        setId,
-        audioFilename: audioFileName,
-        mapsetInfo: getCurrentMapsetInfo(),
-        providerOverride: state.providerOverride,
-        providerPriority: state.providerPriority,
-        disabledProviders: state.disabledProviders,
-        autoFallback: state.autoFallback,
-      });
-    } catch (swMessageError) {
-      addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
-    }
-
-    if (shouldRetryExtractionInPopup(extractionResult)) {
-      addDebugLog(extractionResult?.cacheWriteFailed
-        ? 'audio: worker could not cache the audio; retry download in popup'
-        : 'audio: worker unreachable; retry download in popup');
-      // Tied to this job, so a map switch in the detached window stops a
-      // download nobody is waiting for instead of letting it run to completion.
-      const controller = registry.createAbortController();
-      const isSuperseded = () => {
-        if (jobId === state.fullAudioJobId) {
-          return false;
-        }
-        controller.abort();
-        return true;
-      };
-      try {
-        extractionResult = await extractFullBeatmapAudio({
-          setId,
-          audioFilename: audioFileName,
-          providerOverride: state.providerOverride,
-          userPriority: state.providerPriority,
-          disabledProviders: state.disabledProviders,
-          autoFallback: state.autoFallback,
-          signal: controller.signal,
-          onTryingSource: (providerLabel) => {
-            if (!isSuperseded()) {
-              showTryingArchiveProviderBadge(providerLabel);
-            }
-          },
-          onDownloadProgress: (evt) => {
-            if (isSuperseded()) {
-              return;
-            }
-            showTryingArchiveProviderBadge(evt.providerLabel, {
-              loaded: evt.loaded,
-              total: evt.total,
-            });
-          },
-        });
-      } finally {
-        registry.releaseAbortController(controller);
-      }
-    } else if (!extractionResult.ok) {
-      addDebugLog('audio: worker download failed; not repeating it in popup');
-    }
-    if (!extractionResult?.ok) {
-      throw new Error(extractionResult?.error || 'background extraction failed');
-    }
-
-    if (jobId !== state.fullAudioJobId) {
-      return;
-    }
-    const {
-      sourceLabel,
-      pickedAudioFilename,
-      normalizedPickedAudioFilename,
-      normalizedRequestedAudioFilename,
-      mime,
-      byteLength: cachedByteLength,
-    } = extractionResult;
-
-    setProviderState({ currentArchiveProviderLabel: sourceLabel });
-    setAudioBadgeWithProvider('loading', 'Loading full audio', sourceLabel, `Downloading from ${sourceLabel}`);
-
-    let audioBlob = await readCachedFullAudioBlob(setId, audioFileName);
-    let byteLength = Number.isFinite(cachedByteLength) ? cachedByteLength : (audioBlob?.size || 0);
-    if (audioBlob) {
-      addDebugLog(`audio: archive extracted in worker from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
-    } else if (extractionResult.audioBytes instanceof Uint8Array && extractionResult.audioBytes.byteLength > 0) {
-      audioBlob = new Blob([extractionResult.audioBytes], { type: mime || getAudioMimeType(pickedAudioFilename) });
-      byteLength = extractionResult.audioBytes.byteLength;
-      addDebugLog(`audio: archive extracted in popup from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
-      await writeCachedFullAudioBlob(setId, audioFileName, audioBlob, getCurrentMapsetInfo());
-    }
-
-    if (!audioBlob || byteLength <= 0) {
-      throw new Error('Full-audio extraction returned no cached audio payload.');
-    }
-    addDebugLog(`audio: selected entry ${pickedAudioFilename}`);
-
-    if (normalizedPickedAudioFilename !== normalizedRequestedAudioFilename) {
-      addDebugLog('audio: cache stored under requested metadata filename');
-    }
-    await hotswapToFullAudio(audioBlob, setId, pickedAudioFilename, jobId, sourceLabel);
-  } catch (error) {
-    if (jobId === state.fullAudioJobId) {
-      setFullAudioState({
-        fullAudioStatus: 'failed',
-        fullAudioError: error?.message || 'unknown error',
-      });
-      setAudioBadgeWithProvider(
-        'failed',
-        'Full audio failed',
-        state.currentArchiveProviderLabel,
-        state.fullAudioError,
-      );
-      addDebugLog(`audio: full-load failed -> ${state.fullAudioError}`);
-    }
-  } finally {
-    if (jobId === state.fullAudioJobId) {
-      setFullAudioLoading(false);
-      syncPlaybackDuration();
-      addDebugLog(`audio: full-load end (status=${state.fullAudioStatus})`);
-    }
-  }
-};
-
-const runAudioFetchProbe = async () => {
-  const targetSetId = state.activeSetId || state.previewSetId || state.fullAudioSetId;
-  if (!targetSetId) {
-    addDebugLog('probe: no beatmap set id available');
-    return;
-  }
-
-  const sources = getProviderSequenceForDownload(
-    state.providerOverride,
-    state.providerPriority,
-    state.disabledProviders,
-    state.autoFallback,
-  );
-  if (!sources.length) {
-    addDebugLog('probe: no providers available');
-    return;
-  }
-
-  const probeTimeoutMs = sources.length > 1 ? FETCH_TIMEOUT_FAILOVER_MS : Math.min(FETCH_TIMEOUT_MS, 12000);
-  addDebugLog(`probe: running provider checks for set ${targetSetId} (${getProviderDisplayName(state.providerOverride)})`);
-  addDebugLog(`probe: provider order ${sources.map((source) => source.label).join(' -> ')}`);
-  for (const source of sources) {
-    const result = await probeArchiveSource(source, targetSetId, probeTimeoutMs);
-    if (result.ok) {
-      addDebugLog(
-        `probe: ${source.label} ok (${result.status}) bytes=[${result.firstBytes || 'none'}] url=${result.finalUrl}`,
-      );
-    } else {
-      addDebugLog(
-        `probe: ${source.label} fail (${result.status || 0}) ${result.error || ''} url=${result.finalUrl}`,
-      );
-    }
-  }
-  addDebugLog('probe: complete');
 };
 
 const queryActiveTab = async () => {
@@ -2131,6 +1046,9 @@ const queryActiveTab = async () => {
 
 const fetchBeatmapFile = async (beatmapId) => {
   const controller = registry.createAbortController();
+  // A .osu file is a few hundred KB at most. Without a deadline a stalled
+  // request left "Fetching beatmap" on screen until the popup was closed.
+  const timeout = registry.addTimeout(setTimeout(() => controller.abort(), BEATMAP_FETCH_TIMEOUT_MS));
   try {
     const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
       method: 'GET',
@@ -2151,7 +1069,13 @@ const fetchBeatmapFile = async (beatmapId) => {
     }
 
     return text;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('osu.ppy.sh did not answer in time.');
+    }
+    throw error;
   } finally {
+    registry.clearTimeout(timeout);
     registry.releaseAbortController(controller);
   }
 };
@@ -2207,7 +1131,13 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   setProviderState({ providerOverride: await readProviderOverrideSetting() });
   await loadProviderRuntimeState();
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
-  applyAudioVolume(await readAudioVolumeSetting());
+  const storedVolume = await readAudioVolumeSetting();
+  // A following window reloads on every map switch. A volume change still
+  // waiting to be written is newer than what storage holds, and applying the
+  // stored one would undo it -- and then persist the undone value.
+  if (state.volumePersistTimer === null) {
+    applyAudioVolume(storedVolume);
+  }
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
   applyPreviewSettings(await readPreviewSettings());
   addDebugLog(
@@ -2258,7 +1188,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
         titleLine.textContent = 'Preview unavailable';
         setStatus(info.reason, true);
       }
-      renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
+      renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();
       return;
@@ -2316,13 +1246,12 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     // Breaks feed the mania converter's drain-time difficulty, so they have to
     // be parsed before the conversion rather than alongside the renderer setup.
     const mapData = convertMapForMode({ ...parsedMapData, breaks }, requestedMode);
-    const modeNames = ['osu!', 'taiko', 'catch', 'mania'];
     if (mapData.mode !== parsedMapData.mode) {
       addDebugLog(
-        `init: converted ${modeNames[parsedMapData.mode] || 'unknown'} -> ${modeNames[mapData.mode] || 'unknown'}`,
+        `init: converted ${MODE_LABELS[parsedMapData.mode] || 'unknown'} -> ${MODE_LABELS[mapData.mode] || 'unknown'}`,
       );
     } else {
-      addDebugLog(`init: using ${modeNames[mapData.mode] || 'unknown'} ruleset`);
+      addDebugLog(`init: using ${MODE_LABELS[mapData.mode] || 'unknown'} ruleset`);
     }
     if (parsedMapData.truncated) {
       addDebugLog(
@@ -2345,7 +1274,6 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
 
     state.metadata = metadata;
     state.mapData = mapData;
-    state.breaks = breaks;
     state.mappedDurationMs = durationMs;
     const resume = takePendingResume();
     const startTimeMs = resume
@@ -2361,7 +1289,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     configureAudioPreview(resolvedSetId, metadata.previewTime, { skipPreviewClip: Boolean(resume) });
 
 
-    renderer.setBeatmap(mapData, breaks, durationMs);
+    renderer.setBeatmap(mapData, durationMs);
     // Flattened once per map: sliders contribute a sound per node, so this is
     // longer than the object list and has its own ordering.
     state.hitsoundEvents = buildHitsoundEvents(mapData.objects, {
@@ -2440,7 +1368,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     versionLine.title = '';
     configureAudioPreview(null, null);
     setStatus(error?.message || 'Failed to load beatmap preview.', true);
-    renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, [], 1);
+    renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
     state.mappedDurationMs = 1;
     setTimelineState({ currentTimeMs: 0, durationMs: 1 });
     syncTimeLabelWidth();
@@ -2533,7 +1461,7 @@ window.addEventListener('pagehide', () => {
   stopPlayback();
   state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
   stopTimelineDurationAnimation();
-  setFullAudioObjectUrl(null);
+  releaseFullAudioObjectUrl();
   stopUnsupportedAsciiAnimation();
   hitsoundPlayer.dispose();
   resetState();
@@ -2596,51 +1524,12 @@ initializePreviewForCurrentTab().finally(() => {
 });
 
 addStorageChangedListener((changes, areaName) => {
-  if (areaName !== 'sync') {
+  if (areaName !== 'sync' || !hasPreviewSettingChange(changes)) {
     return;
   }
 
-  if (
-    changes[MANIA_SCROLL_SPEED_KEY]
-    || changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]
-    || changes[MANIA_SCROLL_DIRECTION_KEY]
-    || changes[MANIA_TIMING_NOTE_COLOURS_KEY]
-    || changes[STANDARD_SNAKING_SLIDERS_KEY]
-    || changes[STANDARD_SLIDER_SNAKE_OUT_KEY]
-    || changes[STANDARD_SLIDER_END_CIRCLES_KEY]
-    || changes[POPUP_SIZE_KEY]
-    || changes[PROVIDER_PRIORITY_KEY]
-    || changes[DISABLED_PROVIDERS_KEY]
-    || changes[AUTO_FALLBACK_KEY]
-    || changes[HITSOUNDS_KEY]
-    || changes[HITSOUND_VOLUME_KEY]
-  ) {
-    applyPreviewSettings({
-      maniaScrollSpeed: changes[MANIA_SCROLL_SPEED_KEY]?.newValue ?? state.maniaScrollSpeed,
-      maniaScaleScrollSpeedWithBpm: changes[MANIA_SCROLL_SCALE_WITH_BPM_KEY]?.newValue
-        ?? state.maniaScaleScrollSpeedWithBpm,
-      maniaScrollDirection: changes[MANIA_SCROLL_DIRECTION_KEY]?.newValue
-        ?? state.maniaScrollDirection,
-      maniaTimingNoteColours: changes[MANIA_TIMING_NOTE_COLOURS_KEY]?.newValue
-        ?? state.maniaTimingNoteColours,
-      standardSnakingSliders: changes[STANDARD_SNAKING_SLIDERS_KEY]?.newValue
-        ?? state.standardSnakingSliders,
-      standardSliderSnakeOut: changes[STANDARD_SLIDER_SNAKE_OUT_KEY]?.newValue
-        ?? state.standardSliderSnakeOut,
-      standardSliderEndCircles: changes[STANDARD_SLIDER_END_CIRCLES_KEY]?.newValue
-        ?? state.standardSliderEndCircles,
-      popupSize: changes[POPUP_SIZE_KEY]?.newValue ?? state.popupSize,
-      providerPriority: changes[PROVIDER_PRIORITY_KEY]?.newValue ?? state.providerPriority,
-      disabledProviders: changes[DISABLED_PROVIDERS_KEY]?.newValue ?? state.disabledProviders,
-      autoFallback: changes[AUTO_FALLBACK_KEY]?.newValue ?? state.autoFallback,
-      hitsounds: changes[HITSOUNDS_KEY]?.newValue ?? state.hitsounds,
-      hitsoundVolume: changes[HITSOUND_VOLUME_KEY]?.newValue ?? state.hitsoundVolume,
-    });
-
-    renderFrame();
-
-    if ((state.mapData?.mode ?? 0) === 0 || (state.mapData?.mode ?? 0) === 3) {
-      renderFrame();
-    }
-  }
+  // `state` carries every preview setting under its own key, so it stands in
+  // for the settings in force.
+  applyPreviewSettings(applyPreviewSettingChanges(state, changes));
+  renderFrame();
 });

@@ -1,8 +1,9 @@
 import { MAX_SLIDER_SLIDES } from '../parser.js';
 import { getTimingStateAt } from './controlPoints.js';
 import { buildSliderCurvePoints, getPathLength, positionOnPathAtProgress } from './sliderPath.js';
+import { clamp } from './math.js';
+import { parseModeToken } from './beatmapUrl.js';
 
-const MODE_NAMES = ['osu', 'taiko', 'catch', 'mania'];
 const OSU_WIDTH = 512;
 const TAIKO_VELOCITY_MULTIPLIER = 1.4;
 const SWELL_HIT_MULTIPLIER = 1.65;
@@ -11,29 +12,12 @@ const SWELL_HIT_MULTIPLIER = 1.65;
 // render scan over it) grows without bound.
 const MAX_CATCH_OBJECTS = 60000;
 
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const numberOr = (value, fallback) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 };
 
-const normalizeMode = (mode) => {
-  if (typeof mode === 'string') {
-    const normalized = mode.trim().toLowerCase();
-    if (normalized === 'fruits' || normalized === 'catch') {
-      return 2;
-    }
-    const namedMode = MODE_NAMES.indexOf(normalized);
-    if (namedMode >= 0) {
-      return namedMode;
-    }
-  }
-
-  const numericMode = Number(mode);
-  return Number.isInteger(numericMode) && numericMode >= 0 && numericMode <= 3
-    ? numericMode
-    : null;
-};
+const normalizeMode = parseModeToken;
 
 const cloneSamples = (samples) => (Array.isArray(samples)
   ? samples.map((sample) => (Array.isArray(sample) ? [...sample] : { ...sample }))
@@ -819,12 +803,10 @@ const convertMapForMode = (mapData, requestedMode) => {
 };
 
 export {
-  MODE_NAMES,
   convertMapForMode,
   createLegacyRandom,
   difficultyRange,
   getConversionDifficulty,
   getManiaConversionSeed,
   getManiaKeyCount,
-  normalizeMode,
 };

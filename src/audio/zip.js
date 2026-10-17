@@ -48,12 +48,8 @@ const decodeZipName = (nameBytes, isUtf8) => {
     return decodeCp437(nameBytes);
   }
 
-  try {
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    return decoder.decode(nameBytes);
-  } catch {
-    return String.fromCharCode(...nameBytes);
-  }
+  // Non-fatal, so malformed bytes become U+FFFD rather than an exception.
+  return new TextDecoder('utf-8', { fatal: false }).decode(nameBytes);
 };
 
 const findZipEocdOffset = (bytes) => {
@@ -255,30 +251,34 @@ const mergeUint8Chunks = (chunks, totalBytes) => {
   return merged.buffer;
 };
 
-const readStreamChunkWithDeadline = async (reader, remainingMs) => {
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
-    await reader.cancel();
-    const err = new Error('timeout');
-    err.name = 'AbortError';
-    throw err;
-  }
+const createTimeoutError = () => Object.assign(new Error('timeout'), { name: 'AbortError' });
+
+const withTimeout = async (promise, timeoutMs) => {
   let timeoutId;
   try {
     return await Promise.race([
-      reader.read(),
+      promise,
       new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, remainingMs);
+        timeoutId = setTimeout(() => reject(createTimeoutError()), timeoutMs);
       }),
     ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const readStreamChunkWithDeadline = async (reader, remainingMs) => {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+    await reader.cancel();
+    throw createTimeoutError();
+  }
+  try {
+    return await withTimeout(reader.read(), remainingMs);
   } catch (err) {
     if (err?.name === 'AbortError') {
       await reader.cancel();
     }
     throw err;
-  } finally {
-    clearTimeout(timeoutId);
   }
 };
 
@@ -290,44 +290,79 @@ const emitArchiveBodyProgress = (onProgress, loaded, totalGuess) => {
   onProgress({ loaded: Math.floor(loaded), total });
 };
 
-const withTimeout = async (promise, timeoutMs) => {
-  let timeoutId;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(Object.assign(new Error('timeout'), { name: 'AbortError' }));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timeoutId);
-  }
+/**
+ * Collects a body into one buffer. When the server announces its size the
+ * buffer is allocated once and written in place; holding the chunks and copying
+ * them into a second buffer at the end needed twice the archive's size at the
+ * peak, which for a 200MB download is a lot to ask of a service worker.
+ */
+const createByteSink = (expectedBytes) => {
+  let buffer = expectedBytes > 0 ? new Uint8Array(expectedBytes) : null;
+  let chunks = buffer ? null : [];
+  let length = 0;
+
+  return {
+    get length() {
+      return length;
+    },
+    push(chunk) {
+      if (buffer && length + chunk.byteLength > buffer.byteLength) {
+        // More than announced -- a compressed transfer reports its encoded
+        // size -- so carry on as chunks from here.
+        chunks = [buffer.subarray(0, length)];
+        buffer = null;
+      }
+      if (buffer) {
+        buffer.set(chunk, length);
+      } else {
+        chunks.push(chunk);
+      }
+      length += chunk.byteLength;
+    },
+    toArrayBuffer() {
+      if (!buffer) {
+        return mergeUint8Chunks(chunks, length);
+      }
+      return length === buffer.byteLength ? buffer.buffer : buffer.slice(0, length).buffer;
+    },
+  };
 };
 
-const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs, onProgress) => {
+const startsWithZipSignature = (bytes) => bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+
+/**
+ * Reads a response body into one ArrayBuffer, under a size cap and a deadline
+ * for the whole body.
+ *
+ * With `requireZipSignature`, the read stops as soon as the first two bytes
+ * show the body is not a ZIP -- a mirror answering 200 with an HTML error page
+ * is caught there rather than downloaded in full. `zipProbeMs` additionally
+ * limits how long those first bytes may take, for callers with another
+ * provider to move on to.
+ */
+const readResponseArrayBufferLimited = async (response, {
+  maxBytes = MAX_ARCHIVE_DOWNLOAD_BYTES,
+  bodyBudgetMs = null,
+  requireZipSignature = false,
+  zipProbeMs = null,
+  onProgress,
+} = {}) => {
   const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
   const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
   if (Number.isFinite(contentLength) && contentLength > cap) {
     throw new Error(`archive too large (${contentLength} bytes)`);
   }
-  const totalHint = Number.isFinite(contentLength) && contentLength > 0 ? Math.min(contentLength, cap) : null;
+  const totalHint = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null;
 
-  const bodyDeadline = Number.isFinite(bodyBudgetMs) && bodyBudgetMs > 0
-    ? performance.now() + bodyBudgetMs
-    : null;
+  const startedAtMs = performance.now();
+  const bodyDeadline = Number.isFinite(bodyBudgetMs) && bodyBudgetMs > 0 ? startedAtMs + bodyBudgetMs : null;
+  const probeDeadline = Number.isFinite(zipProbeMs) && zipProbeMs > 0 ? startedAtMs + zipProbeMs : null;
 
   if (!response.body) {
-    if (bodyDeadline === null) {
-      const fallbackBuffer = await response.arrayBuffer();
-      if (fallbackBuffer.byteLength > cap) {
-        throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
-      }
-      emitArchiveBodyProgress(onProgress, fallbackBuffer.byteLength, totalHint ?? fallbackBuffer.byteLength);
-      return fallbackBuffer;
-    }
-    const fallbackBuffer = await withTimeout(response.arrayBuffer(), bodyBudgetMs);
+    const pending = response.arrayBuffer();
+    const fallbackBuffer = bodyDeadline === null
+      ? await pending
+      : await withTimeout(pending, bodyDeadline - performance.now());
     if (fallbackBuffer.byteLength > cap) {
       throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
     }
@@ -336,15 +371,20 @@ const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs, 
   }
 
   const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
+  const sink = createByteSink(totalHint ?? 0);
+  const head = [];
+  let probing = requireZipSignature || probeDeadline !== null;
 
   try {
     while (true) {
-      const chunkResult = bodyDeadline === null
+      const now = performance.now();
+      const remainingMs = Math.min(
+        bodyDeadline === null ? Number.POSITIVE_INFINITY : bodyDeadline - now,
+        probing && probeDeadline !== null ? probeDeadline - now : Number.POSITIVE_INFINITY,
+      );
+      const { done, value } = remainingMs === Number.POSITIVE_INFINITY
         ? await reader.read()
-        : await readStreamChunkWithDeadline(reader, bodyDeadline - performance.now());
-      const { done, value } = chunkResult;
+        : await readStreamChunkWithDeadline(reader, remainingMs);
       if (done) {
         break;
       }
@@ -352,20 +392,33 @@ const readResponseArrayBufferLimited = async (response, maxBytes, bodyBudgetMs, 
         continue;
       }
 
-      totalBytes += value.byteLength;
-      if (totalBytes > cap) {
+      if (sink.length + value.byteLength > cap) {
         await reader.cancel();
-        throw new Error(`archive exceeds limit (${totalBytes} bytes)`);
+        throw new Error(`archive exceeds limit (${sink.length + value.byteLength} bytes)`);
       }
-      chunks.push(value);
-      emitArchiveBodyProgress(onProgress, totalBytes, totalHint ?? null);
+      sink.push(value);
+      emitArchiveBodyProgress(onProgress, sink.length, totalHint);
+
+      if (probing) {
+        for (let i = 0; i < value.byteLength && head.length < 2; i += 1) {
+          head.push(value[i]);
+        }
+        if (head.length >= 2) {
+          if (!startsWithZipSignature(head)) {
+            // The caller sees the non-ZIP header and reports it as such.
+            await reader.cancel();
+            break;
+          }
+          probing = false;
+        }
+      }
     }
   } finally {
     reader.releaseLock();
   }
 
-  emitArchiveBodyProgress(onProgress, totalBytes, totalHint ?? totalBytes);
-  return mergeUint8Chunks(chunks, totalBytes);
+  emitArchiveBodyProgress(onProgress, sink.length, totalHint ?? sink.length);
+  return sink.toArrayBuffer();
 };
 
 const responseLooksLikeBeatmapArchiveDownload = (response) => {
@@ -375,102 +428,6 @@ const responseLooksLikeBeatmapArchiveDownload = (response) => {
   }
   const rawType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   return rawType === 'application/zip' || rawType === 'application/x-zip-compressed';
-};
-
-const readResponseArrayBufferLimitedWithInitialZipProbe = async (
-  response,
-  maxBytes,
-  initialReadDeadlineMs,
-  archiveBodyBudgetMs,
-  onProgress,
-) => {
-  const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
-  const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
-  if (Number.isFinite(contentLength) && contentLength > cap) {
-    throw new Error(`archive too large (${contentLength} bytes)`);
-  }
-  const totalHint = Number.isFinite(contentLength) && contentLength > 0 ? Math.min(contentLength, cap) : null;
-
-  if (!response.body) {
-    const fallbackBuffer = await withTimeout(response.arrayBuffer(), archiveBodyBudgetMs);
-    if (fallbackBuffer.byteLength > cap) {
-      throw new Error(`archive exceeds limit (${fallbackBuffer.byteLength} bytes)`);
-    }
-    emitArchiveBodyProgress(onProgress, fallbackBuffer.byteLength, totalHint ?? fallbackBuffer.byteLength);
-    return fallbackBuffer;
-  }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let totalBytes = 0;
-  const bodyReadStart = performance.now();
-  const bodyDeadline = performance.now() + archiveBodyBudgetMs;
-  let zipConfirmed = false;
-
-  try {
-    while (true) {
-      const now = performance.now();
-      const remainingBudget = bodyDeadline - now;
-      if (remainingBudget <= 0) {
-        await reader.cancel();
-        const err = new Error('timeout');
-        err.name = 'AbortError';
-        throw err;
-      }
-
-      let remainingForRace;
-      if (zipConfirmed) {
-        remainingForRace = remainingBudget;
-      } else {
-        const elapsed = now - bodyReadStart;
-        const remainingProbe = initialReadDeadlineMs - elapsed;
-        remainingForRace = Math.min(remainingBudget, remainingProbe);
-      }
-
-      const chunkResult = await readStreamChunkWithDeadline(reader, remainingForRace);
-      const { done, value } = chunkResult;
-      if (done) {
-        break;
-      }
-      if (!(value instanceof Uint8Array) || value.byteLength <= 0) {
-        continue;
-      }
-
-      totalBytes += value.byteLength;
-      if (totalBytes > cap) {
-        await reader.cancel();
-        throw new Error(`archive exceeds limit (${totalBytes} bytes)`);
-      }
-      chunks.push(value);
-      emitArchiveBodyProgress(onProgress, totalBytes, totalHint ?? null);
-
-      if (!zipConfirmed && totalBytes >= 2) {
-        const head = new Uint8Array(2);
-        let o = 0;
-        for (const ch of chunks) {
-          for (let i = 0; i < ch.byteLength && o < 2; i += 1) {
-            head[o] = ch[i];
-            o += 1;
-          }
-          if (o >= 2) {
-            break;
-          }
-        }
-        if (head[0] === 0x50 && head[1] === 0x4b) {
-          zipConfirmed = true;
-        } else {
-          await reader.cancel();
-          emitArchiveBodyProgress(onProgress, totalBytes, totalHint ?? null);
-          break;
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  emitArchiveBodyProgress(onProgress, totalBytes, totalHint ?? totalBytes);
-  return mergeUint8Chunks(chunks, totalBytes);
 };
 
 const extractZipEntry = async (archiveBytes, entry) => {
@@ -590,7 +547,6 @@ export {
   mergeUint8Chunks,
   readStreamChunkWithDeadline,
   readResponseArrayBufferLimited,
-  readResponseArrayBufferLimitedWithInitialZipProbe,
   responseLooksLikeBeatmapArchiveDownload,
   extractZipEntry,
   pickAudioEntryFromZip,

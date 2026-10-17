@@ -45,15 +45,19 @@ const createPlaybackController = ({
     waitForAudioSeek = async () => true,
     requestFrame = (callback) => requestAnimationFrame(callback),
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
+    // Moves the audio to a time on its own timeline. The default asks the
+    // element to seek; a source the browser cannot seek accurately supplies its
+    // own (see audio/fullAudioController.js).
+    seekAudio = (targetMs, options) => seekAudioElementToMapTime(
+      state.audio,
+      targetMs,
+      state.audioAnchorMapMs,
+      options,
+    ),
   } = helpers;
 
   const seekAudioToMapTime = (mapTimeMs, options) => (
-    seekAudioElementToMapTime(
-      state.audio,
-      mapTimeMs + getAudioOutputLatencyMapMs(),
-      state.audioAnchorMapMs,
-      options,
-    )
+    seekAudio(mapTimeMs + getAudioOutputLatencyMapMs(), options)
   );
 
   const getAudioSeekTargetSec = (mapTimeMs) => {
@@ -279,7 +283,11 @@ const createPlaybackController = ({
     }
 
     if (!state.isPlaying) {
-      syncVisualClockToMapTime(getAudioMappedTimeMs());
+      // Stay exactly where the user put the playhead. A source seeked by slice
+      // deliberately starts a little before its target, and playing re-seeks
+      // from the playhead anyway, so the element's position has nothing to add
+      // here -- following it only made a paused click land early.
+      syncVisualClockToMapTime(targetMapMs);
       state.playbackMode = 'none';
       renderFrame();
       return;

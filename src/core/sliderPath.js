@@ -3,7 +3,7 @@
 // its own straight-line approximation and put every droplet on a curved slider
 // in the wrong place.
 
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+import { clamp } from './math.js';
 
 const pointsEqual = (a, b, epsilon = 0.001) => (
   Math.abs(a.x - b.x) <= epsilon && Math.abs(a.y - b.y) <= epsilon
@@ -380,7 +380,11 @@ const buildSliderCurvePoints = (object, offset = { x: 0, y: 0 }) => {
   return fitted.length >= 2 ? fitted : sampled;
 };
 
-/** Position at a 0-1 fraction of a polyline's arc length. */
+/**
+ * Position at a 0-1 fraction of a polyline's arc length. Runs every frame for
+ * each visible slider ball, so it walks the path in place rather than building
+ * a cleaned copy first; repeated points are zero-length segments either way.
+ */
 const positionOnPathAtProgress = (path, progress) => {
   if (!Array.isArray(path) || path.length === 0) {
     return { x: 0, y: 0 };
@@ -389,7 +393,11 @@ const positionOnPathAtProgress = (path, progress) => {
     return path[0];
   }
 
-  let target = clamp(Number(progress) || 0, 0, 1) * getPathLength(path);
+  let totalLength = 0;
+  for (let i = 1; i < path.length; i += 1) {
+    totalLength += pointDistance(path[i - 1], path[i]);
+  }
+  let target = clamp(Number(progress) || 0, 0, 1) * totalLength;
   for (let i = 1; i < path.length; i += 1) {
     const segmentLength = pointDistance(path[i - 1], path[i]);
     if (target <= segmentLength || i === path.length - 1) {

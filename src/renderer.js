@@ -6,11 +6,12 @@ import {
 import {
   buildSliderCurvePoints,
   getPathLength,
-  pointDistance,
+  positionOnPathAtProgress,
   trimPathFromStart,
   trimPathToLength,
 } from './core/sliderPath.js';
-import { getTimingStateAt } from './core/controlPoints.js';
+import { getElapsedBeatsAt, getTimingSections, getTimingStateAt } from './core/controlPoints.js';
+import { clamp, findFirstIndexAtOrAfter } from './core/math.js';
 
 const OSU_WIDTH = 512;
 const OSU_HEIGHT = 384;
@@ -33,6 +34,21 @@ const STANDARD_FADE_IN_BASE_MS = 400;
 const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
 const MANIA_SCROLL_TRAVEL_HEIGHT_SCALE = 1.34;
+// Beat snaps for the timing-coloured mania notes, coarsest first so a note on a
+// whole beat is never coloured as a 1/16.
+const MANIA_SNAP_COLOURS = Object.freeze([
+  { denominator: 1, colour: { r: 255, g: 238, b: 134 } },
+  { denominator: 2, colour: { r: 105, g: 196, b: 255 } },
+  { denominator: 3, colour: { r: 202, g: 146, b: 255 } },
+  { denominator: 4, colour: { r: 255, g: 116, b: 162 } },
+  { denominator: 6, colour: { r: 126, g: 232, b: 169 } },
+  { denominator: 8, colour: { r: 255, g: 174, b: 103 } },
+  { denominator: 12, colour: { r: 132, g: 255, b: 226 } },
+  { denominator: 16, colour: { r: 235, g: 139, b: 255 } },
+]);
+const MANIA_UNSNAPPED_COLOUR = Object.freeze({ r: 255, g: 255, b: 255 });
+// osu!lazer's TimingControlPoint floor for beat length.
+const MIN_BEAT_LENGTH_MS = 6;
 const MAX_CANVAS_DPR = 2;
 const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
 const canvasContextCache = new WeakMap();
@@ -42,26 +58,6 @@ const sliderPathCache = new WeakMap();
 // stacking algorithm has not decided yet when it asks for these.
 const rawSliderEndCache = new WeakMap();
 const standardSliderTickCache = new WeakMap();
-
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-
-// Hit objects and catch render objects are kept sorted by `time`, so the start
-// of the visible window can be found with a binary search rather than scanning
-// from index 0 on every frame.
-const findFirstIndexAtOrAfter = (items, timeMs) => {
-  let low = 0;
-  let high = items.length;
-  while (low < high) {
-    const mid = (low + high) >> 1;
-    const value = items[mid]?.time;
-    if (Number.isFinite(value) && value < timeMs) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-  return low;
-};
 
 const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(cs, 0, 10));
 
@@ -210,39 +206,9 @@ const getSliderBallPositionOsu = (object, currentTime) => {
   spanProgress = clamp(spanProgress, 0, 1);
 
   const isForward = (spanIndex % 2) === 0;
-  const localProgress = isForward ? spanProgress : (1 - spanProgress);
-
-  const segmentLengths = [];
-  let totalPathLength = 0;
-  for (let i = 1; i < path.length; i += 1) {
-    const dx = path[i].x - path[i - 1].x;
-    const dy = path[i].y - path[i - 1].y;
-    const length = Math.hypot(dx, dy);
-    segmentLengths.push(length);
-    totalPathLength += length;
-  }
-
-  if (totalPathLength <= 0) {
-    return { x: object.x, y: object.y };
-  }
-
-  let targetDistance = localProgress * totalPathLength;
-  for (let i = 0; i < segmentLengths.length; i += 1) {
-    const segmentLength = segmentLengths[i];
-    const start = path[i];
-    const end = path[i + 1];
-
-    if (targetDistance <= segmentLength || i === segmentLengths.length - 1) {
-      const t = segmentLength <= 0 ? 0 : clamp(targetDistance / segmentLength, 0, 1);
-      return {
-        x: start.x + ((end.x - start.x) * t),
-        y: start.y + ((end.y - start.y) * t),
-      };
-    }
-    targetDistance -= segmentLength;
-  }
-
-  return path[path.length - 1];
+  // A zero-length path stays on its (stacked) head, rather than snapping to the
+  // unstacked position the way this used to.
+  return positionOnPathAtProgress(path, isForward ? spanProgress : (1 - spanProgress));
 };
 
 const getObjectStackOffset = (object) => {
@@ -377,11 +343,6 @@ const drawComboNumber = (ctx, text, x, y, radius, alpha = 1) => {
   ctx.fillText(String(text), x, y + 0.5);
 };
 
-const deterministicUnitValue = (seed) => {
-  const x = Math.sin(seed * 12.9898) * 43758.5453;
-  return x - Math.floor(x);
-};
-
 const assignComboIndices = (objects, mode = 0) => {
   let comboIndex = 0;
   let comboIndexWithOffsets = 0;
@@ -470,51 +431,15 @@ const applyPreviewStackingOld = (objects, approachRate, stackLeniency) => {
   }
 };
 
+// osu!lazer's BeatmapProcessor.applyStacking over the whole map. Lazer's version
+// first widens a caller-supplied index range to whole stacks; the preview always
+// passes the full map, so that range can never grow and the widening passes are
+// left out rather than run for nothing.
 const applyPreviewStackingModern = (objects, approachRate, stackLeniency) => {
   const stackThreshold = calculatePreviewStackThreshold(approachRate, stackLeniency);
   const stackDistance = 3;
-  let extendedEndIndex = objects.length - 1;
 
-  // Extend the range when a stack continues beyond the caller-provided end.
-  // The preview processes the whole map, but retaining this pass mirrors lazer's
-  // handling of partial update ranges and keeps the dependency explicit.
-  for (let i = objects.length - 1; i >= 0; i -= 1) {
-    let stackBaseIndex = i;
-    for (let n = stackBaseIndex + 1; n < objects.length; n += 1) {
-      const stackBaseObject = objects[stackBaseIndex];
-      const objectN = objects[n];
-      if (stackBaseObject.kind === 'spinner') {
-        break;
-      }
-      if (objectN.kind === 'spinner') {
-        continue;
-      }
-
-      const stackBaseEndTime = Number(stackBaseObject.endTime) || stackBaseObject.time;
-      if (objectN.time - stackBaseEndTime > stackThreshold) {
-        break;
-      }
-
-      const stackedOnStart = getRawObjectStartPositionOsu(objectN);
-      if (
-        distanceBetweenOsuPositions(getRawObjectStartPositionOsu(stackBaseObject), stackedOnStart) < stackDistance
-        || (
-          stackBaseObject.kind === 'slider'
-          && distanceBetweenOsuPositions(getRawObjectEndPositionOsu(stackBaseObject), stackedOnStart) < stackDistance
-        )
-      ) {
-        stackBaseIndex = n;
-        objectN.stackIndex = 0;
-      }
-    }
-
-    if (stackBaseIndex > extendedEndIndex) {
-      extendedEndIndex = stackBaseIndex;
-    }
-  }
-
-  let extendedStartIndex = 0;
-  for (let i = extendedEndIndex; i > 0; i -= 1) {
+  for (let i = objects.length - 1; i > 0; i -= 1) {
     let n = i;
     let objectI = objects[i];
     if ((objectI.stackIndex || 0) !== 0 || objectI.kind === 'spinner') {
@@ -531,11 +456,6 @@ const applyPreviewStackingModern = (objects, approachRate, stackLeniency) => {
         const objectIEndTime = Number(objectN.endTime) || objectN.time;
         if ((Math.trunc(objectI.time) - Math.trunc(objectIEndTime)) > stackThreshold) {
           break;
-        }
-
-        if (n < extendedStartIndex) {
-          objectN.stackIndex = 0;
-          extendedStartIndex = n;
         }
 
         if (
@@ -765,7 +685,6 @@ export class PreviewRenderer {
     this.playfieldCanvas = playfieldCanvas;
     this.timelineCanvas = timelineCanvas;
     this.mapData = null;
-    this.breaks = [];
     this.durationMs = 0;
     this.currentTimeMs = 0;
     this.timelineDensity = [];
@@ -794,9 +713,8 @@ export class PreviewRenderer {
     this.catchRenderObjects = null;
   }
 
-  setBeatmap(mapData, breaks, durationMs) {
+  setBeatmap(mapData, durationMs) {
     this.mapData = mapData;
-    this.breaks = Array.isArray(breaks) ? breaks : [];
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     this.visualTimelineDurationMs = this.durationMs;
     this.timelineDurationAnimation = null;
@@ -1029,25 +947,7 @@ export class PreviewRenderer {
     }
   }
 
-  getCurrentManiaBpm(currentTime) {
-    const timingPoints = Array.isArray(this.mapData?.timingPoints) ? this.mapData.timingPoints : [];
-    let activeBpm = Number.isFinite(this.mapData?.bpmMin) && this.mapData.bpmMin > 0
-      ? this.mapData.bpmMin
-      : 120;
-
-    for (const timingPoint of timingPoints) {
-      if (!timingPoint || timingPoint.time > currentTime) {
-        break;
-      }
-      if (Number.isFinite(timingPoint.bpm) && timingPoint.bpm > 0) {
-        activeBpm = timingPoint.bpm;
-      }
-    }
-
-    return activeBpm;
-  }
-
-  getManiaTimingControlPoints() {
+  getControlPoints() {
     return Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
   }
 
@@ -1060,71 +960,48 @@ export class PreviewRenderer {
     return Number.isFinite(fallbackBpm) && fallbackBpm > 0 ? fallbackBpm : 120;
   }
 
-  getManiaTimingState(time) {
-    const controlPoints = this.getManiaTimingControlPoints();
-    const applyInheritedSv = !(this.mapData?.conversion?.sourceMode === 0
+  // A standard map converted to mania keeps its greenlines for the sliders it
+  // was converted from, but they never meant anything for scroll speed.
+  maniaAppliesInheritedSv() {
+    return !(this.mapData?.conversion?.sourceMode === 0
       && this.mapData?.conversion?.targetMode === 3);
-    let beatLength = 60000 / 120;
-    let svMultiplier = 1;
-    let sectionStart = 0;
+  }
 
-    for (const point of controlPoints) {
-      if (!point || point.time > time) {
-        break;
-      }
+  getManiaTimingState(time) {
+    const timing = getTimingStateAt(this.getControlPoints(), time);
+    return this.maniaAppliesInheritedSv() ? timing : { ...timing, svMultiplier: 1 };
+  }
 
-      if (point.uninherited && point.beatLength > 0) {
-        beatLength = point.beatLength;
-        svMultiplier = 1;
-        sectionStart = point.time;
-      } else if (applyInheritedSv && !point.uninherited && point.svMultiplier > 0) {
-        svMultiplier = point.svMultiplier;
-      }
-    }
-
-    return {
-      beatLength,
-      bpm: 60000 / Math.max(1, beatLength),
-      svMultiplier,
-      sectionStart,
-    };
+  // Pixels per beat at unit velocity. Scroll speed is this times the velocity
+  // in force, divided by the beat length.
+  getManiaPixelsPerBeat(playfieldHeight) {
+    const baseScrollTimeMs = calculateManiaScrollTimeMs(this.maniaScrollSpeed, 120, false);
+    const basePixelsPerMs = playfieldHeight / Math.max(1, baseScrollTimeMs);
+    const referenceBpm = this.maniaScaleScrollSpeedWithBpm ? 120 : this.getManiaReferenceBpm();
+    return basePixelsPerMs * (60000 / Math.max(1, referenceBpm));
   }
 
   getManiaPixelsPerMs(time, playfieldHeight) {
     const state = this.getManiaTimingState(time);
-    const baseScrollTimeMs = calculateManiaScrollTimeMs(this.maniaScrollSpeed, 120, false);
-    const basePixelsPerMs = playfieldHeight / Math.max(1, baseScrollTimeMs);
-    const referenceBpm = this.maniaScaleScrollSpeedWithBpm ? 120 : this.getManiaReferenceBpm();
-    const bpmScale = state.bpm / Math.max(1, referenceBpm);
-    return basePixelsPerMs * bpmScale * state.svMultiplier;
+    return (this.getManiaPixelsPerBeat(playfieldHeight) * state.svMultiplier) / Math.max(1, state.beatLength);
   }
 
+  /**
+   * Distance a note travels between two timestamps. Scroll speed is piecewise
+   * constant between control points, so this is the difference of two running
+   * beat totals -- it used to re-walk the control points for every segment of
+   * every note, every frame.
+   */
   getManiaScrollOffset(startTime, endTime, playfieldHeight) {
     if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime === endTime) {
       return 0;
     }
 
-    const direction = endTime >= startTime ? 1 : -1;
-    const fromTime = direction > 0 ? startTime : endTime;
-    const toTime = direction > 0 ? endTime : startTime;
-    const controlPoints = this.getManiaTimingControlPoints();
-    let distance = 0;
-    let segmentStart = fromTime;
-
-    for (const point of controlPoints) {
-      if (!point || point.time <= fromTime) {
-        continue;
-      }
-      if (point.time >= toTime) {
-        break;
-      }
-
-      distance += this.getManiaPixelsPerMs(segmentStart, playfieldHeight) * (point.time - segmentStart);
-      segmentStart = point.time;
-    }
-
-    distance += this.getManiaPixelsPerMs(segmentStart, playfieldHeight) * (toTime - segmentStart);
-    return distance * direction;
+    const controlPoints = this.getControlPoints();
+    const withSv = this.maniaAppliesInheritedSv();
+    const elapsedBeats = getElapsedBeatsAt(controlPoints, endTime, { withSv })
+      - getElapsedBeatsAt(controlPoints, startTime, { withSv });
+    return elapsedBeats * this.getManiaPixelsPerBeat(playfieldHeight);
   }
 
   getManiaTimingNoteColour(time) {
@@ -1134,66 +1011,19 @@ export class PreviewRenderer {
     const beatPosition = (time - sectionStart) / beatLength;
     const fraction = beatPosition - Math.floor(beatPosition);
     const normalized = ((fraction % 1) + 1) % 1;
-    const snapColours = [
-      { denominator: 1, colour: { r: 255, g: 238, b: 134 } },
-      { denominator: 2, colour: { r: 105, g: 196, b: 255 } },
-      { denominator: 3, colour: { r: 202, g: 146, b: 255 } },
-      { denominator: 4, colour: { r: 255, g: 116, b: 162 } },
-      { denominator: 6, colour: { r: 126, g: 232, b: 169 } },
-      { denominator: 8, colour: { r: 255, g: 174, b: 103 } },
-      { denominator: 12, colour: { r: 132, g: 255, b: 226 } },
-      { denominator: 16, colour: { r: 235, g: 139, b: 255 } },
-    ];
 
-    for (const { denominator, colour } of snapColours) {
+    for (const { denominator, colour } of MANIA_SNAP_COLOURS) {
       const scaled = normalized * denominator;
       if (Math.abs(scaled - Math.round(scaled)) <= 0.035) {
         return colour;
       }
     }
 
-    return { r: 255, g: 255, b: 255 };
-  }
-
-  getTaikoTimingControlPoints() {
-    return Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
-  }
-
-  getTaikoTimingState(time) {
-    const controlPoints = this.getTaikoTimingControlPoints();
-    let beatLength = 60000 / 120;
-    let svMultiplier = 1;
-    let meter = 4;
-    let sectionStart = 0;
-    let omitFirstBarLine = false;
-
-    for (const point of controlPoints) {
-      if (!point || point.time > time) {
-        break;
-      }
-
-      if (point.uninherited && point.beatLength > 0) {
-        beatLength = point.beatLength;
-        svMultiplier = 1;
-        meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
-        sectionStart = point.time;
-        omitFirstBarLine = Boolean(point.omitFirstBarLine);
-      } else if (!point.uninherited && point.svMultiplier > 0) {
-        svMultiplier = point.svMultiplier;
-      }
-    }
-
-    return {
-      beatLength,
-      svMultiplier,
-      meter,
-      sectionStart,
-      omitFirstBarLine,
-    };
+    return MANIA_UNSNAPPED_COLOUR;
   }
 
   getTaikoPixelsPerMs(time, playfieldWidth) {
-    const timing = this.getTaikoTimingState(time);
+    const timing = getTimingStateAt(this.getControlPoints(), time);
     const baseSliderVelocity = Number.isFinite(this.mapData?.sliderMultiplier) && this.mapData.sliderMultiplier > 0
       ? this.mapData.sliderMultiplier
       : 1.4;
@@ -1202,53 +1032,26 @@ export class PreviewRenderer {
     return pixelsPerBeat / Math.max(1, timing.beatLength);
   }
 
-  getTaikoScrollOffset(startTime, endTime, playfieldWidth) {
-    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime === endTime) {
-      return 0;
-    }
-
-    const direction = endTime >= startTime ? 1 : -1;
-    const fromTime = direction > 0 ? startTime : endTime;
-    const toTime = direction > 0 ? endTime : startTime;
-    const controlPoints = this.getTaikoTimingControlPoints();
-    let distance = 0;
-    let segmentStart = fromTime;
-
-    for (const point of controlPoints) {
-      if (!point || point.time <= fromTime) {
-        continue;
-      }
-      if (point.time >= toTime) {
-        break;
-      }
-
-      distance += this.getTaikoPixelsPerMs(segmentStart, playfieldWidth) * (point.time - segmentStart);
-      segmentStart = point.time;
-    }
-
-    distance += this.getTaikoPixelsPerMs(segmentStart, playfieldWidth) * (toTime - segmentStart);
-    return distance * direction;
-  }
-
   getTaikoMeasureLines(visibleStart, visibleEnd) {
-    const controlPoints = this.getTaikoTimingControlPoints().filter((point) => point?.uninherited && point.beatLength > 0);
-    if (controlPoints.length === 0 || visibleEnd < visibleStart) {
+    const sections = getTimingSections(this.getControlPoints());
+    if (sections.length === 0 || visibleEnd < visibleStart) {
       return [];
     }
 
     const lines = [];
-    for (let i = 0; i < controlPoints.length; i += 1) {
-      const point = controlPoints[i];
+    for (let i = 0; i < sections.length; i += 1) {
+      const point = sections[i];
       const sectionStart = point.time;
-      const sectionEnd = (i + 1 < controlPoints.length) ? controlPoints[i + 1].time : visibleEnd + (point.beatLength * point.meter);
+      const meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
+      // Held to the shortest beat osu! accepts, so a corrupt beat length cannot
+      // turn one frame into millions of bar lines.
+      const measureLength = Math.max(MIN_BEAT_LENGTH_MS, point.beatLength) * meter;
+      const sectionEnd = (i + 1 < sections.length) ? sections[i + 1].time : visibleEnd + measureLength;
       const sectionVisibleStart = Math.max(visibleStart, sectionStart);
       const sectionVisibleEnd = Math.min(visibleEnd, sectionEnd);
       if (sectionVisibleEnd < sectionVisibleStart) {
         continue;
       }
-
-      const meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
-      const measureLength = point.beatLength * meter;
       if (!Number.isFinite(measureLength) || measureLength <= 0) {
         continue;
       }
@@ -1273,27 +1076,8 @@ export class PreviewRenderer {
     return lines;
   }
 
-  getCatchTimingState(time) {
-    const controlPoints = Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
-    let beatLength = 60000 / 120;
-
-    for (const point of controlPoints) {
-      if (!point || point.time > time) {
-        break;
-      }
-      if (point.uninherited && point.beatLength > 0) {
-        beatLength = point.beatLength;
-      }
-    }
-
-    return {
-      beatLength,
-      bpm: 60000 / Math.max(1, beatLength),
-    };
-  }
-
   getStandardTimingState(time) {
-    return getTimingStateAt(this.mapData?.timingControlPoints, time);
+    return getTimingStateAt(this.getControlPoints(), time);
   }
 
   buildStandardSliderTicks(object) {
@@ -1339,32 +1123,9 @@ export class PreviewRenderer {
     const minDistanceFromEnd = velocity * 10;
 
     const path = buildSliderPathPointsOsu(object);
-    const segmentLengths = [];
-    let totalPathLength = 0;
-    for (let i = 1; i < path.length; i += 1) {
-      const segLen = pointDistance(path[i - 1], path[i]);
-      segmentLengths.push(segLen);
-      totalPathLength += segLen;
-    }
-    if (totalPathLength <= 0 || path.length < 2) {
+    if (path.length < 2 || getPathLength(path) <= 0) {
       return cacheTicks();
     }
-
-    const positionAtProgress = (progress) => {
-      let target = clamp(progress, 0, 1) * totalPathLength;
-      for (let i = 0; i < segmentLengths.length; i += 1) {
-        const segLen = segmentLengths[i];
-        if (target <= segLen || i === segmentLengths.length - 1) {
-          const t = segLen <= 0 ? 0 : clamp(target / segLen, 0, 1);
-          return {
-            x: path[i].x + ((path[i + 1].x - path[i].x) * t),
-            y: path[i].y + ((path[i + 1].y - path[i].y) * t),
-          };
-        }
-        target -= segLen;
-      }
-      return path[path.length - 1];
-    };
 
     for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
       const spanStart = object.time + (spanIndex * spanDuration);
@@ -1381,7 +1142,7 @@ export class PreviewRenderer {
 
         ticks.push({
           time: tickTime,
-          position: positionAtProgress(pathProgress),
+          position: positionOnPathAtProgress(path, pathProgress),
         });
       }
     }
@@ -1389,124 +1150,20 @@ export class PreviewRenderer {
     return cacheTicks();
   }
 
-  buildCatchSliderRenderObjects(object) {
-    const renderObjects = [];
-    const { slides, spanDuration } = getSliderSpanTiming(object);
-    const beatLength = this.getCatchTimingState(object.time).beatLength;
-    const sliderTickRate = Number.isFinite(this.mapData?.sliderTickRate) && this.mapData.sliderTickRate > 0
-      ? this.mapData.sliderTickRate
-      : 1;
-    const tickInterval = sliderTickRate > 0 ? (beatLength / sliderTickRate) : spanDuration;
-    const tinyInterval = Math.max(45, Math.min(90, tickInterval / 4));
-
-    const pushAtTime = (time, type) => {
-      const position = getSliderBallPositionOsu(object, clamp(time, object.time, object.endTime));
-      renderObjects.push({
-        time,
-        x: position.x,
-        type,
-        comboIndexWithOffsets: object?.comboIndexWithOffsets,
-      });
-    };
-
-    pushAtTime(object.time, 'fruit');
-    for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
-      const spanStart = object.time + (spanIndex * spanDuration);
-      const spanEnd = Math.min(object.endTime, spanStart + spanDuration);
-      const anchors = [spanStart];
-
-      if (Number.isFinite(tickInterval) && tickInterval > 0) {
-        for (let tickTime = spanStart + tickInterval; tickTime < (spanEnd - 0.001); tickTime += tickInterval) {
-          anchors.push(tickTime);
-          pushAtTime(tickTime, 'droplet');
-        }
-      }
-
-      anchors.push(spanEnd);
-      if (spanEnd > object.time && spanEnd <= object.endTime) {
-        pushAtTime(spanEnd, 'fruit');
-      }
-
-      anchors.sort((a, b) => a - b);
-      for (let i = 1; i < anchors.length; i += 1) {
-        const segmentStart = anchors[i - 1];
-        const segmentEnd = anchors[i];
-        for (let tinyTime = segmentStart + tinyInterval; tinyTime < (segmentEnd - 0.001); tinyTime += tinyInterval) {
-          const position = getSliderBallPositionOsu(object, tinyTime);
-          renderObjects.push({
-            time: tinyTime,
-            x: position.x,
-            type: 'tinyDroplet',
-            comboIndexWithOffsets: object?.comboIndexWithOffsets,
-          });
-        }
-      }
-    }
-
-    return renderObjects;
-  }
-
-  buildCatchSpinnerRenderObjects(object) {
-    const renderObjects = [];
-    const duration = Math.max(1, object.endTime - object.time);
-    const beatLength = this.getCatchTimingState(object.time).beatLength;
-    const bananaInterval = Math.max(20, Math.min(44, beatLength / 8));
-    const count = Math.max(18, Math.floor(duration / bananaInterval));
-
-    for (let i = 0; i <= count; i += 1) {
-      const time = object.time + ((duration * i) / Math.max(1, count));
-      const seed = (object.time * 0.0017) + (i * 0.61803398875);
-      const x = deterministicUnitValue(seed) * OSU_WIDTH;
-      renderObjects.push({
-        time,
-        x,
-        type: 'banana',
-        comboIndexWithOffsets: object?.comboIndexWithOffsets,
-      });
-    }
-
-    return renderObjects;
-  }
-
+  // Catch render objects come from the converter (convertMapForMode supplies
+  // them for every catch map, native or converted). There used to be a second,
+  // approximate generator here for maps without them, which nothing reached and
+  // which placed droplets and bananas differently from the real one.
   getCatchRenderObjects() {
     if (Array.isArray(this.catchRenderObjects)) {
       return this.catchRenderObjects;
     }
 
-    if (Array.isArray(this.mapData?.catchObjects)) {
-      this.catchRenderObjects = this.mapData.catchObjects
-        .map((object, index) => ({ ...object, renderId: Number.isInteger(object.renderId) ? object.renderId : index }))
-        .sort((a, b) => a.time - b.time || a.renderId - b.renderId);
-      return this.catchRenderObjects;
-    }
-
-    const built = [];
-    const objects = Array.isArray(this.mapData?.objects) ? this.mapData.objects : [];
-    for (const object of objects) {
-      if (!object) {
-        continue;
-      }
-
-      if (object.kind === 'spinner' || object.taikoType === 'swell') {
-        built.push(...this.buildCatchSpinnerRenderObjects(object));
-      } else if (object.kind === 'slider') {
-        built.push(...this.buildCatchSliderRenderObjects(object));
-      } else {
-        built.push({
-          time: object.time,
-          x: object.x,
-          type: 'fruit',
-          comboIndexWithOffsets: object?.comboIndexWithOffsets,
-        });
-      }
-    }
-
-    built.sort((a, b) => a.time - b.time);
-    for (let i = 0; i < built.length; i += 1) {
-      built[i].renderId = i;
-    }
-    this.catchRenderObjects = built;
-    return built;
+    const catchObjects = Array.isArray(this.mapData?.catchObjects) ? this.mapData.catchObjects : [];
+    this.catchRenderObjects = catchObjects
+      .map((object, index) => ({ ...object, renderId: Number.isInteger(object.renderId) ? object.renderId : index }))
+      .sort((a, b) => a.time - b.time || a.renderId - b.renderId);
+    return this.catchRenderObjects;
   }
 
   applyCatchHyperDashIndicators(catchObjects, catcherWidthOsu) {
@@ -1805,7 +1462,14 @@ export class PreviewRenderer {
     const dropDistance = Math.max(1, catchContactY - spawnY);
     const pixelsPerMs = dropDistance / lookAheadMs;
     const catcherWidthOsu = (catcherWidth / Math.max(1, playfieldWidth)) * OSU_WIDTH;
-    this.applyCatchHyperDashIndicators(catchObjects, catcherWidthOsu);
+    // Depends only on the objects and the catcher's width, so it is worked out
+    // when either changes. Redoing it every frame walked all of a marathon's
+    // objects -- tens of thousands -- for an answer that never moved.
+    const hyperDashKey = this.catchHyperDashKey;
+    if (hyperDashKey?.objects !== catchObjects || hyperDashKey.catcherWidthOsu !== catcherWidthOsu) {
+      this.applyCatchHyperDashIndicators(catchObjects, catcherWidthOsu);
+      this.catchHyperDashKey = { objects: catchObjects, catcherWidthOsu };
+    }
     const drawCatcherBody = (x, y, width, height, fillStyle) => {
       ctx.fillStyle = fillStyle;
       ctx.fillRect(x - (width / 2), y - (height / 2), width, height);
@@ -2350,14 +2014,20 @@ export class PreviewRenderer {
       return;
     }
 
+    const mode = this.mapData.mode ?? 0;
+    if (mode === 0) {
+      this.renderStandard(ctx, width, height);
+      return;
+    }
+
     const padding = 14;
     const availableWidth = Math.max(10, width - (padding * 2));
     const availableHeight = Math.max(10, height - (padding * 2));
-    let scale = Math.min(availableWidth / OSU_WIDTH, availableHeight / OSU_HEIGHT);
-    let playfieldWidth = OSU_WIDTH * scale;
-    let playfieldHeight = OSU_HEIGHT * scale;
-    let playfieldX = Math.floor((width - playfieldWidth) / 2);
-    let playfieldY = Math.floor((height - playfieldHeight) / 2);
+    const scale = Math.min(availableWidth / OSU_WIDTH, availableHeight / OSU_HEIGHT);
+    const playfieldWidth = OSU_WIDTH * scale;
+    const playfieldHeight = OSU_HEIGHT * scale;
+    const playfieldX = Math.floor((width - playfieldWidth) / 2);
+    const playfieldY = Math.floor((height - playfieldHeight) / 2);
 
     ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
     ctx.fillRect(playfieldX, playfieldY, playfieldWidth, playfieldHeight);
@@ -2365,31 +2035,27 @@ export class PreviewRenderer {
     ctx.lineWidth = 1;
     ctx.strokeRect(playfieldX + 0.5, playfieldY + 0.5, playfieldWidth - 1, playfieldHeight - 1);
 
-    const mode = this.mapData.mode ?? 0;
     if (mode === 1) {
       this.renderTaiko(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight);
-      return;
-    }
-    if (mode === 2) {
+    } else if (mode === 2) {
       this.renderCatch(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight);
-      return;
-    }
-    if (mode === 3) {
+    } else {
       this.renderMania(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight);
-      return;
     }
+  }
 
+  // osu!standard sizes its playfield around the circle radius, so objects at the
+  // edges are not clipped, rather than using the fixed padding the other modes do.
+  renderStandard(ctx, width, height) {
     const standardLayout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
-    ({
+    const {
       scale,
       playfieldX,
       playfieldY,
       playfieldWidth,
       playfieldHeight,
-    } = standardLayout);
+    } = standardLayout;
 
-    ctx.fillStyle = 'rgba(8, 8, 10, 0.85)';
-    ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
     ctx.fillRect(
       standardLayout.visualX,
@@ -2451,7 +2117,7 @@ export class PreviewRenderer {
 
     for (const object of visibleObjects) {
       const combo = getComboColour(this.comboColours, object);
-      let sliderReverseIndicators = [];
+      const sliderReverseIndicators = [];
       let sliderHeadCanvasPoint = null;
       let sliderTailCanvasPoint = null;
       let sliderHeadElapsedMs = -1;
@@ -2945,7 +2611,6 @@ export {
   assignComboIndices,
   applyPreviewStacking,
   formatTime,
-  clamp,
   getComboColour,
   getCircleRadius,
   getStandardPlayfieldLayout,

@@ -139,11 +139,12 @@ const buildStream = ({ blocks, lengths = [], segmentsPerPage = 4, granuleOffset 
   });
   flush(true);
   const lastPage = pages.length - 1;
-  // The packets a slice can start from: not the first two (one only primes,
-  // the next would have ffmpeg time the slice at zero), and only ones that
-  // finish on the page they start on, which is not the last page.
+  // The packets a slice can start from: not the first (the file itself primes
+  // on it), and only ones that finish on the page they start on, which is not
+  // the last page, with another packet finishing after them there.
   const pointEnds = audio
-    .filter((packet, i) => i >= 2 && packet.startPage === packet.endPage && packet.startPage !== lastPage)
+    .filter((packet, i) => i >= 1 && packet.startPage === packet.endPage && packet.startPage !== lastPage
+      && audio[i + 1]?.endPage === packet.endPage)
     .map((packet) => packet.end);
   return { pages, ends, audio, pointEnds, bytes: () => concat(pages.map(writePage)) };
 };
@@ -165,6 +166,31 @@ const readPages = (bytes) => {
   return pages;
 };
 
+// Where FFmpeg starts a stream, by both of its rules. Before July 2026: the
+// first audio page's position less every packet on it. Since: zero less the
+// first packet. Durations as libavcodec's vorbis_parser gives them after a
+// reset: a long block reads its previous-window flag, a short one assumes a
+// short block before it.
+const ffmpegStarts = (bytes) => {
+  const page = readPages(bytes)[2];
+  const durations = [];
+  let previous = BLOCK[0];
+  let at = page.offset + 27 + page.lacing.length;
+  let length = 0;
+  for (const value of page.lacing) {
+    length += value;
+    if (value < 255) {
+      const isLong = (bytes[at] >> 1) & 1;
+      const prior = isLong ? BLOCK[(bytes[at] >> 2) & 1] : previous;
+      durations.push((prior + BLOCK[isLong]) / 4);
+      previous = BLOCK[isLong];
+      at += length;
+      length = 0;
+    }
+  }
+  return { beforeJuly2026: page.granule - durations.reduce((sum, d) => sum + d, 0), sinceJuly2026: -durations[0] };
+};
+
 const BLOCKS = [true, true, false, false, true, true, true, false, true, false, false, true, true, true, true, false, true, true];
 const blobOf = (bytes) => new Blob([bytes], { type: 'audio/ogg' });
 const msOf = (samples) => (samples / SAMPLE_RATE) * 1000;
@@ -184,38 +210,70 @@ test('each packet that finishes on its page is a point, timed where its output b
   assert.equal(index.sampleRate, SAMPLE_RATE);
   assert.equal(index.startMs[0], 0, 'point 0 is the file from its start');
   // A slice primes on its first packet, so it starts where that packet's
-  // output ends. The second audio packet would leave ffmpeg timing the slice
-  // at zero, so the first slice point is the third.
+  // output ends.
   assert.ok(stream.pointEnds.length > 8);
   assert.deepEqual([...index.startMs.slice(1)], stream.pointEnds.map(msOf));
   assert.ok(Math.abs(index.durationMs - msOf(stream.ends.at(-1))) < 1e-9);
 });
 
+// The slice's first page, the page of the file it was rebuilt from, and where
+// the slice goes back to the file's own bytes.
+const rebuiltPage = (bytes, slice) => {
+  const original = readPages(bytes);
+  const rebuilt = readPages(slice)[2];
+  const tailStart = rebuilt.offset + rebuilt.length;
+  const source = original.find((page) => page.offset + page.length === bytes.length - (slice.length - tailStart));
+  return { original, rebuilt, source, tailStart };
+};
+
 test('a slice is the headers, a page rebuilt to start at the packet, then the rest as it was', async () => {
   const stream = buildStream({ blocks: BLOCKS });
   const bytes = stream.bytes();
-  const index = await buildOggVorbisIndex(blobOf(bytes));
-  const original = readPages(bytes);
+
+  for (const renumberSlices of [true, false]) {
+    const index = await buildOggVorbisIndex(blobOf(bytes), { renumberSlices });
+    for (let point = 1; point < index.count; point += 1) {
+      const slice = new Uint8Array(await index.sliceFrom(blobOf(bytes), point).arrayBuffer());
+      assert.ok(readPages(slice).every((page) => page.crcOk), `point ${point}: every page's CRC holds`);
+      const { original, rebuilt, source, tailStart } = rebuiltPage(bytes, slice);
+
+      // The two header pages, untouched.
+      const headerEnd = original[1].offset + original[1].length;
+      assert.deepEqual(slice.subarray(0, headerEnd), bytes.subarray(0, headerEnd));
+
+      // The rebuilt page: a fresh packet first, the original page's tail after
+      // it, and the file as it was from there.
+      assert.ok(source && source.offset >= headerEnd, `point ${point}: rebuilt from an audio page`);
+      assert.equal(rebuilt.flags & 1, 0, 'not a continuation');
+      assert.deepEqual([...rebuilt.lacing], [...source.lacing.subarray(source.lacing.length - rebuilt.lacing.length)]);
+      assert.deepEqual(slice.subarray(tailStart), bytes.subarray(source.offset + source.length));
+
+      // Renumbered, the page counts the samples its packets put out after the
+      // one the slice primes on. Kept, it is where the page was.
+      const primedSamples = Math.round((index.startMs[point] / 1000) * SAMPLE_RATE);
+      assert.equal(rebuilt.granule, renumberSlices ? source.granule - primedSamples : source.granule);
+    }
+  }
+});
+
+test('either FFmpeg starts a renumbered slice where a freshly encoded file starts', async () => {
+  const bytes = buildStream({ blocks: BLOCKS }).bytes();
+  const index = await buildOggVorbisIndex(blobOf(bytes), { renumberSlices: true });
 
   for (let point = 1; point < index.count; point += 1) {
     const slice = new Uint8Array(await index.sliceFrom(blobOf(bytes), point).arrayBuffer());
-    const pages = readPages(slice);
-    assert.ok(pages.every((page) => page.crcOk), `point ${point}: every page's CRC holds`);
-
-    // The two header pages, untouched.
-    const headerEnd = original[1].offset + original[1].length;
-    assert.deepEqual(slice.subarray(0, headerEnd), bytes.subarray(0, headerEnd));
-
-    // The rebuilt page: same granule, a fresh packet first, and the original
-    // page's tail after it.
-    const rebuilt = pages[2];
-    const source = original.find((page) => page.granule === rebuilt.granule && page.offset >= headerEnd);
-    assert.ok(source, `point ${point}: rebuilt page keeps a real page's granule`);
-    assert.equal(rebuilt.flags & 1, 0, 'not a continuation');
-    assert.deepEqual([...rebuilt.lacing], [...source.lacing.subarray(source.lacing.length - rebuilt.lacing.length)]);
-    const tailStart = rebuilt.offset + rebuilt.length;
-    assert.deepEqual(slice.subarray(tailStart), bytes.subarray(source.offset + source.length));
+    const { beforeJuly2026, sinceJuly2026 } = ffmpegStarts(slice);
+    // Just below zero, by the packet the decoder primes on and puts nothing out
+    // for, so the first sample out is at zero: the anchor.
+    assert.ok(sinceJuly2026 < 0);
+    assert.equal(beforeJuly2026, sinceJuly2026, `point ${point}: both rules agree`);
   }
+
+  // Left where it was in the track, the older rule starts the slice there, and
+  // Chromium plays a start above zero as it is.
+  const kept = await buildOggVorbisIndex(blobOf(bytes), { renumberSlices: false });
+  const late = new Uint8Array(await kept.sliceFrom(blobOf(bytes), kept.count - 1).arrayBuffer());
+  assert.ok(ffmpegStarts(late).beforeJuly2026 > 0);
 });
 
 test('a packet that runs onto the next page is not a point', async () => {
@@ -252,10 +310,12 @@ test('only a single Vorbis stream is indexed', async () => {
 
 test('a stream whose positions do not start at zero is still timed from zero', async () => {
   // Positions shifted up: playback still starts at zero, so the shift drops out.
-  // It also lifts the second packet's slice clear of zero, so that one counts.
   const later = buildStream({ blocks: BLOCKS, granuleOffset: 4096 });
-  const laterIndex = await buildOggVorbisIndex(blobOf(later.bytes()));
-  assert.deepEqual([...laterIndex.startMs.slice(1)], [later.audio[1].end, ...later.pointEnds].map(msOf));
+  const laterIndex = await buildOggVorbisIndex(blobOf(later.bytes()), { renumberSlices: true });
+  assert.deepEqual([...laterIndex.startMs.slice(1)], later.pointEnds.map(msOf));
+  // A renumbered slice of it still counts from its own start.
+  const slice = new Uint8Array(await laterIndex.sliceFrom(blobOf(later.bytes()), 3).arrayBuffer());
+  assert.ok(ffmpegStarts(slice).beforeJuly2026 < 0);
 
   // Positions shifted down: the samples before zero are dropped, so every
   // point comes that much sooner.

@@ -11,8 +11,30 @@
 // anchored to the sample it really starts at. Pages are too coarse to start on
 // (often ~0.2s apart), so the slice's first page is rebuilt to begin at the
 // packet.
+//
+// Chromium also gets that page renumbered to count from the slice's own start,
+// because its FFmpeg has changed its mind about where a stream begins. Since
+// July 2026 FFmpeg starts every stream at zero whatever its first page says;
+// before that it took the start from the first page's position, and Chromium
+// keeps a start above zero as it is (the spec's "offsets into the media
+// resource"). A slice that kept its original position had currentTime count
+// from where it was cut -- 101s in for a seek to 101s -- in any Chromium still
+// on the older FFmpeg, such as an Opera GX that had not updated, and the map
+// ran at twice the position and straight off its end. Renumbered, the first
+// packet ends at position zero, as in a freshly encoded file, and both read it
+// the same way. Later pages keep their positions: Chromium counts samples on
+// from the first page, and renumbering every page would mean building each
+// slice from a header and a body part per page, which Chromium takes about
+// 0.2ms a page over -- seconds, for an hour-long track, on every seek.
+//
+// Firefox reads Ogg with its own demuxer, which already counts a stream from
+// its first page whatever that says -- and plays a jump in positions as
+// silence, which is what a renumbered first page followed by the original
+// ones is. Its slices keep the positions they had.
 
 import { createChunkReader } from './blobReader.js';
+
+const READS_OGG_WITH_FFMPEG = !/firefox|fxios/i.test(globalThis.navigator?.userAgent || '');
 
 const FLAG_CONTINUED = 0x01;
 const FLAG_EOS = 0x04;
@@ -100,13 +122,18 @@ const isOgg = (filename, blob) => (
  *
  * Point 0 plays the whole file from its start. Every later point plays from an
  * audio packet, and `startMs[i]` is the time of the first sample that comes out.
+ * `renumberSlices` says whether a slice's first page counts from the slice's
+ * start (for FFmpeg) or keeps its place in the track (for Firefox).
  *
  * @returns {Promise<null | {
  *   format: 'ogg', count: number, startMs: Float64Array, durationMs: number,
  *   sampleRate: number, prerollPoints: number, sliceFrom: (blob: Blob, i: number) => Blob,
  * }>}
  */
-const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) => {
+const buildOggVorbisIndex = async (
+  blob,
+  { chunkBytes = 4 * 1024 * 1024, renumberSlices = READS_OGG_WITH_FFMPEG } = {},
+) => {
   if (!blob || !(blob.size > PAGE_HEADER_BYTES)) return null;
   const reader = createChunkReader(blob, chunkBytes);
   const ensure = async (offset, length) => {
@@ -136,7 +163,6 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
   const pointByte = [];
   const pointCrc = [];
   const pointEndSamples = [];
-  const pointFfmpegDuration = [];
 
   // Vorbis stream state.
   let packetNumber = 0;
@@ -144,7 +170,6 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
   const blockSizes = [0, 0];
   let modeFlags = null;
   let modeMask = 0;
-  let prevMask = 0;
   let previousBlock = null;
   let samples = 0;
   let granuleOffset = null;
@@ -171,7 +196,6 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
       modeFlags = readModeBlockFlags(packet.bytes);
       if (!modeFlags) fail();
       modeMask = ((1 << (Math.floor(Math.log2(Math.max(1, modeFlags.length - 1))) + 1)) - 1) << 1;
-      prevMask = (modeMask | 1) + 1;
       return null;
     }
 
@@ -198,11 +222,6 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
       pointByte.push(packet.firstByte);
       pointCrc.push(packet.startCrc);
       pointEndSamples.push(samples);
-      // The length ffmpeg gives a stream's first packet when it times the first
-      // page (a long block trusts its previous-window flag, a short one assumes
-      // a short predecessor), which is what decides the slice's start time.
-      const assumedPrevious = modeFlags[mode] ? blockSizes[(first & prevMask) ? 1 : 0] : blockSizes[0];
-      pointFfmpegDuration.push((assumedPrevious + block) / 4);
     }
     return samples;
   };
@@ -318,10 +337,10 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
   for (let p = 0; p < pointPage.length; p += 1) {
     const page = pointPage[p];
     if (pageFlags[page] & FLAG_EOS) continue;
-    // ffmpeg times a stream by its first page: the granule less the packets on
-    // it. A slice that would start below zero gets its start trimmed away, so
-    // those stay with point 0.
-    if (granuleOffset + pointEndSamples[p] - pointFfmpegDuration[p] < 1) continue;
+    // Renumbered, the slice's first page sits at the samples its later packets
+    // put out. With none after this one that is zero, which FFmpeg takes for a
+    // broken file and drops every timestamp on the page.
+    if (pageGranule[page] - granuleOffset - pointEndSamples[p] < 1) continue;
     const ms = toMs(pointEndSamples[p] + timelineShift);
     if (ms <= startMs[startMs.length - 1]) continue;
     points.push(p);
@@ -339,9 +358,12 @@ const buildOggVorbisIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) 
     const segments = pageSegments[page] - firstSegment;
     const header = new Uint8Array(PAGE_HEADER_BYTES + segments);
     const view = new DataView(header.buffer);
+    // Renumbered, it counts from the end of the packet the slice primes on: the
+    // sample startMs[i] describes.
+    const granule = renumberSlices ? pageGranule[page] - granuleOffset - pointEndSamples[p] : pageGranule[page];
     header.set([0x4f, 0x67, 0x67, 0x53, 0, pageFlags[page] & FLAG_EOS]);
-    view.setUint32(6, pageGranule[page] % 0x100000000, true);
-    view.setUint32(10, Math.floor(pageGranule[page] / 0x100000000), true);
+    view.setUint32(6, granule % 0x100000000, true);
+    view.setUint32(10, Math.floor(granule / 0x100000000), true);
     view.setUint32(14, serial, true);
     view.setUint32(18, pageSequence[page], true);
     header[26] = segments;

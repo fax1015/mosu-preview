@@ -4,8 +4,19 @@ import { buildHitsoundEvents, createHitsoundPlayer } from '../src/audio/hitsound
 
 const RUN_MS = 8000;
 const OBJECT_COUNT = 8000;
+const SLIDER_ANCHOR_COUNT = 4344;
+const SLIDER_TIME_MS = 12961;
+const SLIDER_STRESS_SCENARIO = 'anchor-heavy-slider';
+const ASPIRE_SCENARIO = 'aspire-conic';
+const ASPIRE_MAP_ID = '5839914';
+const ASPIRE_MAP_PATH = `/scripts/benchmark-maps/${ASPIRE_MAP_ID}.osu`;
+// osu! beatmap 5839914 ("conic", Aspire) at the point where its 7,427-anchor
+// decorative sliders are on screen. This is the map that made culling anchor
+// dense slider paths worthwhile in the first place.
+const ASPIRE_MAP_TIME_MS = 83300;
 const BASELINE_KEY = 'mosu-preview-performance-baseline-v1';
 const runButton = document.querySelector('#run');
+const scenarioElement = document.querySelector('#scenario');
 const saveButton = document.querySelector('#save');
 const clearButton = document.querySelector('#clear');
 const statusElement = document.querySelector('#status');
@@ -19,7 +30,7 @@ const percentile = (values, ratio) => {
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * ratio))];
 };
 
-const generateBeatmapText = () => {
+const generateObjectStressBeatmapText = () => {
   const lines = [
     'osu file format v14',
     '',
@@ -55,6 +66,55 @@ const generateBeatmapText = () => {
   return lines.join('\n');
 };
 
+const generateAnchorStressBeatmapText = () => {
+  const lines = [
+    'osu file format v14',
+    '',
+    '[General]',
+    'Mode:0',
+    '',
+    '[Difficulty]',
+    'CircleSize:4.2',
+    'SliderMultiplier:1.4',
+    'SliderTickRate:1',
+    'ApproachRate:9.5',
+    'OverallDifficulty:8',
+    '',
+    '[TimingPoints]',
+    '0,500,4,1,0,100,1,0',
+    '',
+    '[HitObjects]',
+  ];
+  const anchors = [];
+  for (let index = 0; anchors.length < SLIDER_ANCHOR_COUNT; index += 1) {
+    const progress = index / (SLIDER_ANCHOR_COUNT * 0.72);
+    const phase = progress * Math.PI * 16;
+    const point = index === 0
+      ? { x: 421, y: 247 }
+      : {
+        x: Math.round(256 + (238 * Math.sin(phase)) + (2 * Math.sin(index * 1.71))),
+        y: Math.round(192 + (174 * Math.sin(phase * 0.71)) + (2 * Math.cos(index * 1.37))),
+      };
+    anchors.push(point);
+    // Repeated anchors split the path into the small Bezier spans used by
+    // the reference map. Keep the raw anchor count exact for comparisons.
+    if (index % 3 === 2 && anchors.length < SLIDER_ANCHOR_COUNT) {
+      anchors.push(point);
+    }
+  }
+  const path = anchors.map((point) => `${point.x}:${point.y}`).join('|');
+  lines.push(`421,247,${SLIDER_TIME_MS},2,0,B|${path},1,5400,0|0,0:0:0:0:`);
+  return lines.join('\n');
+};
+
+const loadAspireBenchmarkMapText = async () => {
+  const response = await fetch(ASPIRE_MAP_PATH);
+  if (!response.ok) {
+    throw new Error(`Benchmark map ${ASPIRE_MAP_ID} could not be loaded (${response.status}).`);
+  }
+  return response.text();
+};
+
 const createToneWavUrl = () => {
   const sampleRate = 22050;
   const sampleCount = sampleRate;
@@ -85,9 +145,23 @@ const createToneWavUrl = () => {
   return URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
 };
 
+// parseMapPreviewData reports the map's last object time as `maxObjectTime`,
+// not `durationMs`. Passing the missing field let setBeatmap fall back to a
+// one-millisecond duration, so every benchmark pass clamped its time to 1 ms
+// and drew an empty playfield. Derive the duration from the parsed objects
+// instead, so a scenario's fixed time is always reachable.
+const resolveMapDurationMs = (mapData) => {
+  let durationMs = Number.isFinite(mapData?.maxObjectTime) ? mapData.maxObjectTime : 0;
+  for (const object of (mapData?.objects || [])) {
+    const endTime = Number(object?.endTime);
+    if (Number.isFinite(endTime) && endTime > durationMs) durationMs = endTime;
+  }
+  return Math.max(1, durationMs);
+};
+
 const makeRenderer = (mapData) => {
   const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
-  renderer.setBeatmap(mapData, mapData.durationMs);
+  renderer.setBeatmap(mapData, resolveMapDurationMs(mapData));
   renderer.setPreviewSettings({
     standardSnakingSliders: true,
     standardSliderSnakeOut: true,
@@ -102,7 +176,7 @@ const deviceSignature = () => JSON.stringify({
   screen: `${screen.width}x${screen.height}`,
 });
 
-const runPass = ({ renderer, player, events, audioEnabled }) => new Promise((resolve) => {
+const runPass = ({ renderer, player, events, audioEnabled, fixedMapTimeMs = null }) => new Promise((resolve) => {
   const intervals = [];
   const workTimes = [];
   let frameCount = 0;
@@ -116,7 +190,9 @@ const runPass = ({ renderer, player, events, audioEnabled }) => new Promise((res
     if (previousFrameAt) intervals.push(rafTimestamp - previousFrameAt);
     previousFrameAt = rafTimestamp;
 
-    const mapTimeMs = Math.max(0, rafTimestamp - firstFrameAt);
+    const mapTimeMs = Number.isFinite(fixedMapTimeMs)
+      ? fixedMapTimeMs
+      : Math.max(0, rafTimestamp - firstFrameAt);
     if (audioEnabled) {
       player.update(events, mapTimeMs, { rate: 1 });
     }
@@ -151,6 +227,10 @@ const runPass = ({ renderer, player, events, audioEnabled }) => new Promise((res
 });
 
 const formatMs = (value) => `${value.toFixed(2)} ms`;
+const formatTime = (ms) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+};
 const formatDelta = (current, baseline) => {
   if (!Number.isFinite(baseline) || baseline <= 0) return '—';
   const delta = ((current / baseline) - 1) * 100;
@@ -181,7 +261,7 @@ const renderResults = (results, baseline) => {
     const frameLabel = `${frameDelta > 0 ? '+' : ''}${frameDelta.toFixed(1)}%`;
     const workLabel = `${workDelta > 0 ? '+' : ''}${workDelta.toFixed(1)}%`;
     summary = `Audio-pass p95 frame interval vs baseline: ${frameLabel}; p95 JS work: ${workLabel}. `
-      + 'Negative percentages mean faster. Compare on the same device and browser.';
+    + 'Negative percentages mean faster. Compare on the same device and browser.';
   }
 
   resultsElement.innerHTML = `
@@ -190,8 +270,60 @@ const renderResults = (results, baseline) => {
       <thead><tr><th>Pass</th><th>FPS</th><th>Frame p50</th><th>Frame p95</th><th>Frame p99</th><th>JS work p95</th><th>Dropped</th><th>p95 vs baseline</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="note">Device: ${navigator.userAgent} · DPR ${window.devicePixelRatio || 1} · ${OBJECT_COUNT.toLocaleString()} objects · ${results.visual.frameCount.toLocaleString()} measured frames per pass</p>`;
+    <p class="note">Device: ${navigator.userAgent} · DPR ${window.devicePixelRatio || 1} · ${results.benchmark.description} · ${results.visual.frameCount.toLocaleString()} measured frames per pass</p>`;
 };
+
+// Both anchor-heavy scenarios can be run straight from the URL, which is how
+// they are driven when comparing renderer changes.
+const AUTO_BENCHMARK_SCENARIOS = {
+  [SLIDER_STRESS_SCENARIO]: {
+    title: 'Anchor-heavy slider',
+    prepare: async () => parseMapPreviewData(generateAnchorStressBeatmapText(), { maxObjects: 1 }),
+    fixedMapTimeMs: SLIDER_TIME_MS + 1,
+    note: `${SLIDER_ANCHOR_COUNT.toLocaleString()} generated anchors, held at ${formatTime(SLIDER_TIME_MS + 1)} for ${RUN_MS / 1000} seconds.`,
+  },
+  [ASPIRE_SCENARIO]: {
+    title: `conic (${ASPIRE_MAP_ID})`,
+    prepare: async () => parseMapPreviewData(
+      await loadAspireBenchmarkMapText(),
+      { maxObjects: 2000 },
+    ),
+    fixedMapTimeMs: ASPIRE_MAP_TIME_MS,
+    note: `osu! beatmap ${ASPIRE_MAP_ID} ("conic", Aspire), held at ${formatTime(ASPIRE_MAP_TIME_MS)} (7,427-anchor decorative sliders on screen) for ${RUN_MS / 1000} seconds.`,
+  },
+};
+
+const runAutomaticVisualBenchmark = async (scenarioKey) => {
+  const scenario = AUTO_BENCHMARK_SCENARIOS[scenarioKey];
+  runButton.disabled = true;
+  statusElement.textContent = `Preparing ${scenario.title}…`;
+  try {
+    const mapData = await scenario.prepare();
+    const renderer = makeRenderer(mapData);
+    const visual = await runPass({
+      renderer,
+      player: null,
+      events: [],
+      audioEnabled: false,
+      fixedMapTimeMs: scenario.fixedMapTimeMs,
+    });
+    resultsElement.innerHTML = `
+      <p><strong>${scenario.title} FPS: ${visual.fps.toFixed(1)}</strong></p>
+      <p>Frame interval p50/p95/p99: ${formatMs(visual.intervalP50)} / ${formatMs(visual.intervalP95)} / ${formatMs(visual.intervalP99)}. JS work p95: ${formatMs(visual.workP95)}. Dropped frames: ${visual.droppedPercent.toFixed(1)}%.</p>
+      <p class="note">${scenario.note}</p>`;
+    statusElement.textContent = `Visual benchmark complete (${visual.frameCount.toLocaleString()} frames).`;
+  } catch (error) {
+    statusElement.textContent = `Benchmark failed: ${error?.message || error}`;
+  } finally {
+    runButton.disabled = false;
+  }
+};
+
+const autoBenchmark = new URLSearchParams(window.location.search).get('autobench');
+if (autoBenchmark && AUTO_BENCHMARK_SCENARIOS[autoBenchmark]) {
+  scenarioElement.value = autoBenchmark;
+  void runAutomaticVisualBenchmark(autoBenchmark);
+}
 
 let latestResults = null;
 runButton.addEventListener('click', async () => {
@@ -202,9 +334,28 @@ runButton.addEventListener('click', async () => {
   let audio;
   let audioUrl;
   try {
-    statusElement.textContent = 'Preparing 8,000 objects and slider geometry…';
+    const scenario = scenarioElement.value;
+    const isSliderStress = scenario === SLIDER_STRESS_SCENARIO;
+    const isAspire = scenario === ASPIRE_SCENARIO;
+    const fixedMapTimeMs = isSliderStress
+      ? SLIDER_TIME_MS + 1
+      : (isAspire ? ASPIRE_MAP_TIME_MS : null);
+    statusElement.textContent = isSliderStress
+      ? `Preparing a ${SLIDER_ANCHOR_COUNT.toLocaleString()}-anchor slider…`
+      : (isAspire
+        ? `Preparing conic (${ASPIRE_MAP_ID})…`
+        : 'Preparing 8,000 objects and slider geometry…');
     const setupStart = performance.now();
-    const mapData = parseMapPreviewData(generateBeatmapText(), { maxObjects: OBJECT_COUNT });
+    let mapText;
+    if (isAspire) {
+      mapText = await loadAspireBenchmarkMapText();
+    } else {
+      mapText = isSliderStress ? generateAnchorStressBeatmapText() : generateObjectStressBeatmapText();
+    }
+    const mapData = parseMapPreviewData(
+      mapText,
+      { maxObjects: isSliderStress ? 1 : (isAspire ? 2000 : OBJECT_COUNT) },
+    );
     const renderer = makeRenderer(mapData);
     const events = buildHitsoundEvents(mapData.objects, {
       samplePoints: mapData.timingControlPoints,
@@ -235,7 +386,7 @@ runButton.addEventListener('click', async () => {
     audio.pause();
     audio.muted = false;
     player.setEnabled(false);
-    const visual = await runPass({ renderer, player: null, events, audioEnabled: false });
+    const visual = await runPass({ renderer, player: null, events, audioEnabled: false, fixedMapTimeMs });
 
     player.setEnabled(true);
     player.syncTo(events, 0);
@@ -243,7 +394,7 @@ runButton.addEventListener('click', async () => {
     await audio.play();
 
     statusElement.textContent = 'Visual + synthesized audio pass…';
-    const audioPass = await runPass({ renderer, player, events, audioEnabled: true });
+    const audioPass = await runPass({ renderer, player, events, audioEnabled: true, fixedMapTimeMs });
     audio.pause();
     player.setEnabled(false);
 
@@ -257,12 +408,22 @@ runButton.addEventListener('click', async () => {
         dpr: window.devicePixelRatio || 1,
         screen: `${screen.width}x${screen.height}`,
       },
-      benchmark: { runMs: RUN_MS, objectCount: OBJECT_COUNT },
+      benchmark: {
+        runMs: RUN_MS,
+        objectCount: mapData.objects.length,
+        scenario,
+        description: isSliderStress
+          ? `${SLIDER_ANCHOR_COUNT.toLocaleString()}-anchor slider (00:12 workload)`
+          : (isAspire
+            ? `conic (${ASPIRE_MAP_ID}) at ${formatTime(ASPIRE_MAP_TIME_MS)}`
+            : `${OBJECT_COUNT.toLocaleString()} objects`),
+      },
     };
     let baseline = null;
     try {
       const stored = JSON.parse(localStorage.getItem(BASELINE_KEY) || 'null');
-      if (stored?.signature === latestResults.signature) baseline = stored;
+      if (stored?.signature === latestResults.signature
+        && stored?.benchmark?.scenario === latestResults.benchmark.scenario) baseline = stored;
     } catch {
       // No usable baseline stored: compare against nothing.
     }

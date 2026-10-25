@@ -147,7 +147,8 @@ const buildOggVorbisIndex = async (
   const pageBodyOffset = [];
   const pageBodyLength = [];
   const pageFlags = [];
-  const pageGranule = [];
+  // Samples out once the page's last finished packet is decoded, as counted.
+  const pageEndSamples = [];
   const pageSequence = [];
   const pageLacingStart = [];
   const pageSegments = [];
@@ -174,6 +175,7 @@ const buildOggVorbisIndex = async (
   let samples = 0;
   let granuleOffset = null;
   let lastGranule = 0;
+  let agrees = true;
   let audioStartOffset = -1;
 
   const completePacket = (packet, pageIndex) => {
@@ -259,7 +261,6 @@ const buildOggVorbisIndex = async (
       pageBodyOffset.push(bodyOffset);
       pageBodyLength.push(bodyLength);
       pageFlags.push(flags);
-      pageGranule.push(granule);
       pageSequence.push(u32(offset + 18));
       pageLacingStart.push(lacingUsed);
       pageSegments.push(segments);
@@ -307,15 +308,20 @@ const buildOggVorbisIndex = async (
 
       // Every page that finishes audio packets says where the stream is after
       // the last of them. The first fixes how the stream's positions relate to
-      // the decoder's output; the rest have to agree to the sample, or the
-      // anchors below would be guesses.
+      // the decoder's output; the rest check the count. A packet counted wrong
+      // puts every page after it out, so the stream has to end up agreeing to
+      // the sample. A page on its own may not: some encoders put a page that
+      // ends on a long block then a short one 448 samples ahead, and decoders
+      // go by their own count over it. So slices are placed by the count, never
+      // by what a page says.
       if (lastSamples !== null) {
         if (granule < 0) fail();
+        pageEndSamples[pageIndex] = lastSamples;
         if (granuleOffset === null) granuleOffset = granule - lastSamples;
         else if (flags & FLAG_EOS) {
           // The last page may trim the final packet's padding.
           if (granule > lastSamples + granuleOffset) fail();
-        } else if (granule - lastSamples !== granuleOffset) fail();
+        } else agrees = granule - lastSamples === granuleOffset;
         lastGranule = granule;
       }
       offset = bodyOffset + bodyLength;
@@ -324,7 +330,7 @@ const buildOggVorbisIndex = async (
     if (error instanceof NotIndexable) return null;
     throw error;
   }
-  if (granuleOffset === null || audioStartOffset < 0) return null;
+  if (granuleOffset === null || audioStartOffset < 0 || !agrees) return null;
 
   // A stream whose positions start above zero plays from zero all the same; one
   // that starts below has the samples before zero dropped.
@@ -340,7 +346,7 @@ const buildOggVorbisIndex = async (
     // Renumbered, the slice's first page sits at the samples its later packets
     // put out. With none after this one that is zero, which FFmpeg takes for a
     // broken file and drops every timestamp on the page.
-    if (pageGranule[page] - granuleOffset - pointEndSamples[p] < 1) continue;
+    if (pageEndSamples[page] - pointEndSamples[p] < 1) continue;
     const ms = toMs(pointEndSamples[p] + timelineShift);
     if (ms <= startMs[startMs.length - 1]) continue;
     points.push(p);
@@ -359,8 +365,10 @@ const buildOggVorbisIndex = async (
     const header = new Uint8Array(PAGE_HEADER_BYTES + segments);
     const view = new DataView(header.buffer);
     // Renumbered, it counts from the end of the packet the slice primes on: the
-    // sample startMs[i] describes.
-    const granule = renumberSlices ? pageGranule[page] - granuleOffset - pointEndSamples[p] : pageGranule[page];
+    // sample startMs[i] describes. Kept, it is the page's place in the track.
+    const granule = renumberSlices
+      ? pageEndSamples[page] - pointEndSamples[p]
+      : granuleOffset + pageEndSamples[page];
     header.set([0x4f, 0x67, 0x67, 0x53, 0, pageFlags[page] & FLAG_EOS]);
     view.setUint32(6, granule % 0x100000000, true);
     view.setUint32(10, Math.floor(granule / 0x100000000), true);

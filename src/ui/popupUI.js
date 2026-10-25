@@ -1,4 +1,55 @@
-import { formatTime } from '../renderer.js';
+import { bindTimelineInput } from './timelineInput.js';
+
+// Speed and volume each show their value on a button that opens a slider above
+// it. Both open and close on click alone: hover-to-open has no equivalent on
+// touch, where there is no pointer to move away. Read back from the class
+// rather than a local flag, so a popover cannot get out of step when loading a
+// map force-closes it.
+const bindPopover = ({ control, button, openClass }) => {
+  const isOpen = () => Boolean(control?.classList.contains(openClass));
+
+  const setOpen = (open) => {
+    const nextOpen = open && Boolean(control) && !button?.disabled;
+    if (nextOpen === isOpen()) {
+      return;
+    }
+    control?.classList.toggle(openClass, nextOpen);
+    button?.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+  };
+
+  button?.addEventListener('click', () => {
+    setOpen(!isOpen());
+  });
+
+  // Covers keyboard dismissal; pointers are handled by the outside pointerdown.
+  control?.addEventListener('focusout', (event) => {
+    if (control.contains(event.relatedTarget)) {
+      return;
+    }
+    setOpen(false);
+  });
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!isOpen() || control?.contains(event.target)) {
+      return;
+    }
+    setOpen(false);
+  });
+
+  // For the Escape chain: closes it if open, handing focus back to the button.
+  const dismiss = () => {
+    if (!isOpen()) {
+      return false;
+    }
+    if (control?.contains(document.activeElement)) {
+      button?.focus();
+    }
+    setOpen(false);
+    return true;
+  };
+
+  return { dismiss };
+};
 
 const bindPopupUiEvents = ({
   elements,
@@ -27,6 +78,8 @@ const bindPopupUiEvents = ({
     debugRunButton,
     debugClearButton,
     debugCloseButton,
+    volumeButton,
+    volumeControl,
     volumeSlider,
     timeLabel,
     shortcutsButton,
@@ -74,12 +127,13 @@ const bindPopupUiEvents = ({
   const FRAME_STEP_MS = 1000 / 60;
   const SPEED_NUDGE_STEP = 0.05;
 
-  let isCtrlTimelineZoomActive = false;
-  let lastTimelinePointerEvent = null;
-  let lastPointerPosition = null;
-  let timelineZoomRafId = null;
-  let pendingTimelineSeekEvent = null;
-  let timelineSeekRafId = null;
+  const timelineControls = bindTimelineInput({
+    canvas: timelineCanvas,
+    tooltip: timelineTooltip,
+    state,
+    renderer,
+    seekTo,
+  });
 
   const trapDialogTab = (event, modalShell) => {
     if (event.key !== 'Tab' || !modalShell || modalShell.hidden) {
@@ -109,96 +163,6 @@ const bindPopupUiEvents = ({
     return false;
   };
 
-  const isPointerNearTimeline = () => {
-    if (!lastPointerPosition) {
-      return false;
-    }
-
-    const rect = timelineCanvas.getBoundingClientRect();
-    const verticalPadding = 24;
-    const horizontalPadding = 12;
-    return lastPointerPosition.clientX >= rect.left - horizontalPadding
-      && lastPointerPosition.clientX <= rect.right + horizontalPadding
-      && lastPointerPosition.clientY >= rect.top - verticalPadding
-      && lastPointerPosition.clientY <= rect.bottom + verticalPadding;
-  };
-
-  const getTimelinePointerEvent = () => {
-    if (!lastPointerPosition) {
-      return null;
-    }
-
-    return {
-      clientX: lastPointerPosition.clientX,
-      clientY: lastPointerPosition.clientY,
-    };
-  };
-
-  const scheduleTimelineZoomRender = () => {
-    if (timelineZoomRafId !== null) {
-      return;
-    }
-
-    const tick = () => {
-      timelineZoomRafId = null;
-      if (isCtrlTimelineZoomActive) {
-        updateTimelineZoomTarget({ animate: false, schedule: false });
-      }
-      renderer.renderTimeline();
-      if (isCtrlTimelineZoomActive || renderer.isTimelineAnimating()) {
-        timelineZoomRafId = requestAnimationFrame(tick);
-      }
-    };
-
-    timelineZoomRafId = requestAnimationFrame(tick);
-  };
-
-  const getTimelinePointerRatio = (event) => {
-    const rect = timelineCanvas.getBoundingClientRect();
-    if (rect.width <= 0) {
-      return 0.5;
-    }
-    return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-  };
-
-  const updateTimelineZoomTarget = ({ animate = true, schedule = true } = {}) => {
-    if (!state.mapData || state.durationMs <= 0) {
-      return;
-    }
-
-    const pointerEvent = getTimelinePointerEvent();
-    if (pointerEvent && isPointerNearTimeline()) {
-      const anchorTimeMs = renderer.timeFromTimelineEvent(pointerEvent);
-      renderer.setTimelineZoom(anchorTimeMs, 4000, {
-        animate,
-        anchorRatio: getTimelinePointerRatio(pointerEvent),
-      });
-    } else {
-      renderer.setTimelineZoom(state.currentTimeMs, 4000, {
-        animate,
-        anchorRatio: 0.5,
-      });
-    }
-    if (schedule) {
-      scheduleTimelineZoomRender();
-    }
-  };
-
-  const setCtrlTimelineZoomActive = (active) => {
-    if (isCtrlTimelineZoomActive === active) {
-      return;
-    }
-
-    isCtrlTimelineZoomActive = active;
-    if (active) {
-      updateTimelineZoomTarget({ animate: true });
-      return;
-    }
-
-    renderer.resetTimelineZoom({ animate: true });
-    scheduleTimelineZoomRender();
-  };
-
   document.addEventListener('keydown', async (event) => {
     if (trapDialogTab(event, state.shortcutsMenuOpen ? shortcutsModal : infoModal)) {
       return;
@@ -210,11 +174,6 @@ const bindPopupUiEvents = ({
     if (isTyping) return;
 
     const { key, shiftKey } = event;
-
-    if (key === 'Control') {
-      setCtrlTimelineZoomActive(true);
-      return;
-    }
 
     // Ctrl+R, Cmd+W and the like belong to the browser; in the detached window
     // Ctrl+R used to restart the preview as well as reload it. AltGr arrives as
@@ -303,6 +262,14 @@ const bindPopupUiEvents = ({
         seekRelative(key === ',' ? -FRAME_STEP_MS : FRAME_STEP_MS);
         break;
       }
+      case '=':
+      case '+':
+        timelineControls.zoomIn();
+        break;
+      case '-':
+      case '_':
+        timelineControls.zoomOut();
+        break;
       case '[':
         applyPlaybackSpeed(state.playbackSpeed - SPEED_NUDGE_STEP);
         break;
@@ -317,62 +284,6 @@ const bindPopupUiEvents = ({
         break;
     }
   });
-
-  document.addEventListener('keyup', (event) => {
-    if (event.key === 'Control') {
-      setCtrlTimelineZoomActive(false);
-    }
-  });
-
-  window.addEventListener('blur', () => {
-    setCtrlTimelineZoomActive(false);
-  });
-
-  document.addEventListener('mousemove', (event) => {
-    lastPointerPosition = {
-      clientX: event.clientX,
-      clientY: event.clientY,
-    };
-  });
-
-  const hideTimelineTooltip = () => {
-    if (timelineTooltip && !timelineTooltip.hidden) {
-      timelineTooltip.hidden = true;
-    }
-  };
-
-  const updateTimelineTooltip = (event) => {
-    if (!timelineTooltip || !timelineCanvas) {
-      return;
-    }
-    if (!state.mapData || state.durationMs <= 0) {
-      hideTimelineTooltip();
-      return;
-    }
-
-    const rect = timelineCanvas.getBoundingClientRect();
-    if (rect.width <= 0) {
-      hideTimelineTooltip();
-      return;
-    }
-
-    timelineTooltip.textContent = formatTime(renderer.timeFromTimelineEvent(event));
-    timelineTooltip.hidden = false;
-
-    // Positioned against the controls row, then held inside it so the label
-    // stays readable at both ends instead of hanging off the edge.
-    const parentRect = timelineTooltip.offsetParent?.getBoundingClientRect() || rect;
-    const half = timelineTooltip.offsetWidth / 2;
-    const rawLeft = event.clientX - parentRect.left;
-    const minLeft = (rect.left - parentRect.left) + half;
-    const maxLeft = (rect.right - parentRect.left) - half;
-    timelineTooltip.style.left = `${Math.min(Math.max(rawLeft, minLeft), maxLeft)}px`;
-  };
-
-  timelineCanvas?.addEventListener('mousemove', updateTimelineTooltip);
-  timelineCanvas?.addEventListener('mouseleave', hideTimelineTooltip);
-  // A tooltip stranded over a map that is no longer loaded would be lying.
-  window.addEventListener('blur', hideTimelineTooltip);
 
   shortcutsButton?.addEventListener('click', () => {
     setShortcutsMenuOpen(!state.shortcutsMenuOpen);
@@ -402,32 +313,8 @@ const bindPopupUiEvents = ({
     void toggleCachedMapsetsPanel?.();
   });
 
-  // The speed popover opens and closes on click alone: hover-to-open has no
-  // equivalent on touch, where there is no pointer to move away.
-  // Read back from the class rather than a local flag, so the popover cannot
-  // get out of step when loading a map force-closes it.
-  const isSpeedPopoverOpen = () => Boolean(speedControl?.classList.contains('is-speed-open'));
-
-  const setSpeedPopoverOpen = (open) => {
-    const nextOpen = open && Boolean(speedControl) && !speedButton?.disabled;
-    if (nextOpen === isSpeedPopoverOpen()) {
-      return;
-    }
-    speedControl?.classList.toggle('is-speed-open', nextOpen);
-    speedButton?.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
-  };
-
-  speedButton?.addEventListener('click', () => {
-    setSpeedPopoverOpen(!isSpeedPopoverOpen());
-  });
-
-  // Covers keyboard dismissal; pointers are handled by the outside pointerdown.
-  speedControl?.addEventListener('focusout', (event) => {
-    if (speedControl.contains(event.relatedTarget)) {
-      return;
-    }
-    setSpeedPopoverOpen(false);
-  });
+  const speedPopover = bindPopover({ control: speedControl, button: speedButton, openClass: 'is-speed-open' });
+  const volumePopover = bindPopover({ control: volumeControl, button: volumeButton, openClass: 'is-volume-open' });
 
   speedSlider?.addEventListener('input', () => {
     applyPlaybackSpeed(Number(speedSlider.value) / 100);
@@ -438,13 +325,6 @@ const bindPopupUiEvents = ({
     // a disabled element would read as focus leaving the control.
     speedButton?.focus();
     applyPlaybackSpeed(1);
-  });
-
-  document.addEventListener('pointerdown', (event) => {
-    if (!isSpeedPopoverOpen() || speedControl?.contains(event.target)) {
-      return;
-    }
-    setSpeedPopoverOpen(false);
   });
 
   document.addEventListener('pointerdown', (event) => {
@@ -484,83 +364,6 @@ const bindPopupUiEvents = ({
     const isPlayingNow = await togglePlayback();
     if (isPlayingNow || wasPlaying) {
       showCanvasToggleFeedback(wasPlaying ? 'pause' : 'play');
-    }
-  });
-
-  // A drag is one seek per frame, to the position the pointer is at when that
-  // frame runs. Seeking on every pointer sample only made the media element
-  // start work it was about to be told to abandon.
-  const flushTimelineSeek = () => {
-    timelineSeekRafId = null;
-    if (!pendingTimelineSeekEvent) {
-      return;
-    }
-    const event = pendingTimelineSeekEvent;
-    pendingTimelineSeekEvent = null;
-    seekTo(renderer.timeFromTimelineEvent(event));
-  };
-
-  const queueTimelineSeek = (event) => {
-    pendingTimelineSeekEvent = event;
-    if (timelineSeekRafId === null) {
-      timelineSeekRafId = requestAnimationFrame(flushTimelineSeek);
-    }
-  };
-
-  const cancelQueuedTimelineSeek = () => {
-    if (timelineSeekRafId !== null) {
-      cancelAnimationFrame(timelineSeekRafId);
-      timelineSeekRafId = null;
-    }
-    pendingTimelineSeekEvent = null;
-  };
-
-  timelineCanvas.addEventListener('mousedown', (event) => {
-    lastTimelinePointerEvent = event;
-    lastPointerPosition = {
-      clientX: event.clientX,
-      clientY: event.clientY,
-    };
-    if (event.ctrlKey && !isCtrlTimelineZoomActive) {
-      setCtrlTimelineZoomActive(true);
-    }
-    cancelQueuedTimelineSeek();
-    seekTo(renderer.timeFromTimelineEvent(event));
-
-    const onMove = (moveEvent) => {
-      lastTimelinePointerEvent = moveEvent;
-      lastPointerPosition = {
-        clientX: moveEvent.clientX,
-        clientY: moveEvent.clientY,
-      };
-      queueTimelineSeek({ clientX: moveEvent.clientX, clientY: moveEvent.clientY });
-    };
-
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      // Release lands on the last position the pointer was at, not on whichever
-      // sample the last frame happened to catch.
-      if (timelineSeekRafId !== null) {
-        cancelAnimationFrame(timelineSeekRafId);
-      }
-      flushTimelineSeek();
-    };
-
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  });
-
-  timelineCanvas.addEventListener('mousemove', (event) => {
-    const hadTimelinePointerEvent = Boolean(lastTimelinePointerEvent);
-    lastTimelinePointerEvent = event;
-    lastPointerPosition = {
-      clientX: event.clientX,
-      clientY: event.clientY,
-    };
-    if (isCtrlTimelineZoomActive) {
-      updateTimelineZoomTarget({ animate: !hadTimelinePointerEvent });
-      renderer.renderTimeline();
     }
   });
 
@@ -636,10 +439,6 @@ const bindPopupUiEvents = ({
     if (event.key !== 'Escape') {
       return;
     }
-    if (isCtrlTimelineZoomActive) {
-      setCtrlTimelineZoomActive(false);
-      return;
-    }
     if (state.shortcutsMenuOpen) {
       setShortcutsMenuOpen(false);
       return;
@@ -648,11 +447,12 @@ const bindPopupUiEvents = ({
       setInfoMenuOpen(false);
       return;
     }
-    if (isSpeedPopoverOpen()) {
-      if (speedControl?.contains(document.activeElement)) {
-        speedButton?.focus();
-      }
-      setSpeedPopoverOpen(false);
+    if (speedPopover.dismiss() || volumePopover.dismiss()) {
+      return;
+    }
+    // Zooming back out is the step before closing, not instead of it.
+    if (timelineControls.isZoomed()) {
+      timelineControls.resetZoom();
       return;
     }
     window.close();

@@ -1,12 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   PREVIEW_SETTING_KEYS,
   DEFAULT_DISABLED_PROVIDERS,
+  DEFAULT_HITSOUND_STYLE,
+  HITSOUND_STYLES,
   applyPreviewSettingChanges,
   hasPreviewSettingChange,
   normalizeAutoFallback,
   normalizeDisabledProviders,
+  normalizeHitsoundStyle,
   normalizePreviewSettings,
   toPreviewSettingsStorage,
 } from '../src/settings.js';
@@ -98,4 +102,49 @@ test('auto-fallback reads a stored string the same way every other toggle does',
   assert.equal(normalizeAutoFallback(false), false);
   assert.equal(normalizeAutoFallback(undefined), true);
   assert.equal(normalizeAutoFallback('true'), true);
+});
+
+test('hitsounds keep their original style until another is chosen', () => {
+  assert.equal(DEFAULT_HITSOUND_STYLE, 'argon');
+  assert.equal(normalizePreviewSettings().hitsoundStyle, 'argon');
+  assert.equal(normalizePreviewSettings({ hitsoundVolume: 0.3 }).hitsoundStyle, 'argon');
+});
+
+test('an unknown hitsound style falls back to the default rather than going silent', () => {
+  // A style dropped in a later build, a hand-edited value, or junk in sync data.
+  for (const value of ['skinnotfound', '', null, undefined, 3, {}, ['lazer'], 'toString']) {
+    assert.equal(normalizeHitsoundStyle(value), DEFAULT_HITSOUND_STYLE, String(value));
+  }
+  assert.equal(normalizeHitsoundStyle('Lazer'), 'lazer', 'case does not matter');
+});
+
+test('the options page offers every hitsound style, with the default first', () => {
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  const select = html.match(/<select[^>]*id="hitsoundStyle"[^>]*>([\s\S]*?)<\/select>/)?.[1];
+  assert.ok(select, 'the style dropdown is in options.html');
+  const offered = [...select.matchAll(/<option value="([^"]+)"/g)].map((match) => match[1]);
+
+  assert.deepEqual(offered, [...HITSOUND_STYLES]);
+  assert.equal(offered[0], DEFAULT_HITSOUND_STYLE);
+});
+
+test('every hitsound style survives a round trip through storage', () => {
+  for (const style of HITSOUND_STYLES) {
+    const stored = toPreviewSettingsStorage({ hitsoundStyle: style });
+    assert.equal(stored.hitsoundStyle, style);
+    assert.equal(normalizePreviewSettings(stored).hitsoundStyle, style);
+  }
+});
+
+test('a hitsound style change reaches an open popup, and clearing it restores the default', () => {
+  const current = normalizePreviewSettings({ hitsounds: true, hitsoundStyle: 'lazer' });
+
+  const changed = applyPreviewSettingChanges(current, {
+    hitsoundStyle: { oldValue: 'lazer', newValue: 'minimal' },
+  });
+  assert.equal(changed.hitsoundStyle, 'minimal');
+  assert.equal(changed.hitsounds, true);
+
+  const cleared = applyPreviewSettingChanges(changed, { hitsoundStyle: { oldValue: 'minimal' } });
+  assert.equal(cleared.hitsoundStyle, DEFAULT_HITSOUND_STYLE);
 });

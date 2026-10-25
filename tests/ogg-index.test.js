@@ -288,11 +288,45 @@ test('a packet that runs onto the next page is not a point', async () => {
   assert.deepEqual([...index.startMs.slice(1)], stream.pointEnds.map(msOf));
 });
 
-test('positions that disagree with the windows are not trusted', async () => {
+test('positions that stay out of step with the windows are not trusted', async () => {
+  // What a packet counted wrong would look like: every page after it off.
   const stream = buildStream({ blocks: BLOCKS });
-  const audioPage = stream.pages.findIndex((page, i) => i > 3 && page.granule > 0 && !(page.flags & 4));
-  stream.pages[audioPage].granule += 64;
+  const from = stream.pages.findIndex((page, i) => i > 3 && page.granule > 0 && !(page.flags & 4));
+  for (const page of stream.pages.slice(from)) {
+    if (page.granule > 0) page.granule += 64;
+  }
   assert.equal(await buildOggVorbisIndex(blobOf(stream.bytes())), null);
+});
+
+test('a lone page out of step is the encoder\'s, and slices go by the count instead', async () => {
+  // Some encoders put a page ending on a long block then a short one 448
+  // samples ahead, and the pages after it back in step.
+  const stream = buildStream({ blocks: BLOCKS });
+  const clean = stream.bytes();
+  const odd = stream.pages.findIndex((page, i) => i > 3 && page.granule > 0 && !(page.flags & 4)
+    && stream.pages[i + 1] && !(stream.pages[i + 1].flags & 4));
+  stream.pages[odd].granule += 448;
+  const bytes = stream.bytes();
+
+  const index = await buildOggVorbisIndex(blobOf(bytes));
+  const cleanIndex = await buildOggVorbisIndex(blobOf(clean));
+  assert.ok(index, 'still indexed');
+  assert.deepEqual([...index.startMs], [...cleanIndex.startMs]);
+
+  // A slice starting on that page is built as if it had said the right thing.
+  const oddOffset = readPages(clean)[odd].offset;
+  let startingOnOdd = 0;
+  for (const renumberSlices of [true, false]) {
+    const withOdd = await buildOggVorbisIndex(blobOf(bytes), { renumberSlices });
+    const withoutOdd = await buildOggVorbisIndex(blobOf(clean), { renumberSlices });
+    for (let point = 1; point < withOdd.count; point += 1) {
+      const slice = new Uint8Array(await withOdd.sliceFrom(blobOf(bytes), point).arrayBuffer());
+      const expected = new Uint8Array(await withoutOdd.sliceFrom(blobOf(clean), point).arrayBuffer());
+      assert.equal(readPages(slice)[2].granule, readPages(expected)[2].granule, `point ${point}`);
+      if (rebuiltPage(clean, expected).source.offset === oddOffset) startingOnOdd += 1;
+    }
+  }
+  assert.ok(startingOnOdd > 0, 'some slice starts on the page out of step');
 });
 
 test('only a single Vorbis stream is indexed', async () => {

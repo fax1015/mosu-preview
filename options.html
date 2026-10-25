@@ -63,6 +63,17 @@
             <span class="settings-toggle-description">Synthesised claps, whistles and finishes.</span>
           </span>
         </label>
+        <label for="hitsoundStyle" class="settings-label">Hitsound style</label>
+        <div class="settings-select-wrap">
+          <select id="hitsoundStyle" class="settings-select">
+            <option value="argon">Argon (default)</option>
+            <option value="lazer">Lazer</option>
+            <option value="minimal">Minimal</option>
+          </select>
+        </div>
+        <p class="settings-help">
+          Lazer follows osu!lazer's default hitsounds, and Minimal the Wintherest skin.
+        </p>
         <div class="settings-slider-card settings-slider-card--single">
           <label for="hitsoundVolume" class="settings-slider-copy">
             <span class="settings-slider-title">Hitsound volume</span>
@@ -73,7 +84,7 @@
           </div>
         </div>
         <p class="settings-help">
-          Hitsounds are generated in browser so custom hitsounds are not supported right now. Disable if performance is bad (It's somewhat resource intensive)
+          Hitsounds are generated in browser so custom hitsounds are not supported. Disable if performance is bad (It's somewhat resource intensive)
         </p>
       </div>
 

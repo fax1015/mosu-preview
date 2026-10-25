@@ -12,9 +12,11 @@ const allowedRootFiles = new Set([
   `scripts${sep}performance.html`,
   `scripts${sep}performance-browser.js`,
 ]);
+const benchmarkMapRoot = `scripts${sep}benchmark-maps${sep}`;
 const contentTypes = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.osu': 'text/plain; charset=utf-8',
 };
 const MAX_RESULT_BYTES = 64 * 1024;
 const browserMetricKeys = [
@@ -109,6 +111,7 @@ const isAllowedPath = (relativePath) => {
   return (
     allowedRootFiles.has(platformPath)
     || (platformPath.startsWith(`src${sep}`) && extname(platformPath) === '.js')
+    || (platformPath.startsWith(benchmarkMapRoot) && extname(platformPath) === '.osu')
   );
 };
 

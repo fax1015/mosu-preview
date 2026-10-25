@@ -27,7 +27,7 @@ the detached window cannot read the active tab, so the popup passes the beatmap 
 
 ## preview
 
-hitsounds are available as an experimental option, off by default. every node of a slider sounds, not just its head: the tail and each reverse use their own `edgeSounds` entry from the beatmap, and spinners sound when they finish. the sounds themselves are generated in the browser rather than read from the beatmap's own samples, so custom hitsounds are not reproduced; volume is adjustable in settings.
+hitsounds are available as an experimental option, off by default. every node of a slider sounds, not just its head: the tail and each reverse use their own `edgeSounds` entry from the beatmap, and spinners sound when they finish. the sounds themselves are generated in the browser rather than read from the beatmap's own samples, so custom hitsounds are not reproduced; volume is adjustable in settings, and so is the style: argon (the default), lazer or minimal, modelled on the argon skin, osu!lazer's default hitsounds and the Wintherest skin. none of those skins' samples are shipped; each style is re-made from synthesised layers.
 
 the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open.
 
@@ -41,7 +41,12 @@ the cached mapsets list is reachable from the menu on any page, not just when no
 - `,` / `.` pause and step one frame
 - `[` / `]` nudge playback speed
 - `s` cycle speed, `m` mute, `r` restart
-- hovering the timeline shows the timestamp under the cursor
+- `+` / `-` zoom the timeline in and out around the playhead, `esc` zooms back out
+- hovering the timeline shows the timestamp under the cursor, to the millisecond once zoomed in
+
+### timeline
+
+the timeline shows the whole map at first: object density in green, kiai sections in amber, breaks hatched, the preview point in purple. scroll on it to zoom in around the cursor; close enough, the bars turn into the objects themselves, with the beat grid behind them. `shift` + scroll (or a sideways swipe) pans. while zoomed, a rail along the bottom shows which part of the map is on screen: drag it to move around, or click beside it to jump there. a zoomed timeline follows the playhead while the preview plays, and dragging the playhead past either end scrolls it along.
 
 ## permissions
 
@@ -117,6 +122,8 @@ to build just one target, run `npm run package:chrome` or `npm run package:firef
 ## performance benchmarks
 
 run `npm run performance:micro` for the Node microbenchmarks. Run `npm run performance` to open the browser benchmark, then press **Run 8-second tests**. Each completed run is appended to `performance-results/results.jsonl` with its timestamp, benchmark metrics, build revision, and environment details. Keep this file with the build history to compare results across revisions. The browser benchmark's **Save result as baseline** button separately stores a same-device comparison baseline in that browser's local storage.
+
+the scenario list has three workloads: 8,000 mixed objects, a synthetic 4,344-anchor slider, and `aspire-conic`, which replays osu! beatmap 5839914 ("conic", Aspire) at 01:23 from the bundled `scripts/benchmark-maps/5839914.osu`. That moment is the slider-body worst case, because 7,427-anchor decorative sliders are on screen. Append `?autobench=aspire-conic` or `?autobench=anchor-heavy-slider` to the page URL to run that scenario's visual pass straight away.
 
 the benchmark server only listens on this machine. to run it from a phone or another device on the same network, start it with `MOSU_PERF_LAN=1 npm run performance`.
 

@@ -5,6 +5,8 @@ import {
   fitPathToExpectedDistance,
   getPathLength,
   positionOnPathAtProgress,
+  sampleBezierPath,
+  simplifyPathForRendering,
 } from '../src/core/sliderPath.js';
 import { getTimingStateAt } from '../src/core/controlPoints.js';
 
@@ -51,6 +53,53 @@ test('a path longer than the declared distance is still truncated', () => {
   const path = [{ x: 0, y: 0 }, { x: 250, y: 0 }];
   const fitted = fitPathToExpectedDistance(path, 100);
   assert.equal(Math.round(getPathLength(fitted)), 100);
+});
+
+test('linear Bezier spans keep only their exact endpoints', () => {
+  const path = sampleBezierPath([{ x: 0, y: 0 }, { x: 100, y: 0 }]);
+
+  assert.deepEqual(path, [{ x: 0, y: 0 }, { x: 100, y: 0 }]);
+});
+
+test('render simplification removes subpixel jitter but retains the exact endpoints', () => {
+  const path = [
+    { x: 0, y: 0 },
+    { x: 5, y: 0.2 },
+    { x: 10, y: -0.1 },
+    { x: 15, y: 0 },
+  ];
+  const simplified = simplifyPathForRendering(path, 0.65);
+
+  assert.equal(simplified.length, 2);
+  assert.equal(simplified[0], path[0]);
+  assert.equal(simplified[1], path.at(-1));
+});
+
+test('render simplification measures error in scaled pixel space and keeps corners', () => {
+  const path = [
+    { x: 0, y: 0 },
+    { x: 5, y: 1 },
+    { x: 10, y: 0 },
+  ];
+
+  assert.equal(simplifyPathForRendering(path, 0.75, 1, 0.5).length, 2);
+  assert.equal(simplifyPathForRendering(path, 0.75, 1, 2).length, 3);
+});
+
+test('render simplification leaves ordinary slider paths at full resolution', () => {
+  const makeCurve = (length) => Array.from({ length }, (_, index) => ({
+    x: index,
+    y: Math.sin(index / 8) * 20,
+  }));
+
+  const ordinary = makeCurve(512);
+  assert.equal(simplifyPathForRendering(ordinary, 0.25, 1, 1, 512), ordinary);
+
+  const dense = makeCurve(513);
+  const simplified = simplifyPathForRendering(dense, 0.25, 1, 1, 512);
+  assert.ok(simplified.length < dense.length);
+  assert.equal(simplified[0], dense[0]);
+  assert.equal(simplified.at(-1), dense.at(-1));
 });
 
 test('extension is skipped when the last two control points coincide', () => {

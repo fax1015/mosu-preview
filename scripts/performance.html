@@ -28,8 +28,14 @@
 </head>
 <body>
   <h1>mosu! preview performance test</h1>
-  <p>This runs the real canvas renderer and synthesized hitsounds in this browser. Keep the page foregrounded and use the same device, browser, and power mode for comparisons.</p>
+    <p>This runs the real canvas renderer and synthesized hitsounds in this browser. Keep the page foregrounded and use the same device, browser, and power mode for comparisons.</p>
   <div class="actions">
+    <label for="scenario">Scenario</label>
+    <select id="scenario">
+      <option value="anchor-heavy-slider">Anchor-heavy slider (00:12 reference)</option>
+      <option value="aspire-conic">conic (5839914) — anchor-dense Aspire map (01:23)</option>
+      <option value="object-stress">8,000 mixed objects</option>
+    </select>
     <button id="run">Run 8-second tests</button>
     <button id="save" class="secondary" disabled>Save result as baseline</button>
     <button id="clear" class="secondary">Clear baseline</button>
@@ -40,7 +46,7 @@
     <canvas id="timeline" width="512" height="42" aria-label="Beatmap timeline"></canvas>
   </div>
   <div id="results"></div>
-  <p class="note">Each completed run is appended to <code>performance-results/results.jsonl</code> with build and device details. The saved baseline stays in this browser’s local storage for same-device comparisons.</p>
-  <script type="module" src="./performance-browser.js"></script>
+  <p class="note">The anchor-heavy scenarios hold their worst moment for 8 seconds: a generated 4,344-anchor slider at its hit time, and osu! beatmap 5839914 ("conic", Aspire) at 01:23, where its 7,427-anchor decorative sliders are on screen. Add <code>?autobench=aspire-conic</code> or <code>?autobench=anchor-heavy-slider</code> to the URL to run just that visual pass. Each completed run is appended to <code>performance-results/results.jsonl</code> with build and device details. The saved baseline stays in this browser’s local storage for same-device, same-scenario comparisons.</p>
+  <script type="module" src="/scripts/performance-browser.js"></script>
 </body>
 </html>

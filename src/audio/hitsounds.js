@@ -5,6 +5,7 @@ import {
   SAMPLE_SET_DRUM,
 } from '../parser.js';
 import { findFirstIndexAtOrAfter } from '../core/math.js';
+import { LAZER_BANKS, MINIMAL_BANKS } from './hitsoundStyles.js';
 
 // Experimental hitsounds.
 //
@@ -189,6 +190,10 @@ const BRIGHT_WHISTLE = [
  * its filter, so it is not an amplitude -- reaching normal loudness through a
  * narrow bandpass takes a gain well above 1.
  *
+ * A layer may also set `attackSec`, for a swell rather than a strike (it is
+ * capped at 40% of the layer), and `delaySec`, to start after the hit itself.
+ * None of these do; the other styles use both.
+ *
  * Only `normal` differs across all three banks; the shared voices above cover
  * the rest.
  */
@@ -318,6 +323,37 @@ const SAMPLE_BANKS = {
   },
 };
 
+/**
+ * Every style the settings offer, by the id settings.js stores. The banks above
+ * are the default, and are closest by far to the Argon skin's samples; the
+ * others are in hitsoundStyles.js, fitted to other skins.
+ */
+const HITSOUND_STYLE_BANKS = Object.freeze({
+  argon: SAMPLE_BANKS,
+  lazer: LAZER_BANKS,
+  minimal: MINIMAL_BANKS,
+});
+
+// How much of the room each style gets. Argon's voices were tuned with it, and
+// sound tiny without. The others are fitted to dry samples, decay and all, so
+// the room would only add a tail those skins do not have and blunt the hit.
+const HITSOUND_STYLE_ROOM = Object.freeze({
+  argon: ROOM_WET_GAIN,
+  lazer: 0,
+  minimal: 0,
+});
+
+// Long enough not to click when the room changes under a ringing tail.
+const ROOM_CHANGE_SEC = 0.05;
+
+const getStyleBanks = (styleId) => (
+  Object.hasOwn(HITSOUND_STYLE_BANKS, styleId) ? HITSOUND_STYLE_BANKS[styleId] : SAMPLE_BANKS
+);
+
+const getStyleRoom = (styleId) => (
+  Object.hasOwn(HITSOUND_STYLE_ROOM, styleId) ? HITSOUND_STYLE_ROOM[styleId] : ROOM_WET_GAIN
+);
+
 const normalizeSampleSet = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= SAMPLE_SET_NORMAL && parsed <= SAMPLE_SET_DRUM
@@ -325,8 +361,8 @@ const normalizeSampleSet = (value) => {
     : SAMPLE_SET_NONE;
 };
 
-const getBank = (sampleSet) => (
-  SAMPLE_BANKS[normalizeSampleSet(sampleSet)] ?? SAMPLE_BANKS[SAMPLE_SET_NORMAL]
+const getBank = (banks, sampleSet) => (
+  banks[normalizeSampleSet(sampleSet)] ?? banks[SAMPLE_SET_NORMAL]
 );
 
 const getNodeHitSound = (object, nodeIndex) => {
@@ -533,10 +569,13 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   let masterGain = null;
   let mixBus = null;
   let roomSend = null;
+  let roomWet = null;
   let voiceBus = null;
   let noiseBuffer = null;
   let enabled = false;
   let volume = 0.5;
+  let banks = SAMPLE_BANKS;
+  let roomLevel = ROOM_WET_GAIN;
   let cursor = 0;
   let lastTimeMs = 0;
   let hasLoggedLatency = false;
@@ -597,8 +636,8 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       }
       const room = audioContext.createConvolver();
       room.buffer = roomImpulse;
-      const roomWet = audioContext.createGain();
-      roomWet.gain.value = ROOM_WET_GAIN;
+      roomWet = audioContext.createGain();
+      roomWet.gain.value = roomLevel;
       room.connect(roomWet);
       roomWet.connect(mixBus);
 
@@ -627,6 +666,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       masterGain = null;
       mixBus = null;
       roomSend = null;
+      roomWet = null;
       noiseBuffer = null;
     }
 
@@ -693,7 +733,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   };
 
   const playNoise = ({
-    startAt, destination, gain, durationSec, frequency, endFrequency, q = 1, type = 'bandpass',
+    startAt, destination, gain, durationSec, attackSec, frequency, endFrequency, q = 1, type = 'bandpass',
   }) => {
     const source = audioContext.createBufferSource();
     source.buffer = noiseBuffer;
@@ -714,7 +754,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     filter.Q.value = q;
 
     const envelope = audioContext.createGain();
-    applyPercussiveEnvelope(envelope.gain, { startAt, peak: gain, durationSec });
+    applyPercussiveEnvelope(envelope.gain, {
+      startAt, peak: gain, durationSec, attackSec,
+    });
 
     source.connect(filter);
     filter.connect(envelope);
@@ -724,7 +766,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   };
 
   const playTone = ({
-    startAt, destination, gain, durationSec, frequency, type = 'sine', endFrequency,
+    startAt, destination, gain, durationSec, attackSec, frequency, type = 'sine', endFrequency,
   }) => {
     const oscillator = audioContext.createOscillator();
     oscillator.type = type;
@@ -735,7 +777,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     }
 
     const envelope = audioContext.createGain();
-    applyPercussiveEnvelope(envelope.gain, { startAt, peak: gain, durationSec });
+    applyPercussiveEnvelope(envelope.gain, {
+      startAt, peak: gain, durationSec, attackSec,
+    });
 
     oscillator.connect(envelope);
     envelope.connect(destination);
@@ -761,7 +805,8 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       const voice = {
         ...layer,
         gain,
-        startAt,
+        // A clap is several bursts, not one; the later ones wait their turn.
+        startAt: startAt + (layer.delaySec || 0),
         destination,
         frequency: layer.frequency * scatter,
         endFrequency: layer.endFrequency ? layer.endFrequency * scatter : undefined,
@@ -788,8 +833,8 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     const flags = Number.isFinite(event?.hitSound) ? event.hitSound : 0;
     // hitnormal plays under every object and takes the normal bank; the
     // additions layered on top take the addition bank.
-    const normalBank = getBank(event?.normalSet);
-    const additionBank = getBank(event?.additionSet);
+    const normalBank = getBank(banks, event?.normalSet);
+    const additionBank = getBank(banks, event?.additionSet);
 
     let played = playLayers(normalBank.normal, startAt, destination, volumeScale);
     if ((flags & HITSOUND_WHISTLE) !== 0) {
@@ -900,6 +945,24 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     enabled = Boolean(nextEnabled);
     if (!enabled) {
       cancelScheduledVoices();
+    }
+  };
+
+  // Takes effect from the next hit placed. The few already queued inside the
+  // lookahead keep the voice they were placed with: that is a third of a second
+  // of the old style, where a resync would cut those hits off mid-tail.
+  const setStyle = (styleId) => {
+    banks = getStyleBanks(styleId);
+    const nextRoomLevel = getStyleRoom(styleId);
+    if (nextRoomLevel === roomLevel) {
+      return;
+    }
+    roomLevel = nextRoomLevel;
+    if (roomWet) {
+      const now = audioContext.currentTime;
+      roomWet.gain.cancelScheduledValues(now);
+      roomWet.gain.setValueAtTime(roomWet.gain.value, now);
+      roomWet.gain.linearRampToValueAtTime(roomLevel, now + ROOM_CHANGE_SEC);
     }
   };
 
@@ -1032,12 +1095,14 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     masterGain = null;
     mixBus = null;
     roomSend = null;
+    roomWet = null;
     voiceBus = null;
     noiseBuffer = null;
   };
 
   return {
     setEnabled,
+    setStyle,
     setVolume,
     setMusicVolume,
     attachMediaElement,
@@ -1061,6 +1126,9 @@ export {
   HITSOUND_FINISH,
   HITSOUND_CLAP,
   SAMPLE_BANKS,
+  HITSOUND_STYLE_BANKS,
+  HITSOUND_STYLE_ROOM,
+  ROOM_WET_GAIN,
   MAX_CATCHUP_MS,
   SCHEDULE_LOOKAHEAD_SEC,
   DEFAULT_SAMPLE_VOLUME,

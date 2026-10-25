@@ -15,6 +15,7 @@ export const DISABLED_PROVIDERS_KEY = 'disabledProviders';
 export const AUTO_FALLBACK_KEY = 'autoFallback';
 export const HITSOUNDS_KEY = 'hitsounds';
 export const HITSOUND_VOLUME_KEY = 'hitsoundVolume';
+export const HITSOUND_STYLE_KEY = 'hitsoundStyle';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
 export const MIN_MANIA_SCROLL_SPEED = 1;
@@ -31,6 +32,12 @@ export const DEFAULT_DISABLED_PROVIDERS = [];
 export const DEFAULT_AUTO_FALLBACK = true;
 export const DEFAULT_HITSOUNDS = false;
 export const DEFAULT_HITSOUND_VOLUME = 0.5;
+export const DEFAULT_HITSOUND_STYLE = 'argon';
+
+// The voices each style plays live in audio/hitsounds.js; this is only the list
+// a stored choice is checked against, so the options page does not have to load
+// the synthesiser to validate a dropdown.
+export const HITSOUND_STYLES = Object.freeze(['argon', 'lazer', 'minimal']);
 
 export const PROVIDER_PRIORITY_TIERS = Object.freeze({
   PRIMARY: 'primary',
@@ -131,6 +138,7 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   AUTO_FALLBACK_KEY,
   HITSOUNDS_KEY,
   HITSOUND_VOLUME_KEY,
+  HITSOUND_STYLE_KEY,
 ]);
 
 export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
@@ -262,6 +270,13 @@ export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFA
 
 export const normalizeHitsoundVolume = (value) => normalizeUnitRange(value, DEFAULT_HITSOUND_VOLUME);
 
+// A style removed in a later build, or a hand-edited value, plays the default
+// rather than leaving the hits silent.
+export const normalizeHitsoundStyle = (value) => {
+  const candidate = typeof value === 'string' ? value.toLowerCase() : '';
+  return HITSOUND_STYLES.includes(candidate) ? candidate : DEFAULT_HITSOUND_STYLE;
+};
+
 export const normalizeProviderPriority = (value) => {
   if (!Array.isArray(value)) {
     return ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
@@ -304,6 +319,7 @@ export const normalizePreviewSettings = (items = {}) => ({
   autoFallback: normalizeAutoFallback(items?.[AUTO_FALLBACK_KEY] ?? items?.autoFallback),
   hitsounds: normalizeHitsounds(items?.[HITSOUNDS_KEY] ?? items?.hitsounds),
   hitsoundVolume: normalizeHitsoundVolume(items?.[HITSOUND_VOLUME_KEY] ?? items?.hitsoundVolume),
+  hitsoundStyle: normalizeHitsoundStyle(items?.[HITSOUND_STYLE_KEY] ?? items?.hitsoundStyle),
 });
 
 export const toPreviewSettingsStorage = (settings = {}) => {
@@ -322,6 +338,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [AUTO_FALLBACK_KEY]: normalized.autoFallback,
     [HITSOUNDS_KEY]: normalized.hitsounds,
     [HITSOUND_VOLUME_KEY]: normalized.hitsoundVolume,
+    [HITSOUND_STYLE_KEY]: normalized.hitsoundStyle,
   };
 };
 

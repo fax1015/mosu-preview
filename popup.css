@@ -100,7 +100,6 @@
     --list-item-height: 170px;
     --list-item-gap: 12px;
     --media-height: 12px;
-    --map-preview-control-height: 24px;
     --popup-shell-width: 446px;
     --popup-content-width: 430px;
     --popup-shell-width-mobile: 392px;
@@ -236,20 +235,6 @@ h6 {
     fill: currentColor;
 }
 
-.list-timeline {
-    position: relative;
-    flex: 1;
-    min-width: 0;
-    min-height: var(--media-height);
-    height: auto;
-    background: var(--bg-secondary);
-    border-radius: var(--border-radius);
-    overflow: hidden;
-    box-shadow: inset var(--shadow);
-    z-index: 1;
-    transition: min-height 0.3s cubic-bezier(0.32, 0.72, 0, 1);
-}
-
 /* Map Preview Popup */
 .map-preview-popup {
     position: relative;
@@ -262,16 +247,31 @@ h6 {
     gap: 0;
     padding: 0.75rem;
     margin: 0;
-    border-radius: var(--border-radius);
+    /* Firefox 155 rounds an extension popup's window to 24px, and the frame
+       sits the body's 0.5rem in from that edge, so this corner runs parallel
+       to the window's. Chrome's popup window is square; it gets the same. */
+    border-radius: calc(24px - 0.5rem);
     border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(36, 34, 42, 0.96);
+    /* Opaque, and painted from the first frame. Chromium's popup bubble is
+       white until the page paints something, and a nearly transparent shell
+       (or a backdrop-filter surface at very low opacity) let that white show
+       as a square in the corner while the tab URL was being checked. Only the
+       contents wait for is-open, below. Nothing sits behind the shell but the
+       flat page colour, so there is no translucency to preserve. */
+    background: rgb(36, 34, 42);
     box-shadow: 0 16px 42px rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(16px);
     z-index: 5000;
-    opacity: 0;
     transform: translateY(8px) scale(0.98);
     pointer-events: none;
-    transition: opacity 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+    transition: transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* The shell is a placeholder skeleton until src/popup.js knows which view the
+   tab gets (is-open). Hiding the contents rather than the box keeps the popup
+   window at its final size and colour from the start, so neither view flashes
+   before it is chosen. */
+.map-preview-popup:not(.is-open) > * {
+    visibility: hidden;
 }
 
 
@@ -357,7 +357,6 @@ html.is-detached-window .map-preview-follow-btn {
 }
 
 .map-preview-popup.is-open {
-    opacity: 1;
     transform: translateY(0) scale(1);
     pointer-events: auto;
 }
@@ -365,7 +364,6 @@ html.is-detached-window .map-preview-follow-btn {
 body.is-firefox-popup .map-preview-popup {
     background: rgb(36, 34, 42);
     box-shadow: none;
-    backdrop-filter: none;
     transition: none;
     contain: layout paint;
 }
@@ -1210,61 +1208,242 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     }
 }
 
+/* One capsule holding the whole row: volume, the timeline, the time, and
+   speed past a hairline at the end. Everything inside sits on the same 22px
+   line, 3px in from the capsule's edge. */
 .map-preview-controls {
+    --map-preview-capsule-inner-height: 22px;
     position: relative;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
     align-items: center;
-    gap: 0.35rem;
+    gap: 4px;
+    box-sizing: border-box;
+    height: calc(var(--map-preview-capsule-inner-height) + 8px);
+    padding: 3px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: calc((var(--map-preview-capsule-inner-height) + 8px) / 2);
+    background: rgba(0, 0, 0, 0.22);
     line-height: 1;
 }
 
-.map-preview-speed-control {
+.map-preview-control-divider {
+    width: 1px;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.12);
+}
+
+/* Speed and volume are the same kind of control: a small button showing the
+   value, opening a slider above it. Each is fixed at a width (speed just fits
+   its longest label, "0.55x"), so the timeline keeps its width as the values
+   change. */
+.map-preview-speed-control,
+.map-preview-volume-control {
     position: relative;
     display: inline-flex;
     align-items: center;
-    height: var(--map-preview-control-height);
-    margin-right: 0.5rem;
+    height: var(--map-preview-capsule-inner-height);
 }
 
-.map-preview-speed-btn {
-    min-width: 64px;
-    height: var(--map-preview-control-height);
-    padding: 0 0.6rem;
-    /* Thinner than the shared secondary button, to match the 1px outlines the
-       rest of the popup uses. */
-    border-width: 1px;
-    font-size: 0.74rem;
+.map-preview-speed-control {
+    --map-preview-pill-width: 40px;
+}
+
+.map-preview-volume-control {
+    --map-preview-pill-width: 34px;
+}
+
+.map-preview-speed-btn,
+.map-preview-volume-btn {
+    width: var(--map-preview-pill-width);
+    height: var(--map-preview-capsule-inner-height);
+    padding: 0;
+    border: none;
+    border-radius: calc(var(--map-preview-capsule-inner-height) / 2);
+    background: transparent;
+    color: rgb(176, 171, 192);
+    font-size: 0.72rem;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
+    transition: color var(--transition), background-color var(--transition);
 }
 
-/* Hover only lifts it towards white; the accent is reserved for the open
-   popover, so the button reads as active rather than merely pointed at. */
-.map-preview-speed-btn:hover {
+/* Volume leads the row as a soft pill; speed sits bare past the hairline. */
+.map-preview-volume-btn {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+/* Hover only lifts it; the accent is reserved for the open popover, so the
+   button reads as active rather than merely pointed at. */
+.map-preview-speed-btn:hover,
+.map-preview-volume-btn:hover {
     color: rgba(238, 236, 245, 0.95);
-    border-color: rgba(255, 255, 255, 0.3);
+    border-color: transparent;
+    background: rgba(255, 255, 255, 0.1);
 }
 
-.map-preview-speed-control.is-speed-open .map-preview-speed-btn {
+.map-preview-speed-btn:focus-visible,
+.map-preview-volume-btn:focus-visible {
+    outline: 1px solid rgba(181, 164, 244, 0.9);
+    outline-offset: -1px;
+}
+
+.map-preview-speed-control.is-speed-open .map-preview-speed-btn,
+.map-preview-volume-control.is-volume-open .map-preview-volume-btn {
     color: var(--accent-primary);
-    border-color: var(--accent-primary);
+    background: rgba(140, 102, 255, 0.16);
 }
 
-/* Sits above the speed button and only exists while the control is hovered,
-   focused, or being dragged, so it never steals room from the timeline row. */
-.map-preview-speed-popover {
+.map-preview-volume-btn {
+    /* A soft underdamped spring, starting from rest: it eases out, swings
+       about 25% past its target, dips back below once and settles. Slow enough
+       at the start to read as a bounce rather than a snap. src/popup.js reads
+       it too, for the speaker's bump. */
+    --map-preview-spring: linear(0, 0.026 2.5%, 0.097 5%, 0.2 7.5%, 0.327 10%, 0.465 12.5%, 0.607 15%,
+        0.744 17.5%, 0.871 20%, 0.982 22.5%, 1.075 25%, 1.148 27.5%, 1.201 30%,
+        1.235 32.5%, 1.252 35%, 1.252 37.5%, 1.24 40%, 1.218 42.5%, 1.189 45%,
+        1.155 47.5%, 1.119 50%, 1.084 52.5%, 1.05 55%, 1.02 57.5%, 0.993 60%,
+        0.956 65%, 0.938 70%, 0.937 75%, 0.948 80%, 0.974 85%, 0.991 90%, 1);
+    /* Leaving: a small wind-up the other way, then away. */
+    --map-preview-anticipate: cubic-bezier(0.36, 0, 0.66, -0.56);
+    /* How long the spring runs; the exits take about half. src/popup.js reads
+       it too. */
+    --volume-spring-ms: 380ms;
+    /* Scales every duration below. 0 until the first click or keypress (see
+       src/popup.js), so the volume restored as the popup opens lands without a
+       flourish. */
+    --volume-motion: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* The speaker is drawn at the left of the icon's box and the waves fill the
+   rest, so with fewer waves the drawing sits left of centre. Each level moves
+   it right by the difference, measured from that level's outline with the
+   stroke included. */
+.map-preview-volume-btn[data-level="0"] {
+    --volume-icon-shift: 0.4px;
+}
+
+.map-preview-volume-btn[data-level="1"] {
+    --volume-icon-shift: 2.5px;
+}
+
+.map-preview-volume-btn[data-level="2"] {
+    --volume-icon-shift: 1.5px;
+}
+
+.map-preview-volume-btn[data-level="3"] {
+    --volume-icon-shift: 0.5px;
+}
+
+.map-preview-volume-btn.is-animated {
+    --volume-motion: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .map-preview-volume-btn.is-animated {
+        --volume-motion: 0;
+    }
+}
+
+.map-preview-volume-icon {
+    width: 16px;
+    height: 13px;
+    overflow: visible;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    /* Glides to its new centre as the waves come and go. */
+    translate: var(--volume-icon-shift, 0) 0;
+    transition: translate calc(var(--volume-spring-ms) * var(--volume-motion)) var(--map-preview-spring);
+}
+
+.map-preview-volume-icon-speaker {
+    fill: currentColor;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+/* Waves spring out of the speaker's mouth, the inner one first. */
+.map-preview-volume-icon-wave {
+    transform-box: view-box;
+    transform-origin: 8.5px 8px;
+    transition:
+        opacity calc(120ms * var(--volume-motion)) ease-out
+            calc((var(--wave) - 1) * 35ms * var(--volume-motion)),
+        transform calc(var(--volume-spring-ms) * var(--volume-motion)) var(--map-preview-spring)
+            calc((var(--wave) - 1) * 35ms * var(--volume-motion));
+}
+
+.map-preview-volume-icon-wave--1 {
+    --wave: 1;
+}
+
+.map-preview-volume-icon-wave--2 {
+    --wave: 2;
+}
+
+.map-preview-volume-icon-wave--3 {
+    --wave: 3;
+}
+
+/* The cross spins in as the waves wind away. */
+.map-preview-volume-icon-mute {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition:
+        opacity calc(120ms * var(--volume-motion)) ease-out calc(50ms * var(--volume-motion)),
+        transform calc(var(--volume-spring-ms) * var(--volume-motion)) var(--map-preview-spring)
+            calc(50ms * var(--volume-motion));
+}
+
+/* data-level counts the waves: 0 is silent, then one per third of the range.
+   Leaving winds up slightly and then shrinks back into the speaker, outer wave
+   first so the icon never shows a gap between waves; the fade starts once the
+   wind-up is over. */
+.map-preview-volume-btn[data-level="0"] .map-preview-volume-icon-wave,
+.map-preview-volume-btn[data-level="1"] .map-preview-volume-icon-wave--2,
+.map-preview-volume-btn[data-level="1"] .map-preview-volume-icon-wave--3,
+.map-preview-volume-btn[data-level="2"] .map-preview-volume-icon-wave--3 {
+    opacity: 0;
+    transform: scale(0.3);
+    transition:
+        opacity calc(100ms * var(--volume-motion)) ease-in
+            calc(((3 - var(--wave)) * 25ms + 70ms) * var(--volume-motion)),
+        transform calc(180ms * var(--volume-motion)) var(--map-preview-anticipate)
+            calc((3 - var(--wave)) * 25ms * var(--volume-motion));
+}
+
+.map-preview-volume-btn:not([data-level="0"]) .map-preview-volume-icon-mute {
+    opacity: 0;
+    transform: scale(0.2) rotate(-90deg);
+    transition:
+        opacity calc(100ms * var(--volume-motion)) ease-in calc(70ms * var(--volume-motion)),
+        transform calc(180ms * var(--volume-motion)) var(--map-preview-anticipate);
+}
+
+/* Sits above its button and only exists while the control is open, so it
+   never steals room from the timeline row. */
+.map-preview-speed-popover,
+.map-preview-volume-popover {
     position: absolute;
     bottom: 100%;
-    /* Left-anchored, not centred: the button sits against the popup's left
-       padding, so a centred panel would spill past the window edge. */
-    left: 0;
+    /* Anchored at the edge the button sits against, not centred: speed is at
+       the right end of the row and volume at the left, so a centred panel
+       would spill past the window edge. */
+    right: 0;
     z-index: 30;
-    /* Leaves room under the panel for the arrow that points at the button. */
+    /* Leaves room under the panel for the arrow that points at the button,
+       whose tip lands on the capsule's top edge. */
     padding-bottom: 8px;
     opacity: 0;
     visibility: hidden;
     transform: translateY(6px) scale(0.98);
-    transform-origin: 20% 100%;
+    transform-origin: 80% 100%;
     pointer-events: none;
     transition: opacity 140ms ease,
                 transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
@@ -1272,7 +1451,14 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     will-change: opacity, transform;
 }
 
-.map-preview-speed-control.is-speed-open .map-preview-speed-popover {
+.map-preview-volume-popover {
+    right: auto;
+    left: 0;
+    transform-origin: 20% 100%;
+}
+
+.map-preview-speed-control.is-speed-open .map-preview-speed-popover,
+.map-preview-volume-control.is-volume-open .map-preview-volume-popover {
     opacity: 1;
     visibility: visible;
     transform: translateY(0) scale(1);
@@ -1282,11 +1468,18 @@ body.is-firefox-popup .map-preview-toggle-indicator {
                 visibility 0s;
 }
 
-.map-preview-speed-panel {
+.map-preview-speed-panel,
+.map-preview-volume-panel {
+    /* Both panels are one height whatever they hold: the speed panel's reset
+       button is the tallest thing in either, and keeps its height even while
+       collapsed, so the row is sized to it. */
+    --map-preview-popover-row: 16px;
     position: relative;
     display: flex;
     align-items: center;
     gap: 0.4rem;
+    box-sizing: border-box;
+    height: calc(var(--map-preview-popover-row) + (0.34rem * 2) + 2px);
     padding: 0.34rem 0.5rem;
     border-radius: calc(var(--border-radius) - 1px);
     border: 1px solid rgba(255, 255, 255, 0.12);
@@ -1299,12 +1492,15 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 
 /* Rotated square rather than a border triangle, so the panel's own outline
    carries on around the tip. Sits over the panel's bottom edge, lined up with
-   the middle of the speed button. */
-.map-preview-speed-panel::after {
+   the middle of its button. */
+.map-preview-speed-panel::after,
+.map-preview-volume-panel::after {
     content: '';
     position: absolute;
     bottom: -4px;
-    left: 28px;
+    /* Half the button, less half the arrow and the panel's 1px border: the
+       arrow is placed from inside that border. */
+    right: calc((var(--map-preview-pill-width) / 2) - 5px);
     width: 8px;
     height: 8px;
     transform: rotate(45deg);
@@ -1313,27 +1509,47 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     background: rgba(36, 34, 42, 0.96);
 }
 
-.map-preview-speed-bound {
+.map-preview-volume-panel::after {
+    right: auto;
+    left: calc((var(--map-preview-pill-width) / 2) - 5px);
+}
+
+.map-preview-speed-bound,
+.map-preview-volume-value {
     font-size: 0.62rem;
     font-weight: 600;
     color: var(--text-secondary);
     opacity: 0.7;
 }
 
-.map-preview-speed-slider {
+/* The button only shows the level, so the panel carries the number. Held at
+   the width of "100%" so the right-anchored panel does not shift the slider
+   under the pointer as the digits change. */
+.map-preview-volume-value {
+    width: 1.5rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.map-preview-speed-slider,
+.map-preview-volume-slider {
     --range-width: 118px;
 }
 
 /* Only takes up room once the speed leaves 1x, so the panel stays compact at
-   the default rate and widens into the button. */
+   the default rate. It sits at the panel's left end, the end away from its
+   anchor, so the panel widens leftwards and the slider never moves under the
+   pointer as it appears. */
 .map-preview-speed-reset {
     flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 0;
-    height: 16px;
-    margin-left: 0;
+    height: var(--map-preview-popover-row);
+    /* Cancels the panel's gap while collapsed, so the panel's left padding
+       matches its right. */
+    margin-right: -0.4rem;
     padding: 0;
     border: 0;
     border-radius: 50%;
@@ -1344,14 +1560,14 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     pointer-events: none;
     cursor: pointer;
     transition: width 170ms cubic-bezier(0.32, 0.72, 0, 1),
-                margin-left 170ms cubic-bezier(0.32, 0.72, 0, 1),
+                margin-right 170ms cubic-bezier(0.32, 0.72, 0, 1),
                 opacity 140ms ease,
                 color 120ms ease;
 }
 
 .map-preview-speed-reset.is-visible {
     width: 16px;
-    margin-left: 0.3rem;
+    margin-right: 0.3rem;
     opacity: 0.72;
     pointer-events: auto;
 }
@@ -1373,52 +1589,45 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     fill: currentColor;
 }
 
+/* Track, ticks and (while zoomed) the overview rail are all drawn in the one
+   canvas; see src/timeline.js. The capsule around it is its frame, so it has
+   no outline or rounding of its own. */
 .map-preview-timeline {
-    min-height: 22px;
-    height: 22px;
-    flex: 0 0 22px;
+    display: block;
     width: 100%;
+    height: var(--map-preview-capsule-inner-height);
     cursor: pointer;
+    touch-action: none;
+    user-select: none;
 }
 
 .map-preview-time-label {
     display: inline-flex;
     align-items: center;
-    justify-content: flex-end;
-    height: var(--map-preview-control-height);
+    /* Centred, so whatever the reserved width does not use is split between the
+       timeline and the hairline rather than all piling up on one side. */
+    justify-content: center;
+    height: var(--map-preview-capsule-inner-height);
+    padding: 0 4px;
     font-size: 0.72rem;
     color: var(--text-secondary);
     white-space: nowrap;
     /* Sized in JS from the longest label the current duration can produce, so
        the row lays out around the real text instead of clipping long maps. */
     width: var(--map-preview-time-label-width, 60px);
-    text-align: right;
+    text-align: center;
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
 }
 
-.map-preview-volume-control {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    height: var(--map-preview-control-height);
-    margin-left: 8px;
-    min-width: 114px;
-    padding: 0 0.45rem;
-    border-radius: var(--border-radius);
-    border: 1px solid var(--bg-quaternary);
-    background: transparent;
-    user-select: none;
-}
-
-.map-preview-volume-label {
-    font-size: 0.68rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    width: 4ch;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0;
+/* Torus draws its figures about 0.05em below the middle of its line box, so
+   text centred by the box reads low inside the capsule's pills. A 0.1em
+   bottom pad lifts it back; with line-height: normal, Chromium and Firefox
+   then agree to within a quarter pixel. */
+.map-preview-speed-btn,
+.map-preview-time-label {
+    line-height: normal;
+    padding-bottom: 0.1em;
 }
 
 .map-preview-volume-slider,
@@ -1527,24 +1736,71 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     gap: 0.28rem;
 }
 
+/* Holds the list and the scrollbar drawn over it (see ui/overlayScrollbar.js). */
+.map-preview-recent-scroll {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
 .map-preview-recent-list {
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
     max-height: 320px;
-    overflow-y: auto;;
+    overflow-y: auto;
+    /* The native one would take its width out of the items. */
+    scrollbar-width: none;
 }
 
 .map-preview-recent-list::-webkit-scrollbar {
-    width: 4px;
+    display: none;
 }
 
-.map-preview-recent-list::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.1);
+/* Inside the cards' 0.6rem padding rather than on their border, and clear of
+   their 0.6rem corners at either end. */
+.map-preview-recent-scrollbar {
+    position: absolute;
+    top: 0.6rem;
+    right: 5px;
+    bottom: 0.6rem;
+    width: 4px;
+    pointer-events: none;
+}
+
+.map-preview-recent-scrollbar[hidden] {
+    display: none;
+}
+
+.map-preview-recent-scrollbar-thumb {
+    position: relative;
+    width: 100%;
     border-radius: 99px;
+    background: rgba(255, 255, 255, 0.16);
+    pointer-events: auto;
+    touch-action: none;
+    transition: background var(--transition);
+}
+
+/* Easier to grab than the 4px it draws. */
+.map-preview-recent-scrollbar-thumb::before {
+    content: '';
+    position: absolute;
+    inset: 0 -4px;
+}
+
+.map-preview-recent-scroll:hover .map-preview-recent-scrollbar-thumb,
+.map-preview-recent-scrollbar.is-dragging .map-preview-recent-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.28);
 }
 
 .map-preview-recent-item {
+    /* The text block's measurements, which the thumbnail's height is made of. */
+    --recent-title-size: 0.82rem;
+    --recent-meta-size: 0.68rem;
+    --recent-line-height: 1.5;
+    --recent-line-gap: 0.1rem;
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -1572,8 +1828,11 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-recent-thumbnail {
-    width: 48px;
-    height: 32px;
+    /* As tall as the two lines beside it, so the card's padding is the margin
+       on every side of it rather than only on the left. Stretching it instead
+       leaves aspect-ratio nothing to take a width from in a flex row. */
+    height: calc((var(--recent-title-size) + var(--recent-meta-size)) * var(--recent-line-height) + var(--recent-line-gap));
+    aspect-ratio: 3 / 2;
     border-radius: 0.3rem;
     background-size: cover;
     background-position: center;
@@ -1586,11 +1845,12 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0.1rem;
+    gap: var(--recent-line-gap);
+    line-height: var(--recent-line-height);
 }
 
 .map-preview-recent-item-title {
-    font-size: 0.82rem;
+    font-size: var(--recent-title-size);
     font-weight: 700;
     color: var(--text-primary);
     white-space: nowrap;
@@ -1599,7 +1859,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-recent-item-meta {
-    font-size: 0.68rem;
+    font-size: var(--recent-meta-size);
     color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
@@ -1710,6 +1970,7 @@ html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-previ
                 visibility 0s linear 0.22s;
 }
 
+html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-preview-recent-scroll,
 html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-preview-recent-list {
     flex: 1 1 auto;
     max-height: none;

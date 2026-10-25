@@ -6,15 +6,30 @@ import {
 import {
   buildSliderCurvePoints,
   getPathLength,
-  positionOnPathAtProgress,
+  simplifyPathForRendering,
   trimPathFromStart,
   trimPathToLength,
 } from './core/sliderPath.js';
 import { getElapsedBeatsAt, getTimingSections, getTimingStateAt } from './core/controlPoints.js';
 import { clamp, findFirstIndexAtOrAfter } from './core/math.js';
+import { FOLLOW_LINE_FADE_OUT_MS, getFollowLineAt, hasFollowPoints } from './core/followPoints.js';
+import { getCanvasContext } from './core/canvas.js';
+import { TimelineRenderer } from './timeline.js';
 
 const OSU_WIDTH = 512;
 const OSU_HEIGHT = 384;
+const OSU_VIEW_WIDTH = 640;
+const OSU_VIEW_HEIGHT = 480;
+const OSU_FIELD_OFFSET_X = (OSU_VIEW_WIDTH - OSU_WIDTH) / 2;
+const OSU_FIELD_OFFSET_Y = (OSU_VIEW_HEIGHT - OSU_HEIGHT) / 2;
+// Match the slight downward field placement observed in osu!'s legacy layout.
+const OSU_FIELD_VERTICAL_SHIFT = 8;
+// The CS5.1 edge-loop slider at 02:51 in beatmap 5337582 spans y=-24..392.
+const OSU_CALIBRATION_SLIDER_CS = 5.1;
+const OSU_CALIBRATION_SLIDER_MIN_Y = -24;
+const OSU_CALIBRATION_SLIDER_MAX_Y = 392;
+const OSU_CALIBRATION_EDGE_BREATHING_ROOM_PX = 4;
+const STANDARD_PLAYFIELD_BACKGROUND = 'rgba(19, 21, 26, 0.95)';
 // osu!lazer: StackOffset = StackHeight * Scale * -6.4, with Scale = radius/64,
 // so one stack level is worth radius/10 osu! pixels — 4.5px at CS 2 down to
 // 2.3px at CS 7. This constant is only the CS 5 value, used as a fallback when
@@ -22,6 +37,7 @@ const OSU_HEIGHT = 384;
 const STACK_OFFSET_OSU_AT_CS5 = 3.2;
 const getStackOffsetUnit = (circleSize) => getCircleRadius(circleSize) / 10;
 const DRAWN_CIRCLE_RADIUS_SCALE = 0.92;
+const DRAWN_CIRCLE_INSET_PX = 0.75;
 const CIRCLE_POST_HIT_FADE_MS = 120;
 const LONG_OBJECT_POST_HIT_FADE_MS = 140;
 const SLIDER_HEAD_HIT_FADE_MS = 120;
@@ -30,6 +46,17 @@ const COMBO_NUMBER_FONT_SCALE = 0.84;
 const OBJECT_VISUAL_MAX_ALPHA = 0.84;
 const STANDARD_OBJECT_SHADOW_ALPHA = 0.26;
 const STANDARD_OBJECT_SHADOW_SCALE = 1.12;
+// Maximum deviation, in rendered pixels, allowed when a very long slider path is
+// thinned for drawing. Matches the 0.25 tolerance osu!lazer's path approximator
+// uses in osu!units, so a thinned path stays as faithful as lazer's sampled one.
+const STANDARD_SLIDER_RENDER_TOLERANCE_PX = 0.25;
+// Normal sliders draw their full sampled curve. Thinning them was what made
+// ordinary curved sliders look faceted: even when every dropped vertex sits
+// within a fraction of a pixel of its chord, drawing an arc as a handful of
+// long straight segments leaves visible corners in the stroked outline. Only
+// paths longer than this are thinned, which in practice means the decorative
+// anchor-dense sliders that the thinning exists for.
+const STANDARD_SLIDER_RENDER_SIMPLIFY_MIN_POINTS = 512;
 const STANDARD_FADE_IN_BASE_MS = 400;
 const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
@@ -49,10 +76,10 @@ const MANIA_SNAP_COLOURS = Object.freeze([
 const MANIA_UNSNAPPED_COLOUR = Object.freeze({ r: 255, g: 255, b: 255 });
 // osu!lazer's TimingControlPoint floor for beat length.
 const MIN_BEAT_LENGTH_MS = 6;
-const MAX_CANVAS_DPR = 2;
-const CANVAS_CONTEXT_OPTIONS = { alpha: false, desynchronized: true };
-const canvasContextCache = new WeakMap();
 const sliderPathCache = new WeakMap();
+const sliderRenderPathCache = new WeakMap();
+const sliderPathMetricsCache = new WeakMap();
+const sliderRenderPathLengthCache = new WeakMap();
 // Unstacked slider endpoints, keyed by object. Separate from sliderPathCache
 // because that one is keyed on the stack offset, which is exactly what the
 // stacking algorithm has not decided yet when it asks for these.
@@ -67,23 +94,46 @@ const getStandardPlayfieldLayout = (canvasWidth, canvasHeight, circleSize, paddi
   const safePadding = Math.max(0, Number(padding) || 0);
   const availableWidth = Math.max(10, width - (safePadding * 2));
   const availableHeight = Math.max(10, height - (safePadding * 2));
-  const edgeRadiusOsu = Math.max(0, getCircleRadius(circleSize) * DRAWN_CIRCLE_RADIUS_SCALE);
+  const cs = clamp(Number.isFinite(circleSize) ? circleSize : 5, 0, 10);
+  // Border expansion follows osu!'s full CS-scaled radius. The circles themselves
+  // are drawn slightly smaller, but that visual inset should not shrink the field.
+  const edgeRadiusOsu = Math.max(0, getCircleRadius(cs));
   const scale = Math.min(
-    availableWidth / (OSU_WIDTH + (edgeRadiusOsu * 2)),
-    availableHeight / (OSU_HEIGHT + (edgeRadiusOsu * 2)),
+    availableWidth / OSU_VIEW_WIDTH,
+    availableHeight / OSU_VIEW_HEIGHT,
+  );
+  const calibrationCircleRadius = getCircleRadius(OSU_CALIBRATION_SLIDER_CS) * scale;
+  const calibrationCircleDrawRadius = Math.max(
+    0.5,
+    (calibrationCircleRadius * DRAWN_CIRCLE_RADIUS_SCALE) - DRAWN_CIRCLE_INSET_PX,
+  );
+  const calibrationSliderBodyRadius = Math.max(2, calibrationCircleDrawRadius * 0.95);
+  const calibrationHalfSpanY = (OSU_CALIBRATION_SLIDER_MAX_Y - OSU_CALIBRATION_SLIDER_MIN_Y) / 2;
+  // Increase only vertical scale so the reference slider body meets both edges;
+  // horizontal scale and hit-circle size remain at the fixed 640x480 fit.
+  const scaleY = Math.max(
+    0.01,
+    ((availableHeight / 2) - calibrationSliderBodyRadius - OSU_CALIBRATION_EDGE_BREATHING_ROOM_PX)
+      / calibrationHalfSpanY,
   );
   const playfieldWidth = OSU_WIDTH * scale;
-  const playfieldHeight = OSU_HEIGHT * scale;
+  const playfieldHeight = OSU_HEIGHT * scaleY;
+  const viewportWidth = OSU_VIEW_WIDTH * scale;
+  const viewportHeight = OSU_VIEW_HEIGHT * scaleY;
+  const viewportX = (width - viewportWidth) / 2;
+  const viewportY = (height - viewportHeight) / 2;
+  const playfieldX = viewportX + (OSU_FIELD_OFFSET_X * scale);
+  const playfieldY = viewportY + ((OSU_FIELD_OFFSET_Y + OSU_FIELD_VERTICAL_SHIFT) * scaleY);
+  // Keep the visible border tied to the CS-scaled circle radius.
   const edgePadding = edgeRadiusOsu * scale;
+  const visualX = playfieldX - edgePadding;
+  const visualY = playfieldY - edgePadding;
   const visualWidth = playfieldWidth + (edgePadding * 2);
   const visualHeight = playfieldHeight + (edgePadding * 2);
-  const visualX = (width - visualWidth) / 2;
-  const visualY = (height - visualHeight) / 2;
-  const playfieldX = visualX + edgePadding;
-  const playfieldY = visualY + edgePadding;
 
   return {
     scale,
+    scaleY,
     playfieldX,
     playfieldY,
     playfieldWidth,
@@ -175,6 +225,85 @@ const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   return points;
 };
 
+const getSliderRenderPathPointsOsu = (object, scaleX, scaleY) => {
+  const fullPath = buildSliderPathPointsOsu(object);
+
+  const stackIndex = object.stackIndex || 0;
+  const cached = sliderRenderPathCache.get(object);
+  if (
+    cached
+    && cached.fullPath === fullPath
+    && cached.stackIndex === stackIndex
+    && cached.scaleX === scaleX
+    && cached.scaleY === scaleY
+  ) {
+    return cached.points;
+  }
+
+  const points = simplifyPathForRendering(
+    fullPath,
+    STANDARD_SLIDER_RENDER_TOLERANCE_PX,
+    scaleX,
+    scaleY,
+    STANDARD_SLIDER_RENDER_SIMPLIFY_MIN_POINTS,
+  );
+  sliderRenderPathCache.set(object, {
+    fullPath, stackIndex, scaleX, scaleY, points,
+  });
+  return points;
+};
+
+const getSliderPathMetrics = (path) => {
+  const cached = sliderPathMetricsCache.get(path);
+  if (cached) return cached;
+
+  const cumulativeLengths = new Float64Array(path.length);
+  for (let i = 1; i < path.length; i += 1) {
+    cumulativeLengths[i] = cumulativeLengths[i - 1]
+      + Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
+  }
+  const metrics = { cumulativeLengths, totalLength: cumulativeLengths.at(-1) || 0 };
+  sliderPathMetricsCache.set(path, metrics);
+  return metrics;
+};
+
+const positionOnSliderPathAtProgress = (path, progress) => {
+  if (!Array.isArray(path) || path.length === 0) return { x: 0, y: 0 };
+  if (path.length === 1) return path[0];
+
+  const { cumulativeLengths, totalLength } = getSliderPathMetrics(path);
+  if (totalLength <= 0) return path[0];
+  const target = clamp(Number(progress) || 0, 0, 1) * totalLength;
+  let low = 1;
+  let high = path.length - 1;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (cumulativeLengths[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+
+  const start = path[low - 1];
+  const end = path[low];
+  const segmentStartLength = cumulativeLengths[low - 1];
+  const segmentLength = cumulativeLengths[low] - segmentStartLength;
+  const segmentProgress = segmentLength <= 0
+    ? 0
+    : clamp((target - segmentStartLength) / segmentLength, 0, 1);
+  return {
+    x: start.x + ((end.x - start.x) * segmentProgress),
+    y: start.y + ((end.y - start.y) * segmentProgress),
+  };
+};
+
+const getSliderRenderPathLength = (path) => {
+  if (sliderRenderPathLengthCache.has(path)) {
+    return sliderRenderPathLengthCache.get(path);
+  }
+  const length = getPathLength(path);
+  sliderRenderPathLengthCache.set(path, length);
+  return length;
+};
+
 // A slider's `slides` counts spans, not repeats: one span is head-to-tail, and
 // each extra one is a reverse. Nearly everything that draws or times a slider
 // needs the same three numbers off the back of that.
@@ -208,7 +337,7 @@ const getSliderBallPositionOsu = (object, currentTime) => {
   const isForward = (spanIndex % 2) === 0;
   // A zero-length path stays on its (stacked) head, rather than snapping to the
   // unstacked position the way this used to.
-  return positionOnPathAtProgress(path, isForward ? spanProgress : (1 - spanProgress));
+  return positionOnSliderPathAtProgress(path, isForward ? spanProgress : (1 - spanProgress));
 };
 
 const getObjectStackOffset = (object) => {
@@ -534,50 +663,13 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersi
   }
 };
 
-const buildDensityBins = (objects, durationMs, bins = 150, startTimeMs = 0) => {
-  if (!Array.isArray(objects) || objects.length === 0 || !Number.isFinite(durationMs) || durationMs <= 0) {
-    return new Array(bins).fill(0);
-  }
-
-  const counts = new Array(bins).fill(0);
-  const endTimeMs = startTimeMs + durationMs;
-  for (const object of objects) {
-    if (!object || object.time < startTimeMs || object.time > endTimeMs) {
-      continue;
-    }
-    const ratio = clamp((object.time - startTimeMs) / durationMs, 0, 1);
-    const index = Math.min(bins - 1, Math.floor(ratio * bins));
-    counts[index] += 1;
-  }
-
-  const max = Math.max(...counts, 1);
-  return counts.map((count) => count / max);
-};
-
-const easeOutCubic = (t) => 1 - ((1 - clamp(t, 0, 1)) ** 3);
-
-const getCanvasContext = (canvas) => {
-  let cached = canvasContextCache.get(canvas);
-  if (!cached) {
-    cached = {
-      ctx: canvas.getContext('2d', CANVAS_CONTEXT_OPTIONS) || canvas.getContext('2d'),
-    };
-    canvasContextCache.set(canvas, cached);
-  }
-
-  const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
-  const width = Math.max(1, canvas.clientWidth);
-  const height = Math.max(1, canvas.clientHeight);
-
-  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-  }
-
-  const { ctx } = cached;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, width, height };
-};
+// Follow points are drawn as one continuous line per pair of objects (timing
+// in core/followPoints.js), at this opacity once it is fully in.
+const FOLLOW_LINE_MAX_ALPHA = 0.225;
+// How far the start of the line trails off, in circle radii (at most half the
+// line), and how many steps its eased fade is drawn in.
+const FOLLOW_LINE_TAIL_RADII = 3;
+const FOLLOW_LINE_TAIL_STEPS = 8;
 
 const drawFollowPoints = ({
   ctx,
@@ -585,115 +677,119 @@ const drawFollowPoints = ({
   objects,
   currentTime,
   preemptMs,
-  minVisibleTime,
-  maxVisibleTime,
-  maxObjectDurationMs = 0,
   circleRadius,
   scale,
 }) => {
   if (!Array.isArray(objects) || objects.length < 2) {
-    return;
+    return 0;
   }
 
-  const timeFadeInMs = getStandardFadeInMs(preemptMs);
-  // `next` is the object being filtered, so start one pair earlier than the
-  // first candidate index.
+  let drawnCount = 0;
+  // A line shows from no earlier than when the object it leads to starts
+  // fading in until shortly after that object is hit. `next` is the object
+  // being searched for, so start one pair earlier.
   const startIndex = Math.max(
     0,
-    findFirstIndexAtOrAfter(objects, minVisibleTime - maxObjectDurationMs) - 1,
+    findFirstIndexAtOrAfter(objects, currentTime - FOLLOW_LINE_FADE_OUT_MS) - 1,
   );
 
   for (let i = startIndex; i < objects.length - 1; i += 1) {
     const current = objects[i];
     const next = objects[i + 1];
     if (!current || !next) continue;
-    if (next.time > maxVisibleTime) break;
+    if (next.time > currentTime + preemptMs) break;
+    // Lazer: no follow points into a new combo, or to or from a spinner.
     if ((current.comboIndex ?? 0) !== (next.comboIndex ?? 0)) continue;
     if (current.kind === 'spinner' || next.kind === 'spinner') continue;
-    if (next.endTime < minVisibleTime) continue;
 
-    const shootDuration = Math.min(250, timeFadeInMs);
-    const fadeInStart = next.time - preemptMs;
-    const fadeInEnd = fadeInStart + shootDuration;
-    const fadeOutEnd = next.time;
-    // Quick opacity fade right before the hit, without any retract animation
-    const fadeOutStart = Math.max(fadeInEnd, next.time - 120);
+    const line = getFollowLineAt(currentTime, { endTimeMs: next.time, preemptMs });
+    if (!line || line.alpha <= 0.001) continue;
 
-    if (currentTime < fadeInStart || currentTime > fadeOutEnd) continue;
-
+    // From where the start object ends (a slider's end), centre to centre: the
+    // objects drawn over it hide the ends while they are there.
     const start = getObjectEndPositionOsu(current);
     const end = getObjectStartPositionOsu(next);
+    if (!hasFollowPoints(Math.hypot(end.x - start.x, end.y - start.y))) continue;
 
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const distance = Math.hypot(dx, dy);
-
-    // Do not draw if the gap is too small to fit between the hitcircles
-    if (!Number.isFinite(distance) || distance <= 100) continue;
-
-    // Progress of the line shooting out towards the next object
-    let headProgress = 1;
-    if (currentTime < fadeInEnd) {
-      const p = clamp((currentTime - fadeInStart) / shootDuration, 0, 1);
-      headProgress = 1 - Math.pow(1 - p, 4); // Extremely aggressive ease-out
+    const from = toCanvas(start.x, start.y);
+    const to = toCanvas(end.x, end.y);
+    const length = Math.hypot(to.x - from.x, to.y - from.y);
+    if (!(length > 0)) continue;
+    const alpha = clamp(FOLLOW_LINE_MAX_ALPHA * line.alpha, 0, 1);
+    // The start trails off to nothing at the start object's centre, eased at
+    // both ends of the fade so it neither starts nor stops visibly.
+    const tail = Math.min(circleRadius * FOLLOW_LINE_TAIL_RADII, length / 2) / length;
+    const fade = ctx.createLinearGradient(
+      from.x,
+      from.y,
+      from.x + ((to.x - from.x) * tail),
+      from.y + ((to.y - from.y) * tail),
+    );
+    for (let k = 0; k <= FOLLOW_LINE_TAIL_STEPS; k += 1) {
+      const offset = k / FOLLOW_LINE_TAIL_STEPS;
+      const eased = offset * offset * (3 - (2 * offset));
+      // Rounded well below a step of 8-bit alpha, so the colours parse from cache.
+      fade.addColorStop(offset, `rgba(255, 255, 255, ${(alpha * eased).toFixed(3)})`);
     }
-
-    let alpha = 0.45;
-    if (currentTime > fadeOutStart) {
-      const alphaProgress = clamp((currentTime - fadeOutStart) / (fadeOutEnd - fadeOutStart), 0, 1);
-      alpha = 0.45 * (1 - alphaProgress); // Quick linear fade out
-    }
-
-    if (alpha <= 0.001) continue;
-
-    const startCanvas = toCanvas(start.x, start.y);
-    const endCanvas = toCanvas(end.x, end.y);
-
-    const canvasDx = endCanvas.x - startCanvas.x;
-    const canvasDy = endCanvas.y - startCanvas.y;
-    const canvasDistance = Math.hypot(canvasDx, canvasDy);
-    if (canvasDistance < 0.001) continue;
-
-    const nx = canvasDx / canvasDistance;
-    const ny = canvasDy / canvasDistance;
-
-    // Trim the start and end by the radius so the line connects cleanly edge-to-edge
-    const trim = circleRadius * 1.05;
-    const fromX = startCanvas.x + (nx * trim);
-    const fromY = startCanvas.y + (ny * trim);
-    const toX = endCanvas.x - (nx * trim);
-    const toY = endCanvas.y - (ny * trim);
-
-    const drawFromX = fromX;
-    const drawFromY = fromY;
-    const drawToX = fromX + ((toX - fromX) * headProgress);
-    const drawToY = fromY + ((toY - fromY) * headProgress);
-
-    ctx.strokeStyle = `rgba(255, 255, 255, ${clamp(alpha, 0, 1)})`;
+    ctx.strokeStyle = fade;
     // Thinner continuous line, decoupled from circle radius
     ctx.lineWidth = Math.max(1.0, 2.5 * scale);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(drawFromX, drawFromY);
-    ctx.lineTo(drawToX, drawToY);
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(from.x + ((to.x - from.x) * line.extent), from.y + ((to.y - from.y) * line.extent));
     ctx.stroke();
+    drawnCount += 1;
   }
+  return drawnCount;
+};
+
+const createLayer = () => {
+  if (typeof OffscreenCanvas !== 'function') {
+    return null;
+  }
+  const canvas = new OffscreenCanvas(1, 1);
+  const ctx = canvas.getContext('2d');
+  return ctx ? { canvas, ctx } : null;
+};
+
+// Empties a layer and sizes it to `target`'s canvas, drawing in the same
+// units, so that whatever is drawn on it lands where it would on `target`.
+const clearLayer = (layer, target) => {
+  const { canvas, ctx } = layer;
+  if (canvas.width !== target.canvas.width || canvas.height !== target.canvas.height) {
+    canvas.width = target.canvas.width;
+    canvas.height = target.canvas.height;
+  }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(target.getTransform());
+};
+
+// Puts the follow lines down under the objects. The lines are first cut away
+// wherever an object is drawn, by as much as it covers: all but gone under a
+// circle that is fully in, only dimmed under one still fading in.
+const composeFollowLineLayers = (target, { lines, objects }) => {
+  lines.ctx.setTransform(1, 0, 0, 1, 0, 0);
+  lines.ctx.globalCompositeOperation = 'destination-out';
+  lines.ctx.drawImage(objects.canvas, 0, 0);
+  lines.ctx.globalCompositeOperation = 'source-over';
+
+  target.save();
+  target.setTransform(1, 0, 0, 1, 0, 0);
+  target.drawImage(lines.canvas, 0, 0);
+  target.drawImage(objects.canvas, 0, 0);
+  target.restore();
 };
 
 export class PreviewRenderer {
   constructor(playfieldCanvas, timelineCanvas) {
     this.playfieldCanvas = playfieldCanvas;
-    this.timelineCanvas = timelineCanvas;
+    this.timeline = new TimelineRenderer(timelineCanvas);
     this.mapData = null;
     this.durationMs = 0;
     this.currentTimeMs = 0;
-    this.timelineDensity = [];
-    this.timelineDensityViewCache = null;
-    this.visualTimelineDurationMs = 1;
-    this.timelineDurationAnimation = null;
-    this.timelineViewStartMs = 0;
-    this.timelineViewDurationMs = null;
-    this.timelineViewAnimation = null;
     this.comboColours = DEFAULT_COLOURS;
     this.catcherRenderX = Number.NaN;
     this.catcherRenderTime = Number.NaN;
@@ -707,20 +803,18 @@ export class PreviewRenderer {
     this.maniaScrollDirection = 'down';
     this.maniaTimingNoteColours = false;
     this.visibleObjectsScratch = [];
+    // Created on first use; null where they cannot be.
+    this.followLineLayers = undefined;
     this.standardSnakingSliders = false;
     this.standardSliderSnakeOut = false;
     this.standardSliderEndCircles = true;
     this.catchRenderObjects = null;
   }
 
-  setBeatmap(mapData, durationMs) {
+  setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
     this.mapData = mapData;
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
-    this.visualTimelineDurationMs = this.durationMs;
-    this.timelineDurationAnimation = null;
-    this.resetTimelineZoom({ animate: false });
-    this.timelineDensity = buildDensityBins(mapData?.objects || [], this.durationMs);
-    this.timelineDensityViewCache = null;
+    this.timeline.setBeatmap(mapData, this.durationMs, { previewTimeMs });
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours
       : DEFAULT_COLOURS;
@@ -767,160 +861,18 @@ export class PreviewRenderer {
     }
   }
 
-  getVisualTimelineDuration(now = performance.now()) {
-    if (!this.timelineDurationAnimation) {
-      return this.visualTimelineDurationMs || this.durationMs || 1;
-    }
-
-    const progress = clamp(
-      (now - this.timelineDurationAnimation.startTime) / this.timelineDurationAnimation.durationMs,
-      0,
-      1,
-    );
-
-    if (progress >= 1) {
-      this.visualTimelineDurationMs = this.timelineDurationAnimation.to;
-      this.timelineDurationAnimation = null;
-      return this.visualTimelineDurationMs;
-    }
-
-    this.visualTimelineDurationMs = this.timelineDurationAnimation.from
-      + ((this.timelineDurationAnimation.to - this.timelineDurationAnimation.from) * easeOutCubic(progress));
-    return this.visualTimelineDurationMs;
-  }
-
   isTimelineDurationAnimating() {
-    return Boolean(this.timelineDurationAnimation);
-  }
-
-  isTimelineViewAnimating() {
-    return Boolean(this.timelineViewAnimation);
-  }
-
-  isTimelineAnimating() {
-    return this.isTimelineDurationAnimating() || this.isTimelineViewAnimating();
+    return this.timeline.isDurationAnimating();
   }
 
   setDuration(durationMs, { animate = false } = {}) {
-    const nextDurationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
-    const currentVisualDurationMs = this.getVisualTimelineDuration();
-    const previousDurationMs = this.durationMs;
-    this.durationMs = nextDurationMs;
-    this.timelineDensity = buildDensityBins(this.mapData?.objects || [], this.durationMs);
-    this.timelineDensityViewCache = null;
-    if (this.timelineViewDurationMs !== null && this.timelineViewDurationMs >= nextDurationMs) {
-      this.resetTimelineZoom({ animate: false });
-    } else if (this.timelineViewDurationMs !== null) {
-      this.timelineViewStartMs = clamp(this.timelineViewStartMs, 0, Math.max(0, nextDurationMs - this.timelineViewDurationMs));
-    }
-
-    if (animate && nextDurationMs > currentVisualDurationMs) {
-      this.visualTimelineDurationMs = currentVisualDurationMs;
-      this.timelineDurationAnimation = {
-        startTime: performance.now(),
-        durationMs: 340,
-        from: currentVisualDurationMs,
-        to: nextDurationMs,
-      };
-      return true;
-    }
-
-    if (
-      this.timelineDurationAnimation
-      && nextDurationMs === previousDurationMs
-      && this.timelineDurationAnimation.to === nextDurationMs
-    ) {
-      return true;
-    }
-
-    this.visualTimelineDurationMs = nextDurationMs;
-    this.timelineDurationAnimation = null;
-    return false;
+    this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
+    return this.timeline.setDuration(this.durationMs, { animate });
   }
 
   setTime(ms) {
     this.currentTimeMs = clamp(ms, 0, this.durationMs || 1);
-  }
-
-  isTimelineZoomed() {
-    const { durationMs } = this.getTimelineViewRange();
-    return durationMs < this.durationMs - 0.5;
-  }
-
-  animateTimelineView(toStartMs, toDurationMs, animate = true) {
-    const durationMs = this.durationMs || 1;
-    const nextDurationMs = Math.min(durationMs, Math.max(1, toDurationMs));
-    const nextStartMs = clamp(toStartMs, 0, Math.max(0, durationMs - nextDurationMs));
-    const { startMs, durationMs: currentDurationMs } = this.getTimelineViewRange();
-
-    if (!animate) {
-      this.timelineViewStartMs = nextStartMs;
-      this.timelineViewDurationMs = nextDurationMs >= durationMs ? null : nextDurationMs;
-      this.timelineViewAnimation = null;
-      return;
-    }
-
-    this.timelineViewAnimation = {
-      startTime: performance.now(),
-      durationMs: 180,
-      fromStartMs: startMs,
-      fromDurationMs: currentDurationMs,
-      toStartMs: nextStartMs,
-      toDurationMs: nextDurationMs,
-    };
-    this.timelineViewStartMs = nextStartMs;
-    this.timelineViewDurationMs = nextDurationMs >= durationMs ? null : nextDurationMs;
-  }
-
-  resetTimelineZoom({ animate = true } = {}) {
-    this.animateTimelineView(0, this.durationMs || 1, animate);
-  }
-
-  setTimelineZoom(centerTimeMs, windowMs = 4000, { animate = true, anchorRatio = 0.5 } = {}) {
-    const durationMs = this.durationMs || 1;
-    const zoomDurationMs = Math.min(durationMs, Math.max(1000, Number.isFinite(windowMs) ? windowMs : 4000));
-    if (zoomDurationMs >= durationMs) {
-      this.resetTimelineZoom({ animate });
-      return;
-    }
-
-    const center = clamp(Number.isFinite(centerTimeMs) ? centerTimeMs : this.currentTimeMs, 0, durationMs);
-    const ratio = clamp(Number.isFinite(anchorRatio) ? anchorRatio : 0.5, 0, 1);
-    this.animateTimelineView(center - (zoomDurationMs * ratio), zoomDurationMs, animate);
-    this.timelineDurationAnimation = null;
-  }
-
-  getTimelineViewRange() {
-    const fullDurationMs = this.getVisualTimelineDuration();
-    let startMs = this.timelineViewDurationMs !== null ? this.timelineViewStartMs : 0;
-    let durationMs = this.timelineViewDurationMs !== null ? this.timelineViewDurationMs : fullDurationMs;
-
-    if (this.timelineViewAnimation) {
-      const progress = clamp(
-        (performance.now() - this.timelineViewAnimation.startTime) / this.timelineViewAnimation.durationMs,
-        0,
-        1,
-      );
-      const eased = easeOutCubic(progress);
-      startMs = this.timelineViewAnimation.fromStartMs
-        + ((this.timelineViewAnimation.toStartMs - this.timelineViewAnimation.fromStartMs) * eased);
-      durationMs = this.timelineViewAnimation.fromDurationMs
-        + ((this.timelineViewAnimation.toDurationMs - this.timelineViewAnimation.fromDurationMs) * eased);
-
-      if (progress >= 1) {
-        this.timelineViewAnimation = null;
-        startMs = this.timelineViewStartMs;
-        durationMs = this.timelineViewDurationMs !== null ? this.timelineViewDurationMs : fullDurationMs;
-      }
-    }
-
-    durationMs = Math.max(1, durationMs || fullDurationMs || this.durationMs || 1);
-    startMs = clamp(startMs, 0, Math.max(0, (this.durationMs || durationMs) - durationMs));
-    return {
-      startMs,
-      durationMs,
-      endMs: startMs + durationMs,
-    };
+    this.timeline.setTime(this.currentTimeMs);
   }
 
   setPreviewSettings(settings = {}) {
@@ -1142,7 +1094,7 @@ export class PreviewRenderer {
 
         ticks.push({
           time: tickTime,
-          position: positionOnPathAtProgress(path, pathProgress),
+          position: positionOnSliderPathAtProgress(path, pathProgress),
         });
       }
     }
@@ -1206,20 +1158,13 @@ export class PreviewRenderer {
     return formatTime(this.currentTimeMs);
   }
 
-  timeFromTimelineEvent(event) {
-    const rect = this.timelineCanvas.getBoundingClientRect();
-    if (rect.width <= 0) {
-      return 0;
-    }
-
-    const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    const { startMs, durationMs } = this.getTimelineViewRange();
-    return startMs + (ratio * durationMs);
-  }
-
   render() {
     this.renderPlayfield();
     this.renderTimeline();
+  }
+
+  renderTimeline() {
+    this.timeline.render();
   }
 
   renderTaiko(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight) {
@@ -2016,6 +1961,8 @@ export class PreviewRenderer {
 
     const mode = this.mapData.mode ?? 0;
     if (mode === 0) {
+      ctx.fillStyle = STANDARD_PLAYFIELD_BACKGROUND;
+      ctx.fillRect(0, 0, width, height);
       this.renderStandard(ctx, width, height);
       return;
     }
@@ -2044,9 +1991,9 @@ export class PreviewRenderer {
     }
   }
 
-  // osu!standard sizes its playfield around the circle radius, so objects at the
-  // edges are not clipped, rather than using the fixed padding the other modes do.
-  renderStandard(ctx, width, height) {
+  // osu!standard uses 640×480 game coordinates with a 512×384 field centered
+  // inside them. The preview crops only the vertical view to the calibrated slider bounds.
+  renderStandard(playfieldCtx, width, height) {
     const standardLayout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
     const {
       scale,
@@ -2056,16 +2003,9 @@ export class PreviewRenderer {
       playfieldHeight,
     } = standardLayout;
 
-    ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
-    ctx.fillRect(
-      standardLayout.visualX,
-      standardLayout.visualY,
-      standardLayout.visualWidth,
-      standardLayout.visualHeight,
-    );
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(
+    playfieldCtx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    playfieldCtx.lineWidth = 1;
+    playfieldCtx.strokeRect(
       playfieldX + 0.5,
       playfieldY + 0.5,
       playfieldWidth - 1,
@@ -2080,23 +2020,29 @@ export class PreviewRenderer {
     const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
     const timeFadeInMs = getStandardFadeInMs(preemptMs);
     const circleRadius = getCircleRadius(this.mapData.circleSize) * scale;
-    const drawnCircleRadius = circleRadius * DRAWN_CIRCLE_RADIUS_SCALE;
-    const sliderBodyRadius = Math.max(2, drawnCircleRadius * 0.95);
+    const drawnCircleRadius = Math.max(
+      0.5,
+      (circleRadius * DRAWN_CIRCLE_RADIUS_SCALE) - DRAWN_CIRCLE_INSET_PX,
+    );
     const minVisibleTime = this.currentTimeMs - Math.max(LONG_OBJECT_POST_HIT_FADE_MS, SLIDER_HEAD_HIT_FADE_MS);
     const maxVisibleTime = this.currentTimeMs + preemptMs + 220;
 
-    drawFollowPoints({
-      ctx,
+    // Objects are slightly see-through, so a follow line drawn straight under
+    // them shows through and reads as lying on top. Where layers are to hand,
+    // the lines go on one of their own and the objects on another, and the
+    // lines are cut away under the objects before both are put down.
+    const layers = this.prepareFollowLineLayers(playfieldCtx);
+    const followLineCount = drawFollowPoints({
+      ctx: layers ? layers.lines.ctx : playfieldCtx,
       toCanvas,
       objects: this.mapData.objects,
       currentTime: this.currentTimeMs,
       preemptMs,
-      minVisibleTime,
-      maxVisibleTime,
-      maxObjectDurationMs: this.maxObjectDurationMs,
       circleRadius: drawnCircleRadius,
       scale,
     });
+    const layered = Boolean(layers) && followLineCount > 0;
+    const ctx = layered ? layers.objects.ctx : playfieldCtx;
 
     // Reused across frames: this is rebuilt every frame and discarded, and at
     // 60fps the throwaway arrays were a steady source of GC pressure.
@@ -2176,14 +2122,23 @@ export class PreviewRenderer {
       const sliderSharedOutlineWidth = Math.max(1.3, objectRenderRadius * 0.1);
 
       if (object.kind === 'slider') {
-        const fullPathPoints = buildSliderPathPointsOsu(object);
-        let sliderDrawPointsOsu = fullPathPoints;
-        const fullPathLength = getPathLength(fullPathPoints);
+        // Match the slider's filled body plus outline to the visible hit-circle diameter.
+        const sliderBodyRadius = Math.max(0.5, objectRenderRadius - sliderSharedOutlineWidth);
+        const sliderRenderPathPoints = getSliderRenderPathPointsOsu(
+          object,
+          playfieldWidth / OSU_WIDTH,
+          playfieldHeight / OSU_HEIGHT,
+        );
+        let sliderDrawPointsOsu = sliderRenderPathPoints;
+        const sliderRenderPathLength = getSliderRenderPathLength(sliderRenderPathPoints);
         if (this.standardSnakingSliders && timeUntil > 0) {
           const fadeInElapsedMs = preemptMs - timeUntil;
           const snakeProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
-          if (fullPathLength > 0) {
-            sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * snakeProgress);
+          if (sliderRenderPathLength > 0) {
+            sliderDrawPointsOsu = trimPathToLength(
+              sliderRenderPathPoints,
+              sliderRenderPathLength * snakeProgress,
+            );
           }
         } else if (this.standardSliderSnakeOut && this.currentTimeMs > object.time) {
           const {
@@ -2192,12 +2147,18 @@ export class PreviewRenderer {
           const elapsed = clamp(this.currentTimeMs - object.time, 0, sliderDuration);
           const spanIndex = Math.min(slides - 1, Math.floor(elapsed / Math.max(1, spanDuration)));
 
-          if (spanIndex === slides - 1 && fullPathLength > 0) {
+          if (spanIndex === slides - 1 && sliderRenderPathLength > 0) {
             const spanProgress = clamp((elapsed - (spanIndex * spanDuration)) / Math.max(1, spanDuration), 0, 1);
             if ((spanIndex % 2) === 0) {
-              sliderDrawPointsOsu = trimPathFromStart(fullPathPoints, fullPathLength * spanProgress);
+              sliderDrawPointsOsu = trimPathFromStart(
+                sliderRenderPathPoints,
+                sliderRenderPathLength * spanProgress,
+              );
             } else {
-              sliderDrawPointsOsu = trimPathToLength(fullPathPoints, fullPathLength * (1 - spanProgress));
+              sliderDrawPointsOsu = trimPathToLength(
+                sliderRenderPathPoints,
+                sliderRenderPathLength * (1 - spanProgress),
+              );
             }
           }
         }
@@ -2527,82 +2488,26 @@ export class PreviewRenderer {
         }
       }
     }
+
+    if (layered) {
+      composeFollowLineLayers(playfieldCtx, layers);
+    }
   }
 
-  renderTimeline() {
-    const { ctx, width, height } = getCanvasContext(this.timelineCanvas);
-
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = 'rgba(36, 34, 42, 1)';
-    ctx.fillRect(0, 0, width, height);
-
-    const { startMs, durationMs: timelineDurationMs, endMs } = this.getTimelineViewRange();
-
-    // Render Kiai Sections
-    const timingPoints = this.mapData?.timingControlPoints || [];
-    if (timingPoints.length > 0) {
-      let kiaiStart = -1;
-      for (let i = 0; i < timingPoints.length; i += 1) {
-        const tp = timingPoints[i];
-        if (tp.kiai && kiaiStart === -1) {
-          kiaiStart = tp.time;
-        } else if (!tp.kiai && kiaiStart !== -1) {
-          const segmentStart = Math.max(kiaiStart, startMs);
-          const segmentEnd = Math.min(tp.time, endMs);
-          if (segmentEnd > segmentStart) {
-            const startX = ((segmentStart - startMs) / timelineDurationMs) * width;
-            const endX = ((segmentEnd - startMs) / timelineDurationMs) * width;
-            ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
-            ctx.fillRect(startX, 0, endX - startX, height);
-          }
-          kiaiStart = -1;
-        }
-      }
-      if (kiaiStart !== -1) {
-        const segmentStart = Math.max(kiaiStart, startMs);
-        const segmentEnd = endMs;
-        if (segmentEnd > segmentStart) {
-          const startX = ((segmentStart - startMs) / timelineDurationMs) * width;
-          const endX = width;
-          ctx.fillStyle = 'rgba(255, 204, 34, 0.15)';
-          ctx.fillRect(startX, 0, endX - startX, height);
-        }
-      }
+  // Two offscreen layers matched to the playfield canvas and cleared, or null
+  // where there is no OffscreenCanvas (as under node).
+  prepareFollowLineLayers(target) {
+    if (this.followLineLayers === undefined) {
+      const lines = createLayer();
+      const objects = lines && createLayer();
+      this.followLineLayers = (lines && objects) ? { lines, objects } : null;
     }
-
-    const needsViewDensity = this.isTimelineZoomed() || this.isTimelineDurationAnimating();
-    let density = this.timelineDensity || [];
-    if (needsViewDensity) {
-      const cached = this.timelineDensityViewCache;
-      if (cached && cached.startMs === startMs && cached.durationMs === timelineDurationMs) {
-        density = cached.bins;
-      } else {
-        density = buildDensityBins(this.mapData?.objects || [], timelineDurationMs, 150, startMs);
-        this.timelineDensityViewCache = { startMs, durationMs: timelineDurationMs, bins: density };
-      }
+    if (!this.followLineLayers) {
+      return null;
     }
-    if (density.length > 0) {
-      const barWidth = width / density.length;
-      const usableHeight = Math.max(4, height * 0.56);
-      const baselineY = Math.round((height + usableHeight) / 2);
-      const barWidthDrawn = Math.max(1, barWidth - 0.5);
-      // One fill colour for every bar: setting it inside the loop cost a canvas
-      // state change per bar, 150 of them on every frame.
-      ctx.fillStyle = 'rgb(63, 155, 106)';
-      for (let i = 0; i < density.length; i += 1) {
-        const h = Math.max(1, density[i] * usableHeight);
-        ctx.fillRect(i * barWidth, baselineY - h, barWidthDrawn, h);
-      }
-    }
-
-    if (this.currentTimeMs >= startMs && this.currentTimeMs <= endMs) {
-      const progress = (this.currentTimeMs - startMs) / (timelineDurationMs || 1);
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-      ctx.shadowBlur = 4;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-      ctx.fillRect((progress * width) - 1, 0, 2, height);
-      ctx.shadowBlur = 0;
-    }
+    clearLayer(this.followLineLayers.lines, target);
+    clearLayer(this.followLineLayers.objects, target);
+    return this.followLineLayers;
   }
 }
 

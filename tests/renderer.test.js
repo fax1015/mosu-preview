@@ -6,6 +6,7 @@ import {
   assignComboIndices,
   applyPreviewStacking,
   getComboColour,
+  getCircleRadius,
   getStandardPlayfieldLayout,
 } from '../src/renderer.js';
 import { parseMapPreviewData } from '../src/parser.js';
@@ -179,30 +180,61 @@ test('does not let a first spinner consume a combo colour', () => {
   assert.deepEqual(objects.map((object) => object.comboIndexWithOffsets), [0, 1]);
 });
 
-test('standard playfield layout reserves scaled edge space for hit circles', () => {
+test('standard playfield shifts down so the top has more viewport clearance than the bottom', () => {
   const layout = getStandardPlayfieldLayout(438, 328, 2);
+  const topGap = layout.visualY;
+  const bottomGap = 328 - (layout.visualY + layout.visualHeight);
 
   assert.ok(layout.scale > 0);
   assert.ok(layout.edgePadding > 0);
   assert.ok(layout.visualX >= 0);
-  assert.ok(layout.visualY >= 0);
   assert.ok(layout.playfieldX - layout.edgePadding >= 0);
-  assert.ok(layout.playfieldY - layout.edgePadding >= 0);
   assert.ok(layout.playfieldX + layout.playfieldWidth + layout.edgePadding <= 438);
-  assert.ok(layout.playfieldY + layout.playfieldHeight + layout.edgePadding <= 328);
+  assert.ok(topGap > bottomGap, 'the lower border sits closer to or past the viewport edge');
 });
 
-test('standard playfield edge padding shrinks with smaller object radius', () => {
+test('standard playfield keeps horizontal fit and expands by the full CS radius', () => {
+  const canvasWidth = 359;
+  const canvasHeight = 280;
+  const cs5 = getStandardPlayfieldLayout(canvasWidth, canvasHeight, 5);
+  const highCs = getStandardPlayfieldLayout(canvasWidth, canvasHeight, 10);
+  const centerX = highCs.playfieldX + (highCs.playfieldWidth / 2);
+  const centerY = highCs.playfieldY + (highCs.playfieldHeight / 2);
+
+  assert.ok(Math.abs(cs5.scale - (Math.min(canvasWidth / 640, canvasHeight / 480))) < 1e-6);
+  assert.equal(cs5.scale, highCs.scale, 'CS does not change horizontal zoom');
+  assert.equal(cs5.scaleY, highCs.scaleY, 'the vertical crop uses the reference slider');
+  assert.ok(Math.abs(centerX - (canvasWidth / 2)) < 1e-6);
+  assert.ok(Math.abs(centerY - ((canvasHeight / 2) + (8 * highCs.scaleY))) < 1e-6);
+  assert.equal(cs5.edgePadding, getCircleRadius(5) * cs5.scale);
+  assert.equal(highCs.edgePadding, getCircleRadius(10) * highCs.scale);
+});
+
+test('beatmap 5337582 edge-loop slider body leaves four pixels at the top and bottom', () => {
+  const canvasWidth = 359;
+  const canvasHeight = 280;
+  const circleSize = 5.1;
+  const layout = getStandardPlayfieldLayout(canvasWidth, canvasHeight, circleSize);
+  const drawnCircleRadius = Math.max(0.5, (getCircleRadius(circleSize) * layout.scale * 0.92) - 0.75);
+  const sliderBodyRadius = Math.max(2, drawnCircleRadius * 0.95);
+  const sliderTop = layout.playfieldY + ((-24 / 384) * layout.playfieldHeight) - sliderBodyRadius;
+  const sliderBottom = layout.playfieldY + ((392 / 384) * layout.playfieldHeight) + sliderBodyRadius;
+
+  assert.ok(Math.abs(sliderTop - 4) < 0.5);
+  assert.ok(Math.abs(sliderBottom - (canvasHeight - 4)) < 0.5);
+});
+
+test('standard playfield border expansion shrinks with smaller object radius', () => {
   const lowCs = getStandardPlayfieldLayout(438, 328, 2);
   const highCs = getStandardPlayfieldLayout(438, 328, 7);
 
   assert.ok(lowCs.edgePadding > highCs.edgePadding);
-  assert.ok(highCs.scale > lowCs.scale);
 });
 
-test('standard playfield gutter is exactly the scaled drawn circle radius', () => {
+test('standard playfield border expands by the scaled CS circle radius', () => {
   const layout = getStandardPlayfieldLayout(438, 328, 5);
 
+  assert.equal(layout.edgePadding, getCircleRadius(5) * layout.scale);
   assert.equal(layout.playfieldX - layout.visualX, layout.edgePadding);
   assert.equal(layout.playfieldY - layout.visualY, layout.edgePadding);
   assert.equal(layout.visualWidth, layout.playfieldWidth + (layout.edgePadding * 2));

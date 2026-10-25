@@ -86,6 +86,7 @@ const createInitialState = ({ audio = null } = {}) => {
     hitsoundEvents: [],
     hitsounds: normalizedSettings.hitsounds,
     hitsoundVolume: normalizedSettings.hitsoundVolume,
+    hitsoundStyle: normalizedSettings.hitsoundStyle,
     preMuteVolume: DEFAULT_AUDIO_VOLUME,
   };
 };

@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SAMPLE_BANKS,
+  HITSOUND_STYLE_BANKS,
+  HITSOUND_STYLE_ROOM,
+  ROOM_WET_GAIN,
   createHitsoundPlayer,
 } from '../src/audio/hitsounds.js';
 import {
@@ -9,6 +12,7 @@ import {
   SAMPLE_SET_SOFT,
   SAMPLE_SET_DRUM,
 } from '../src/parser.js';
+import { DEFAULT_HITSOUND_STYLE, HITSOUND_STYLES } from '../src/settings.js';
 
 // Web Audio enforces its automation rules at call time and throws: an
 // exponential ramp to zero is a RangeError, a negative start offset is a
@@ -174,14 +178,18 @@ const buildEvent = (time, hitSound, set, volume = 100) => ({
 // Every addition a bitmask can ask for, on its own and stacked.
 const HIT_SOUND_COMBINATIONS = [0, 2, 4, 8, 2 | 4, 2 | 8, 4 | 8, 2 | 4 | 8];
 const ALL_SETS = [SAMPLE_SET_NORMAL, SAMPLE_SET_SOFT, SAMPLE_SET_DRUM];
+const ALL_STYLES = Object.entries(HITSOUND_STYLE_BANKS);
 
-const renderAll = ({ volume = 100 } = {}) => {
+const renderAll = ({ volume = 100, style } = {}) => {
   const mock = createMockAudioContext();
   // `getAudioContext` is a constructor, not a factory: the player calls `new` on
   // it, which an arrow function cannot answer.
   function MockAudioContext() { return mock.context; }
   const player = createHitsoundPlayer({ getAudioContext: MockAudioContext });
   player.setEnabled(true);
+  if (style !== undefined) {
+    player.setStyle(style);
+  }
 
   const events = [];
   let time = 0;
@@ -194,20 +202,24 @@ const renderAll = ({ volume = 100 } = {}) => {
 
   player.syncTo(events, 0);
   const placed = player.update(events, 0, { rate: 1 });
-  return { ...mock, placed, events };
+  return { ...mock, placed, events, player };
 };
 
 test('every voice in every bank schedules without breaking a Web Audio rule', () => {
-  const { violations, placed, events } = renderAll();
-  assert.equal(placed, events.length, 'every event should have been placed');
-  assert.deepEqual(violations, []);
+  for (const [style] of ALL_STYLES) {
+    const { violations, placed, events } = renderAll({ style });
+    assert.equal(placed, events.length, `${style}: every event should have been placed`);
+    assert.deepEqual(violations, [], style);
+  }
 });
 
 test('the same holds at the quiet end of the volume range', () => {
   // 5% sections are common, and the envelope floor is where ramps get delicate.
-  const { violations, placed } = renderAll({ volume: 5 });
-  assert.deepEqual(violations, []);
-  assert.ok(placed > 0);
+  for (const [style] of ALL_STYLES) {
+    const { violations, placed } = renderAll({ volume: 5, style });
+    assert.deepEqual(violations, [], style);
+    assert.ok(placed > 0, style);
+  }
 });
 
 test('noise voices loop, so a long tail is never cut off by the buffer', () => {
@@ -258,28 +270,31 @@ test('the soft clipper is gentle in the middle and firm at the edges', () => {
 });
 
 test('every bank answers every sound, and every hit is a stack rather than a blip', () => {
-  for (const set of ALL_SETS) {
-    const bank = SAMPLE_BANKS[set];
-    for (const sound of ['normal', 'whistle', 'clap', 'finish']) {
-      assert.ok(Array.isArray(bank[sound]) && bank[sound].length > 0, `bank ${set} has ${sound}`);
+  for (const [style, banks] of ALL_STYLES) {
+    for (const set of ALL_SETS) {
+      const where = `${style} bank ${set}`;
+      const bank = banks[set];
+      for (const sound of ['normal', 'whistle', 'clap', 'finish']) {
+        assert.ok(Array.isArray(bank[sound]) && bank[sound].length > 0, `${where} has ${sound}`);
+      }
+
+      // The thing that stopped these sounding tiny: a hit needs a broadband
+      // transient for definition and pitched content for character, not one blip.
+      const layers = bank.normal;
+      assert.ok(layers.length >= 3, `${where} hitnormal needs more than a blip`);
+      assert.ok(layers.some((l) => l.kind === 'tone'), `${where} hitnormal has no pitched layer`);
+      assert.ok(layers.some((l) => l.kind === 'noise'), `${where} hitnormal has no broadband bed`);
+      assert.ok(
+        layers.some((l) => l.kind === 'noise' && l.durationSec <= 0.025),
+        `${where} hitnormal has no transient`,
+      );
+
+      // Nothing tonal should sit where small speakers stop reproducing and start
+      // flapping. The upper end is deliberately unbounded: where the pitched
+      // content sits is measured off the sample, not chosen here.
+      const lowest = Math.min(...layers.filter((l) => l.kind === 'tone').map((l) => l.frequency));
+      assert.ok(lowest > 60, `${where} hitnormal has a ${lowest}Hz tone, into subsonic mud`);
     }
-
-    // The thing that stopped these sounding tiny: a hit needs a broadband
-    // transient for definition and pitched content for character, not one blip.
-    const layers = bank.normal;
-    assert.ok(layers.length >= 3, `bank ${set} hitnormal needs more than a blip`);
-    assert.ok(layers.some((l) => l.kind === 'tone'), `bank ${set} hitnormal has no pitched layer`);
-    assert.ok(layers.some((l) => l.kind === 'noise'), `bank ${set} hitnormal has no broadband bed`);
-    assert.ok(
-      layers.some((l) => l.kind === 'noise' && l.durationSec <= 0.025),
-      `bank ${set} hitnormal has no transient`,
-    );
-
-    // Nothing tonal should sit where small speakers stop reproducing and start
-    // flapping. The upper end is deliberately unbounded: where the pitched
-    // content sits is measured off the sample, not chosen here.
-    const lowest = Math.min(...layers.filter((l) => l.kind === 'tone').map((l) => l.frequency));
-    assert.ok(lowest > 60, `bank ${set} hitnormal has a ${lowest}Hz tone, into subsonic mud`);
   }
 });
 
@@ -308,28 +323,39 @@ test('the three banks are genuinely different voices', () => {
 // hand, so they get checked harder than a table someone typed would need to be.
 
 test('the table is complete, and every layer is physically playable', () => {
-  assert.equal(Object.keys(SAMPLE_BANKS).length, 3, 'there should be three banks');
-  for (const set of [SAMPLE_SET_NORMAL, SAMPLE_SET_SOFT, SAMPLE_SET_DRUM]) {
-    for (const sound of ['normal', 'whistle', 'clap', 'finish']) {
-      const layers = SAMPLE_BANKS[set]?.[sound];
-      assert.ok(Array.isArray(layers) && layers.length > 0, `bank ${set} is missing ${sound}`);
-      for (const layer of layers) {
-        const where = `${set}/${sound}`;
-        // A noise layer's gain sits *after* its filter, and a narrow bandpass
-        // throws most of a white-noise source away -- so the gain that reaches
-        // normal loudness through a Q of 3 at 180Hz is 15, not 0.5. It is not an
-        // amplitude and cannot be read as one, which is why this bound is loose:
-        // it catches nonsense, not level. Level is verified by rendering.
-        assert.ok(layer.gain > 0 && layer.gain <= 20, `${where}: gain ${layer.gain}`);
-        assert.ok(layer.durationSec > 0 && layer.durationSec <= 1.2,
-          `${where}: duration ${layer.durationSec}`);
-        for (const key of ['frequency', 'endFrequency']) {
-          if (layer[key] === undefined) continue;
-          // Above Nyquist a filter or oscillator frequency is meaningless.
-          assert.ok(layer[key] >= 20 && layer[key] <= 18000, `${where}: ${key} ${layer[key]}`);
-        }
-        if (layer.q !== undefined) {
-          assert.ok(layer.q >= 0.2 && layer.q <= 4, `${where}: q ${layer.q}`);
+  for (const [style, banks] of ALL_STYLES) {
+    assert.equal(Object.keys(banks).length, 3, `${style} should have three banks`);
+    for (const set of [SAMPLE_SET_NORMAL, SAMPLE_SET_SOFT, SAMPLE_SET_DRUM]) {
+      for (const sound of ['normal', 'whistle', 'clap', 'finish']) {
+        const layers = banks[set]?.[sound];
+        assert.ok(Array.isArray(layers) && layers.length > 0, `${style} bank ${set} is missing ${sound}`);
+        for (const layer of layers) {
+          const where = `${style} ${set}/${sound}`;
+          assert.ok(layer.kind === 'tone' || layer.kind === 'noise', `${where}: kind ${layer.kind}`);
+          // A noise layer's gain sits *after* its filter, and a narrow bandpass
+          // throws most of a white-noise source away -- so the gain that reaches
+          // normal loudness through a Q of 3 at 180Hz is 15, not 0.5. It is not an
+          // amplitude and cannot be read as one, which is why this bound is loose:
+          // it catches nonsense, not level. Level is verified by rendering.
+          assert.ok(layer.gain > 0 && layer.gain <= 20, `${where}: gain ${layer.gain}`);
+          assert.ok(layer.durationSec > 0 && layer.durationSec <= 1.2,
+            `${where}: duration ${layer.durationSec}`);
+          for (const key of ['frequency', 'endFrequency']) {
+            if (layer[key] === undefined) continue;
+            // Above Nyquist a filter or oscillator frequency is meaningless.
+            assert.ok(layer[key] >= 20 && layer[key] <= 18000, `${where}: ${key} ${layer[key]}`);
+          }
+          if (layer.q !== undefined) {
+            assert.ok(layer.q >= 0.2 && layer.q <= 4, `${where}: q ${layer.q}`);
+          }
+          // A swell longer than this is no longer a hit, and a strike this late
+          // reads as a second note rather than part of the first.
+          if (layer.attackSec !== undefined) {
+            assert.ok(layer.attackSec > 0 && layer.attackSec <= 0.06, `${where}: attack ${layer.attackSec}`);
+          }
+          if (layer.delaySec !== undefined) {
+            assert.ok(layer.delaySec >= 0 && layer.delaySec <= 0.07, `${where}: delay ${layer.delaySec}`);
+          }
         }
       }
     }
@@ -357,17 +383,95 @@ test('no voice contains a pitch glide long enough to hear as a chirp', () => {
   // sweep when the layer is pitched, high, and long enough to trace it -- short
   // ones read as a transient zip and are worth keeping.
   const offenders = [];
-  for (const [set, sounds] of Object.entries(SAMPLE_BANKS)) {
-    for (const [sound, layers] of Object.entries(sounds)) {
-      for (const layer of layers) {
-        if (!layer.endFrequency || layer.frequency < 1500 || layer.durationSec <= 0.025) continue;
-        const pitched = layer.kind === 'tone' || (layer.q ?? 0) > 1.5;
-        if (!pitched) continue;
-        const semitones = 12 * Math.log2(layer.endFrequency / layer.frequency);
-        offenders.push(`${set}/${sound}: ${layer.frequency}Hz `
-          + `${semitones.toFixed(1)}st over ${Math.round(layer.durationSec * 1000)}ms`);
+  for (const [style, banks] of ALL_STYLES) {
+    for (const [set, sounds] of Object.entries(banks)) {
+      for (const [sound, layers] of Object.entries(sounds)) {
+        for (const layer of layers) {
+          if (!layer.endFrequency || layer.frequency < 1500 || layer.durationSec <= 0.025) continue;
+          const pitched = layer.kind === 'tone' || (layer.q ?? 0) > 1.5;
+          if (!pitched) continue;
+          const semitones = 12 * Math.log2(layer.endFrequency / layer.frequency);
+          offenders.push(`${style} ${set}/${sound}: ${layer.frequency}Hz `
+            + `${semitones.toFixed(1)}st over ${Math.round(layer.durationSec * 1000)}ms`);
+        }
       }
     }
   }
   assert.deepEqual(offenders, []);
+});
+
+test('the settings offer exactly the styles there are voices for', () => {
+  // A style the dropdown offers with no banks behind it would quietly play the
+  // default; banks no setting can reach are dead weight in the download.
+  assert.deepEqual(Object.keys(HITSOUND_STYLE_BANKS).sort(), [...HITSOUND_STYLES].sort());
+  assert.equal(HITSOUND_STYLE_BANKS[DEFAULT_HITSOUND_STYLE], SAMPLE_BANKS,
+    'the default style is the voices the player had before styles existed');
+});
+
+test('the fitted styles play dry, and the room follows a change of style', () => {
+  // Argon was tuned with the room; the others are fitted to dry samples, and a
+  // tail on top of their own decay is exactly what blunts them.
+  assert.deepEqual(Object.keys(HITSOUND_STYLE_ROOM).sort(), [...HITSOUND_STYLES].sort());
+  assert.equal(HITSOUND_STYLE_ROOM[DEFAULT_HITSOUND_STYLE], ROOM_WET_GAIN);
+
+  const isRoom = (node) => node.kind === 'gain' && node.gain.value === ROOM_WET_GAIN;
+  const { nodes, player } = renderAll({ style: DEFAULT_HITSOUND_STYLE });
+  const room = nodes.find(isRoom);
+  assert.ok(room, 'the default style plays into the room');
+
+  player.setStyle('lazer');
+  assert.equal(room.gain.value, 0, 'switching to a fitted style takes the room out');
+  player.setStyle(DEFAULT_HITSOUND_STYLE);
+  assert.equal(room.gain.value, ROOM_WET_GAIN, 'and switching back restores it');
+
+  // Chosen before there is any audio graph: the room is built dry.
+  const dry = renderAll({ style: 'minimal' });
+  assert.equal(dry.nodes.filter(isRoom).length, 0);
+  assert.deepEqual(dry.violations, []);
+});
+
+test('each style is its own set of voices', () => {
+  const tables = ALL_STYLES.map(([, banks]) => JSON.stringify(banks));
+  assert.equal(new Set(tables).size, ALL_STYLES.length, 'two styles are the same table');
+});
+
+const ADDITION_FLAGS = { whistle: 2, finish: 4, clap: 8 };
+
+// How many oscillators and noise sources renderAll() should start with these
+// banks: hitnormal under every event, plus each addition its bitmask names.
+const expectedVoices = (banks) => {
+  const counts = { tone: 0, noise: 0 };
+  for (const set of ALL_SETS) {
+    for (const hitSound of HIT_SOUND_COMBINATIONS) {
+      const sounds = ['normal', ...Object.keys(ADDITION_FLAGS)
+        .filter((sound) => (hitSound & ADDITION_FLAGS[sound]) !== 0)];
+      for (const sound of sounds) {
+        for (const layer of banks[set][sound]) {
+          counts[layer.kind] += 1;
+        }
+      }
+    }
+  }
+  return counts;
+};
+
+const placedVoices = (style) => {
+  const { nodes } = renderAll({ style });
+  return {
+    tone: nodes.filter((node) => node.kind === 'oscillator').length,
+    noise: nodes.filter((node) => node.kind === 'bufferSource').length,
+  };
+};
+
+test('choosing a style changes the voices the player places', () => {
+  for (const [style, banks] of ALL_STYLES) {
+    assert.deepEqual(placedVoices(style), expectedVoices(banks), `${style} should place its own layers`);
+  }
+});
+
+test('an unknown style plays the default voices rather than nothing', () => {
+  const defaults = expectedVoices(SAMPLE_BANKS);
+  for (const style of ['not-a-style', undefined, '__proto__', 'toString']) {
+    assert.deepEqual(placedVoices(style), defaults, String(style));
+  }
 });

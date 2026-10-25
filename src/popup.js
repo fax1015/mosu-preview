@@ -54,6 +54,7 @@ import { createAudioBadgeController } from './ui/audioBadge.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
 import { bindPopupUiEvents } from './ui/popupUI.js';
+import { attachOverlayScrollbar } from './ui/overlayScrollbar.js';
 import { createUnsupportedViewController } from './ui/unsupportedView.js';
 import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from './core/playbackSpeed.js';
 
@@ -100,7 +101,16 @@ const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const timelineCanvas = document.querySelector('#mapPreviewTimeline');
 const timelineTooltip = document.querySelector('#mapPreviewTimelineTooltip');
 const volumeSlider = document.querySelector('#mapPreviewVolume');
-const volumeLabel = document.querySelector('#mapPreviewVolumeLabel');
+const volumeButton = document.querySelector('#mapPreviewVolumeBtn');
+const volumeControl = document.querySelector('#mapPreviewVolumeControl');
+const volumeValue = document.querySelector('#mapPreviewVolumeValue');
+const volumeSpeaker = document.querySelector('.map-preview-volume-icon-speaker');
+
+// The volume icon only animates changes the user makes: the level restored as
+// the popup opens arrives before any click or keypress, and lands still.
+const enableVolumeIconMotion = () => volumeButton?.classList.add('is-animated');
+document.addEventListener('pointerdown', enableVolumeIconMotion, { once: true, capture: true });
+document.addEventListener('keydown', enableVolumeIconMotion, { once: true, capture: true });
 const toggleIndicator = document.querySelector('#mapPreviewToggleIndicator');
 const unsupportedPanel = document.querySelector('#mapPreviewUnsupported');
 const unsupportedAscii = document.querySelector('#mapPreviewUnsupportedAscii');
@@ -131,6 +141,11 @@ const shortcutsCloseButton = document.querySelector('#mapPreviewShortcutsCloseBt
 const recentPanel = document.querySelector('#mapPreviewRecentPanel');
 const recentList = document.querySelector('#mapPreviewRecentList');
 const recentClearBtn = document.querySelector('#mapPreviewRecentClearBtn');
+attachOverlayScrollbar({
+  scroller: recentList,
+  track: document.querySelector('#mapPreviewRecentScrollbar'),
+  thumb: document.querySelector('#mapPreviewRecentScrollbarThumb'),
+});
 
 let lastInfoFocus = null;
 let lastShortcutsFocus = null;
@@ -187,6 +202,8 @@ const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
 // so the old cap only served to cut the timeline short.
 const MAX_PREVIEW_OBJECTS = 40000;
 const BEATMAP_FETCH_TIMEOUT_MS = 15000;
+// The longest the unsupported view waits for its cached list before showing.
+const RECENT_PANEL_REVEAL_WAIT_MS = 150;
 const SUPPORT_LINKS = {
   issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
@@ -219,38 +236,52 @@ const shouldContinueTimelineWithoutFullAudio = () => (
   && state.currentTimeMs < (state.durationMs - 1)
 );
 
+// Where the song ends in map time, or 0 while only the preview clip (or
+// nothing) is playing and its length is not the song's.
+const getFullAudioEndMs = () => {
+  if (!hasFullAudioSource()) {
+    return 0;
+  }
+
+  // A slice cannot be trusted to know the track's length -- an MP3 slice has
+  // no header to measure itself by -- but the index does.
+  if (state.fullAudioDurationMs > 0) {
+    return Math.round(state.fullAudioDurationMs);
+  }
+  return Number.isFinite(state.audio?.duration) && state.audio.duration > 0
+    ? Math.round((state.audio.duration * 1000) + state.audioAnchorMapMs)
+    : 0;
+};
+
 const getResolvedPlaybackDurationMs = () => {
   const mappedDurationMs = Number.isFinite(state.mappedDurationMs) && state.mappedDurationMs > 0
     ? state.mappedDurationMs
     : 1;
 
-  if (!hasFullAudioSource()) {
-    return mappedDurationMs;
-  }
-
-  // A slice cannot be trusted to know the track's length -- an MP3 slice has
-  // no header to measure itself by -- but the index does.
-  const audioDurationMs = state.fullAudioDurationMs > 0
-    ? Math.round(state.fullAudioDurationMs)
-    : (Number.isFinite(state.audio?.duration) && state.audio.duration > 0
-      ? Math.round((state.audio.duration * 1000) + state.audioAnchorMapMs)
-      : 0);
-
-  return Math.max(mappedDurationMs, audioDurationMs, 1);
+  return Math.max(mappedDurationMs, getFullAudioEndMs(), 1);
 };
 
 // The timestamp reserves room for the widest label this duration can produce,
 // measured once per duration rather than per frame: sizing it to the live text
 // would make the whole control row twitch every time a digit rolled over.
-const syncTimeLabelWidth = () => {
+let measuredTimeLabel = '';
+const syncTimeLabelWidth = ({ force = false } = {}) => {
   if (!timeLabel) {
     return;
   }
 
   const durationLabel = formatTime(state.durationMs);
-  // The elapsed side never renders wider than the duration side, and the label
-  // uses tabular figures, so zeros stand in for whichever digits show up.
-  const widestLabel = `${durationLabel} / ${durationLabel}`.replace(/\d/g, '0');
+  // The elapsed side never has more digits than the duration side. Torus has no
+  // tabular figures, so its digits differ in width; zero is the widest, so zeros
+  // stand in for whichever digits the elapsed side shows. The duration side is
+  // known exactly and reserves no more than it needs.
+  const widestLabel = `${durationLabel.replace(/\d/g, '0')} / ${durationLabel}`;
+  // Keyed on the label rather than on a change of duration: loading a map sets
+  // the duration before anything asks for a re-measure.
+  if (!force && widestLabel === measuredTimeLabel) {
+    return;
+  }
+  measuredTimeLabel = widestLabel;
   const restoreText = timeLabel.textContent;
 
   // Measured on the label itself so the real font, letter spacing and padding
@@ -266,6 +297,10 @@ const syncTimeLabelWidth = () => {
   );
 };
 
+// A map can load before Torus does, and a label measured in the fallback font
+// reserved several pixels too many, all of it showing up as a lopsided gap.
+document.fonts?.addEventListener?.('loadingdone', () => syncTimeLabelWidth({ force: true }));
+
 const syncPlaybackDuration = () => {
   const previousDurationMs = state.durationMs;
   const nextDurationMs = getResolvedPlaybackDurationMs();
@@ -273,11 +308,12 @@ const syncPlaybackDuration = () => {
     durationMs: nextDurationMs,
     currentTimeMs: clamp(state.currentTimeMs, 0, nextDurationMs),
   });
-  if (nextDurationMs !== previousDurationMs) {
-    syncTimeLabelWidth();
-  }
+  syncTimeLabelWidth();
   const shouldAnimateTimeline = hasFullAudioSource() && nextDurationMs > previousDurationMs;
   const isAnimatingTimeline = renderer.setDuration(nextDurationMs, { animate: shouldAnimateTimeline });
+  // The end line marks the song's end once the full track is in; until then the
+  // timeline marks the last object instead.
+  renderer.timeline.setSongEnd(getFullAudioEndMs() || null);
   if (isAnimatingTimeline) {
     ensureTimelineDurationAnimation();
   }
@@ -689,6 +725,37 @@ const writeAudioVolumeSetting = async (volume) => {
   }
 };
 
+// The speaker swells on the way up and shrinks on the way down, easing into
+// that over the first fifth, then wobbles back on the spring the waves use.
+// The stylesheet decides whether there is any motion at all (reduced motion,
+// or nothing clicked yet), and how long the spring runs.
+let volumeSpeakerBump = null;
+const bumpVolumeSpeaker = (isLouder) => {
+  if (!volumeButton || !volumeSpeaker?.animate) {
+    return;
+  }
+  const style = getComputedStyle(volumeButton);
+  if (style.getPropertyValue('--volume-motion').trim() !== '1') {
+    return;
+  }
+  // A bump still in flight hands over from wherever it has got to, rather
+  // than the speaker snapping back to its resting size first.
+  const currentTransform = getComputedStyle(volumeSpeaker).transform;
+  volumeSpeakerBump?.cancel();
+  volumeSpeakerBump = volumeSpeaker.animate(
+    [
+      { transform: currentTransform === 'none' ? 'scale(1)' : currentTransform, easing: 'cubic-bezier(0.33, 0, 0.25, 1)' },
+      {
+        transform: `scale(${isLouder ? 1.16 : 0.86})`,
+        offset: 0.2,
+        easing: style.getPropertyValue('--map-preview-spring').trim() || 'ease-out',
+      },
+      { transform: 'scale(1)' },
+    ],
+    { duration: Number.parseFloat(style.getPropertyValue('--volume-spring-ms')) || 380 },
+  );
+};
+
 const applyAudioVolume = (volume) => {
   const nextVolume = clamp(Number.isFinite(volume) ? volume : DEFAULT_AUDIO_VOLUME, 0, 1);
   state.volume = nextVolume;
@@ -699,12 +766,27 @@ const applyAudioVolume = (volume) => {
   hitsoundPlayer.setMusicVolume(nextVolume);
   state.audio.volume = hitsoundPlayer.isMediaElementAttached() ? 1 : nextVolume;
 
+  const percent = Math.round(nextVolume * 100);
+  const label = `${percent}%`;
   if (volumeSlider) {
-    volumeSlider.value = String(Math.round(nextVolume * 100));
-    volumeSlider.style.setProperty('--range-progress', `${Math.round(nextVolume * 100)}%`);
+    volumeSlider.value = String(percent);
+    volumeSlider.style.setProperty('--range-progress', label);
+    volumeSlider.setAttribute('aria-valuetext', label);
   }
-  if (volumeLabel) {
-    volumeLabel.textContent = `${Math.round(nextVolume * 100)}%`;
+  if (volumeButton) {
+    // How many waves the speaker icon shows: none when silent, then one for
+    // each third of the range.
+    const level = percent <= 0 ? 0 : Math.min(3, Math.ceil(percent / 34));
+    const previousLevel = Number(volumeButton.dataset.level);
+    if (level !== previousLevel) {
+      volumeButton.dataset.level = String(level);
+      bumpVolumeSpeaker(level > previousLevel);
+    }
+    volumeButton.title = `Volume (${label})`;
+    volumeButton.setAttribute('aria-label', `Volume, ${label}`);
+  }
+  if (volumeValue) {
+    volumeValue.textContent = label;
   }
 };
 
@@ -733,8 +815,10 @@ const applyPreviewSettings = (settings = {}) => {
   state.autoFallback = normalized.autoFallback;
   state.hitsounds = normalized.hitsounds;
   state.hitsoundVolume = normalized.hitsoundVolume;
+  state.hitsoundStyle = normalized.hitsoundStyle;
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
+  hitsoundPlayer.setStyle(normalized.hitsoundStyle);
   // The music joins the WebAudio graph the first time hitsounds are on, so the
   // two share one output latency; until then it plays straight from the
   // element, without that delay. It does not leave again when they are switched
@@ -893,6 +977,8 @@ const renderFrame = () => {
   if (state.isPlaying) {
     hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs, { rate: state.playbackSpeed });
   }
+  // A zoomed timeline follows the playhead only while it plays.
+  renderer.timeline.setPlaying(state.isPlaying);
   renderer.setTime(state.currentTimeMs);
   renderer.render();
 
@@ -1110,15 +1196,29 @@ const writeCachedPreview = async (value) => {
 // state when the user switches difficulties faster than a fetch completes.
 let previewLoadToken = 0;
 
+// The popup stays invisible until it knows which view the tab gets. Showing the
+// preview first meant a non-osu page flashed it before swapping in the
+// unsupported view. Fades in, except in Firefox's popup, which has no
+// transitions.
+const revealPopup = () => {
+  popup?.classList.add('is-open');
+};
+
 const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) => {
   previewLoadToken += 1;
   const loadToken = previewLoadToken;
   const isStaleLoad = () => loadToken !== previewLoadToken;
 
+  // Which tab this is decides which view the popup opens on, so it is asked for
+  // straight away, alongside the settings below rather than after them. A
+  // failure is handled where it is awaited; this only stops it being reported
+  // as unhandled in the meantime.
+  const activeTabRequest = !sourceUrlOverride && !IS_DETACHED_WINDOW ? queryActiveTab() : null;
+  activeTabRequest?.catch(() => {});
+
   stopTimelineDurationAnimation();
   stopPlayback();
   setPlaybackSpeedControlEnabled(false);
-  popup?.classList.add('is-open');
   setUnsupportedMode(false);
   void pruneFullAudioCache();
   clearDebugLogs();
@@ -1128,10 +1228,16 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   setAudioBadgeWithProvider('preview', 'Preview audio', PREVIEW_AUDIO_PROVIDER_LABEL);
   addDebugLog('init: popup opened');
 
-  setProviderState({ providerOverride: await readProviderOverrideSetting() });
-  await loadProviderRuntimeState();
+  // Independent reads, so they run at once rather than one after another: the
+  // popup stays hidden until they are in, and each one is a round trip.
+  const [providerOverride, , storedVolume, previewSettings] = await Promise.all([
+    readProviderOverrideSetting(),
+    loadProviderRuntimeState(),
+    readAudioVolumeSetting(),
+    readPreviewSettings(),
+  ]);
+  setProviderState({ providerOverride });
   addDebugLog(`init: provider override ${getProviderDisplayName(state.providerOverride)}`);
-  const storedVolume = await readAudioVolumeSetting();
   // A following window reloads on every map switch. A volume change still
   // waiting to be written is newer than what storage holds, and applying the
   // stored one would undo it -- and then persist the undone value.
@@ -1139,7 +1245,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     applyAudioVolume(storedVolume);
   }
   addDebugLog(`init: audio volume ${Math.round(state.volume * 100)}%`);
-  applyPreviewSettings(await readPreviewSettings());
+  applyPreviewSettings(previewSettings);
   addDebugLog(
     `init: mania scroll speed ${state.maniaScrollSpeed}`
     + (state.maniaScaleScrollSpeedWithBpm ? ' (scaled with BPM)' : ' (fixed)'),
@@ -1162,7 +1268,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       addDebugLog(`init: detached window for beatmap ${detachedParams.beatmapId}`);
     } else {
       setStatus('Checking current tab...');
-      const activeTab = await queryActiveTab();
+      const activeTab = await activeTabRequest;
 
       if (!activeTab?.url) {
         throw new Error('No active tab URL found.');
@@ -1182,7 +1288,18 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
           if (titleEl) titleEl.textContent = 'no map detected... o_0';
         }
         setUnsupportedMode(true);
-        void renderRecentPanel();
+        // The cached list is part of this view and takes room in it, so it gets
+        // a moment to be in place before the popup shows rather than shoving
+        // the art aside after. A slow cache read only holds it back so long.
+        const listed = renderRecentPanel().catch((error) => {
+          addDebugLog(`init: cached mapsets unavailable -> ${error?.message || 'unknown error'}`);
+        });
+        await Promise.race([
+          listed,
+          new Promise((resolve) => {
+            registry.addTimeout(setTimeout(resolve, RECENT_PANEL_REVEAL_WAIT_MS));
+          }),
+        ]);
       } else {
         setUnsupportedMode(false);
         titleLine.textContent = 'Preview unavailable';
@@ -1191,8 +1308,12 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();
+      revealPopup();
       return;
     }
+
+    // A beatmap page: the preview is the right view, loading state and all.
+    revealPopup();
 
     // Set before the fetch so detaching works while the map is still loading.
     setDetachContext({ beatmapId: info.beatmapId, setId: info.setId, mode: info.mode });
@@ -1289,7 +1410,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     configureAudioPreview(resolvedSetId, metadata.previewTime, { skipPreviewClip: Boolean(resume) });
 
 
-    renderer.setBeatmap(mapData, durationMs);
+    renderer.setBeatmap(mapData, durationMs, { previewTimeMs: metadata.previewTime });
     // Flattened once per map: sliders contribute a sound per node, so this is
     // longer than the object list and has its own ordering.
     state.hitsoundEvents = buildHitsoundEvents(mapData.objects, {
@@ -1360,6 +1481,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       return;
     }
     setUnsupportedMode(false);
+    revealPopup();
     addDebugLog(`init: failed -> ${error?.message || 'unknown error'}`);
     stopPlayback();
     setPlaybackSpeedControlEnabled(false);
@@ -1396,6 +1518,8 @@ bindPopupUiEvents({
     debugRunButton,
     debugClearButton,
     debugCloseButton,
+    volumeButton,
+    volumeControl,
     volumeSlider,
     timeLabel,
     shortcutsButton,
@@ -1518,6 +1642,8 @@ renderInfoMenu();
 // event fire a sync against a target that is not set yet, which reloads the same
 // map a second time on every open.
 initializePreviewForCurrentTab().finally(() => {
+  // Whatever happened, the popup must not stay invisible.
+  revealPopup();
   if (IS_DETACHED_WINDOW) {
     startFollowingBrowsingTabs();
   }

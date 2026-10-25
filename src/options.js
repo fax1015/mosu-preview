@@ -20,6 +20,7 @@ const maniaScaleScrollWithBpm = document.querySelector('#maniaScrollScaleWithBpm
 const hitsoundsToggle = document.querySelector('#hitsounds');
 const hitsoundVolumeRange = document.querySelector('#hitsoundVolume');
 const hitsoundVolumeValue = document.querySelector('#hitsoundVolumeValue');
+const hitsoundStyleSelect = document.querySelector('#hitsoundStyle');
 const maniaScrollDirection = document.querySelector('#maniaScrollDirection');
 const maniaTimingNoteColours = document.querySelector('#maniaTimingNoteColours');
 const standardSnakingSliders = document.querySelector('#standardSnakingSliders');
@@ -478,6 +479,7 @@ const getFormSettings = () => ({
     autoFallback: autoFallbackToggle?.checked ?? true,
     hitsounds: hitsoundsToggle?.checked ?? false,
     hitsoundVolume: hitsoundVolumeRange ? Number(hitsoundVolumeRange.value) / 100 : undefined,
+    hitsoundStyle: hitsoundStyleSelect?.value,
   }),
 });
 
@@ -535,8 +537,15 @@ const initialize = async () => {
     hitsoundVolumeRange.value = String(Math.round(settings.hitsoundVolume * 100));
     renderPercentSetting(hitsoundVolumeValue, settings.hitsoundVolume);
   }
+  if (hitsoundStyleSelect) {
+    hitsoundStyleSelect.value = settings.hitsoundStyle;
+  }
 
   hitsoundsToggle?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  hitsoundStyleSelect?.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

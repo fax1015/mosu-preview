@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
-import { PreviewRenderer } from '../src/renderer.js';
+import { TimelineRenderer } from '../src/timeline.js';
 import { getTimingStateAt } from '../src/core/controlPoints.js';
 import { appendPerformanceResult } from './performance-results.mjs';
 
@@ -95,21 +95,17 @@ const objects = Array.from({ length: RENDER_OBJECTS }, (_, index) => ({
   time: index * 60,
   endTime: index * 60,
 }));
-const renderer = new PreviewRenderer(canvas, canvas);
-renderer.durationMs = RENDER_OBJECTS * 60;
-renderer.visualTimelineDurationMs = renderer.durationMs;
-renderer.timelineViewStartMs = 120000;
-renderer.timelineViewDurationMs = 120000;
-renderer.timelineDensity = [];
-renderer.mapData = { objects, timingControlPoints: [] };
-renderer.currentTimeMs = 180000;
-renderer.renderTimeline(); // Warm the cached visible range once.
+const timeline = new TimelineRenderer(canvas);
+timeline.setBeatmap({ objects, timingControlPoints: [] }, RENDER_OBJECTS * 60);
+timeline.setView(120000, 120000, { animate: false });
+timeline.setTime(180000);
+timeline.render(); // Warm the cached visible range once.
 
 const runReferenceTimeline = () => {
-  renderer.timelineDensityViewCache = null;
-  renderer.renderTimeline();
+  timeline.viewDensityCache = null;
+  timeline.render();
 };
-const runOptimizedTimeline = () => renderer.renderTimeline();
+const runOptimizedTimeline = () => timeline.render();
 
 // Warm both paths before collecting samples, and confirm each still draws the
 // same timeline state without changing the fixture.

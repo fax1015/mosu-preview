@@ -166,6 +166,11 @@ const sampleBezierSegment = (controlPoints) => {
   if (!Array.isArray(controlPoints) || controlPoints.length < 2) {
     return [];
   }
+  // A two-point Bezier is exactly a line. Sampling it eight or more times
+  // only adds redundant canvas vertices on anchor-dense paths.
+  if (controlPoints.length === 2) {
+    return [controlPoints[0], controlPoints[1]];
+  }
 
   let estimate = 0;
   for (let i = 1; i < controlPoints.length; i += 1) {
@@ -178,6 +183,85 @@ const sampleBezierSegment = (controlPoints) => {
     sampled.push(evaluateBezierPoint(controlPoints, i / steps));
   }
   return sampled;
+};
+
+const distanceToSegmentSquared = (point, start, end, scaleX, scaleY) => {
+  const pointX = (point.x - start.x) * scaleX;
+  const pointY = (point.y - start.y) * scaleY;
+  const segmentX = (end.x - start.x) * scaleX;
+  const segmentY = (end.y - start.y) * scaleY;
+  const segmentLengthSquared = (segmentX * segmentX) + (segmentY * segmentY);
+  if (segmentLengthSquared <= 0) {
+    return (pointX * pointX) + (pointY * pointY);
+  }
+
+  const projection = clamp(
+    ((pointX * segmentX) + (pointY * segmentY)) / segmentLengthSquared,
+    0,
+    1,
+  );
+  const deltaX = pointX - (projection * segmentX);
+  const deltaY = pointY - (projection * segmentY);
+  return (deltaX * deltaX) + (deltaY * deltaY);
+};
+
+// Ramer–Douglas–Peucker in rendered-pixel space. The canonical slider path is
+// kept intact for timing, ticks, and the slider ball; this smaller polyline is
+// only for drawing the body. `minPointCount` leaves ordinary paths alone: a
+// tolerance-sized error still turns a smooth arc into a handful of long chords,
+// which is only an acceptable trade on anchor-dense decorative sliders.
+const simplifyPathForRendering = (
+  points,
+  tolerance = 0.25,
+  scaleX = 1,
+  scaleY = 1,
+  minPointCount = 0,
+) => {
+  if (
+    !Array.isArray(points)
+    || points.length < 3
+    || points.length <= Math.max(0, Number(minPointCount) || 0)
+  ) {
+    return points || [];
+  }
+
+  const safeScaleX = Number.isFinite(scaleX) && scaleX > 0 ? scaleX : 1;
+  const safeScaleY = Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
+  const safeTolerance = Number.isFinite(tolerance) ? Math.max(0, tolerance) : 0.25;
+  const toleranceSquared = safeTolerance * safeTolerance;
+  const kept = new Uint8Array(points.length);
+  const pending = [[0, points.length - 1]];
+  kept[0] = 1;
+  kept[points.length - 1] = 1;
+
+  while (pending.length) {
+    const [startIndex, endIndex] = pending.pop();
+    const start = points[startIndex];
+    const end = points[endIndex];
+    let furthestIndex = -1;
+    let furthestDistance = toleranceSquared;
+
+    for (let i = startIndex + 1; i < endIndex; i += 1) {
+      const distance = distanceToSegmentSquared(
+        points[i], start, end, safeScaleX, safeScaleY,
+      );
+      if (distance > furthestDistance) {
+        furthestDistance = distance;
+        furthestIndex = i;
+      }
+    }
+
+    if (furthestIndex >= 0) {
+      kept[furthestIndex] = 1;
+      pending.push([startIndex, furthestIndex], [furthestIndex, endIndex]);
+    }
+  }
+
+  const simplified = [];
+  for (let i = 0; i < points.length; i += 1) {
+    if (kept[i]) simplified.push(points[i]);
+  }
+  return simplified;
 };
 
 // Repeated control points ("red anchors") split a bezier into independent
@@ -424,6 +508,7 @@ export {
   sampleBezierPath,
   sampleCatmullPath,
   samplePerfectCirclePath,
+  simplifyPathForRendering,
   trimPathFromStart,
   trimPathToLength,
 };

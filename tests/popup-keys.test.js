@@ -15,12 +15,19 @@ const createListenerHost = () => {
   };
 };
 
-const setup = ({ infoMenuOpen = false, shortcutsMenuOpen = false } = {}) => {
+const setup = ({ infoMenuOpen = false, shortcutsMenuOpen = false, renderer = {} } = {}) => {
   const documentHost = createListenerHost();
   const previousDocument = globalThis.document;
   const previousWindow = globalThis.window;
+  const previousRequestAnimationFrame = globalThis.requestAnimationFrame;
   globalThis.document = { ...documentHost, activeElement: null };
-  globalThis.window = { ...createListenerHost(), close() {} };
+  globalThis.window = {
+    ...createListenerHost(),
+    close() {
+      calls.push(['window.close']);
+    },
+  };
+  globalThis.requestAnimationFrame = () => 1;
 
   const calls = [];
   const record = (name) => (...args) => {
@@ -44,7 +51,7 @@ const setup = ({ infoMenuOpen = false, shortcutsMenuOpen = false } = {}) => {
   bindPopupUiEvents({
     elements: { playfieldCanvas: canvas, timelineCanvas: canvas, recentPanel },
     state,
-    renderer: {},
+    renderer,
     registry: { addTimeout: (id) => id, clearTimeout: () => null },
     supportLinks: {},
     actions: {
@@ -89,6 +96,7 @@ const setup = ({ infoMenuOpen = false, shortcutsMenuOpen = false } = {}) => {
   const restore = () => {
     globalThis.document = previousDocument;
     globalThis.window = previousWindow;
+    globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   };
 
   return { calls, press, restore, recentRow, state };
@@ -159,6 +167,61 @@ test('Space on a cached mapset row opens the row rather than playing', async () 
     const event = await press(' ', { target: recentRow });
     assert.deepEqual(calls, []);
     assert.equal(event.defaultPrevented, false);
+  } finally {
+    restore();
+  }
+});
+
+// Stands in for the renderer's timeline, recording what the keys ask of it.
+const createZoomableRenderer = (calls, { zoomed = false } = {}) => ({
+  timeline: {
+    isZoomed: () => zoomed,
+    zoomAroundPlayhead: (factor) => calls.push(['zoomAroundPlayhead', factor]),
+    resetZoom: () => {
+      zoomed = false;
+      calls.push(['resetZoom']);
+    },
+  },
+});
+
+test('plus and minus zoom the timeline around the playhead', async () => {
+  const calls = [];
+  const { press, restore } = setup({ renderer: createZoomableRenderer(calls) });
+  try {
+    await press('=');
+    await press('+', { shiftKey: true });
+    await press('-');
+    assert.deepEqual(calls, [
+      ['zoomAroundPlayhead', 0.5],
+      ['zoomAroundPlayhead', 0.5],
+      ['zoomAroundPlayhead', 2],
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('Ctrl with plus or minus is left to the browser zoom', async () => {
+  const calls = [];
+  const { press, restore } = setup({ renderer: createZoomableRenderer(calls) });
+  try {
+    await press('=', { ctrlKey: true });
+    await press('-', { ctrlKey: true });
+    assert.deepEqual(calls, []);
+  } finally {
+    restore();
+  }
+});
+
+test('Escape zooms the timeline back out before it closes the popup', async () => {
+  const zoomCalls = [];
+  const { calls, press, restore } = setup({ renderer: createZoomableRenderer(zoomCalls, { zoomed: true }) });
+  try {
+    await press('Escape');
+    assert.deepEqual(zoomCalls, [['resetZoom']]);
+    assert.deepEqual(names(calls), []);
+    await press('Escape');
+    assert.deepEqual(names(calls), ['window.close']);
   } finally {
     restore();
   }

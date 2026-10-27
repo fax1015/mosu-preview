@@ -151,38 +151,117 @@ const fitPathToExpectedDistance = (points, expectedDistance, { allowExtension = 
   ];
 };
 
-const evaluateBezierPoint = (controlPoints, t) => {
-  const temp = controlPoints.map((point) => ({ x: point.x, y: point.y }));
-  for (let order = temp.length - 1; order > 0; order -= 1) {
-    for (let i = 0; i < order; i += 1) {
-      temp[i].x += (temp[i + 1].x - temp[i].x) * t;
-      temp[i].y += (temp[i + 1].y - temp[i].y) * t;
+// osu!lazer's PathApproximator.BezierToPiecewiseLinear. A span is halved until
+// every piece is flat to within a quarter of an osu!pixel, rather than sampled
+// at a step count guessed from its control polygon: a fixed count both
+// over-samples a near-straight span and under-samples a tight one, and an
+// under-sampled span measures *short*, which fitPathToExpectedDistance then
+// hides by extending the slider past where its control points really end.
+const BEZIER_TOLERANCE = 0.25;
+const BEZIER_FLATNESS_SQUARED = BEZIER_TOLERANCE * BEZIER_TOLERANCE * 4;
+// No real slider comes near this, but a corrupt file should not be able to
+// spend a whole frame subdividing one span.
+const MAX_BEZIER_POINTS = 65536;
+
+// Spans are held as flat x, y pairs rather than point objects: this walks every
+// control point of every slider in a map, and the per-point objects the old
+// sampler allocated were most of what it cost.
+const bezierIsFlatEnough = (span, count) => {
+  for (let i = 1; i < count - 1; i += 1) {
+    const x = span[(i - 1) * 2] - (2 * span[i * 2]) + span[(i + 1) * 2];
+    const y = span[((i - 1) * 2) + 1] - (2 * span[(i * 2) + 1]) + span[((i + 1) * 2) + 1];
+    if (((x * x) + (y * y)) > BEZIER_FLATNESS_SQUARED) {
+      return false;
     }
   }
-  return temp[0];
+  return true;
+};
+
+// de Casteljau at the midpoint: `left` and `right` come back holding the control
+// points of the two halves. `midpoints` is scratch the length of one span.
+const bezierSubdivide = (span, left, right, midpoints, count) => {
+  for (let i = 0; i < count * 2; i += 1) {
+    midpoints[i] = span[i];
+  }
+
+  for (let i = 0; i < count; i += 1) {
+    const last = count - i - 1;
+    left[i * 2] = midpoints[0];
+    left[(i * 2) + 1] = midpoints[1];
+    right[last * 2] = midpoints[last * 2];
+    right[(last * 2) + 1] = midpoints[(last * 2) + 1];
+    for (let j = 0; j < last; j += 1) {
+      midpoints[j * 2] = (midpoints[j * 2] + midpoints[(j + 1) * 2]) / 2;
+      midpoints[(j * 2) + 1] = (midpoints[(j * 2) + 1] + midpoints[((j + 1) * 2) + 1]) / 2;
+    }
+  }
+};
+
+// A span flat enough to stop subdividing contributes one point per control
+// point, each the weighted mean of its neighbours across both halves. `left`
+// holds 2 * count - 1 points, the two halves laid end to end.
+const bezierApproximate = (span, output, left, right, midpoints, count) => {
+  bezierSubdivide(span, left, right, midpoints, count);
+
+  for (let i = 0; i < count - 1; i += 1) {
+    left[(count + i) * 2] = right[(i + 1) * 2];
+    left[((count + i) * 2) + 1] = right[((i + 1) * 2) + 1];
+  }
+
+  output.push({ x: span[0], y: span[1] });
+  for (let i = 1; i < count - 1; i += 1) {
+    const index = 2 * i;
+    output.push({
+      x: 0.25 * (left[(index - 1) * 2] + (2 * left[index * 2]) + left[(index + 1) * 2]),
+      y: 0.25 * (left[((index - 1) * 2) + 1] + (2 * left[(index * 2) + 1]) + left[((index + 1) * 2) + 1]),
+    });
+  }
 };
 
 const sampleBezierSegment = (controlPoints) => {
   if (!Array.isArray(controlPoints) || controlPoints.length < 2) {
     return [];
   }
-  // A two-point Bezier is exactly a line. Sampling it eight or more times
-  // only adds redundant canvas vertices on anchor-dense paths.
+  // A two-point Bezier is exactly a line, and subdividing one only ever hands
+  // back its own endpoints.
   if (controlPoints.length === 2) {
     return [controlPoints[0], controlPoints[1]];
   }
 
-  let estimate = 0;
-  for (let i = 1; i < controlPoints.length; i += 1) {
-    estimate += pointDistance(controlPoints[i - 1], controlPoints[i]);
+  const count = controlPoints.length;
+  const left = new Float64Array(((count * 2) - 1) * 2);
+  const right = new Float64Array(count * 2);
+  const midpoints = new Float64Array(count * 2);
+  const first = new Float64Array(count * 2);
+  for (let i = 0; i < count; i += 1) {
+    first[i * 2] = controlPoints[i].x;
+    first[(i * 2) + 1] = controlPoints[i].y;
   }
 
-  const steps = Math.max(8, Math.min(96, Math.ceil(estimate / 6)));
-  const sampled = [];
-  for (let i = 0; i <= steps; i += 1) {
-    sampled.push(evaluateBezierPoint(controlPoints, i / steps));
+  const output = [];
+  const toFlatten = [first];
+  const freeSpans = [];
+
+  while (toFlatten.length > 0 && output.length < MAX_BEZIER_POINTS) {
+    const span = toFlatten.pop();
+    if (bezierIsFlatEnough(span, count)) {
+      bezierApproximate(span, output, left, right, midpoints, count);
+      freeSpans.push(span);
+      continue;
+    }
+
+    // The left half replaces the span itself, so the two go back on the stack
+    // in order and the curve comes out start to end.
+    const rightSpan = freeSpans.pop() || new Float64Array(count * 2);
+    bezierSubdivide(span, left, rightSpan, midpoints, count);
+    for (let i = 0; i < count * 2; i += 1) {
+      span[i] = left[i];
+    }
+    toFlatten.push(rightSpan, span);
   }
-  return sampled;
+
+  output.push(controlPoints[count - 1]);
+  return output;
 };
 
 const distanceToSegmentSquared = (point, start, end, scaleX, scaleY) => {
@@ -311,6 +390,10 @@ const sampleBezierPath = (pathPoints) => {
   return dedupeAdjacentPoints(sampled);
 };
 
+// osu!lazer's PathApproximator.catmull_detail: a fixed subdivision count per
+// span, not one scaled to the span's length.
+const CATMULL_DETAIL = 50;
+
 const sampleCatmullPath = (pathPoints) => {
   if (!Array.isArray(pathPoints) || pathPoints.length < 2) {
     return pathPoints || [];
@@ -330,11 +413,15 @@ const sampleCatmullPath = (pathPoints) => {
     const p0 = i === 0 ? pathPoints[i] : pathPoints[i - 1];
     const p1 = pathPoints[i];
     const p2 = pathPoints[i + 1];
-    const p3 = (i + 2 < pathPoints.length) ? pathPoints[i + 2] : pathPoints[i + 1];
-    const steps = Math.max(6, Math.min(48, Math.ceil(pointDistance(p1, p2) / 8)));
+    // Past the last control point lazer extrapolates the final tangent rather
+    // than holding the endpoint still; clamping to p2 instead flattened the
+    // tail of every Catmull slider.
+    const p3 = (i + 2 < pathPoints.length)
+      ? pathPoints[i + 2]
+      : { x: (2 * p2.x) - p1.x, y: (2 * p2.y) - p1.y };
 
-    for (let step = 0; step <= steps; step += 1) {
-      const t = step / steps;
+    for (let step = 0; step <= CATMULL_DETAIL; step += 1) {
+      const t = step / CATMULL_DETAIL;
       const point = catmull(p0, p1, p2, p3, t);
       if (!sampled.length || !pointsEqual(sampled[sampled.length - 1], point)) {
         sampled.push(point);
@@ -344,6 +431,11 @@ const sampleCatmullPath = (pathPoints) => {
 
   return dedupeAdjacentPoints(sampled);
 };
+
+// osu!lazer's PathApproximator.circular_arc_tolerance, in osu!pixels, and a
+// ceiling so a near-degenerate circumcircle cannot ask for an endless arc.
+const CIRCULAR_ARC_TOLERANCE = 0.1;
+const MAX_CIRCULAR_ARC_STEPS = 2048;
 
 const samplePerfectCirclePath = (pathPoints) => {
   if (!Array.isArray(pathPoints) || pathPoints.length < 3) {
@@ -398,9 +490,17 @@ const samplePerfectCirclePath = (pathPoints) => {
     direction = -1;
   }
 
+  // osu!lazer's PathApproximator.CircularArcToPiecewiseLinear: exactly enough
+  // chords that none strays further than the tolerance from the arc, which on a
+  // wide arc is fewer points than a length-based guess and on a tight one more.
   const arcAngle = angleDistance(angle0, angle2, direction);
-  const arcLength = arcAngle * radius;
-  const steps = Math.max(10, Math.min(128, Math.ceil(arcLength / 6)));
+  const steps = (2 * radius) <= CIRCULAR_ARC_TOLERANCE
+    ? 1
+    : clamp(
+      Math.ceil(arcAngle / (2 * Math.acos(1 - (CIRCULAR_ARC_TOLERANCE / radius)))) - 1,
+      1,
+      MAX_CIRCULAR_ARC_STEPS,
+    );
 
   const sampled = [];
   for (let i = 0; i <= steps; i += 1) {

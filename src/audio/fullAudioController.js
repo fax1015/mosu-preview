@@ -493,19 +493,24 @@ const createFullAudioController = ({
       fullAudioError: '',
     });
     setFullAudioLoading(true);
-    const firstTrySequence = getProviderSequenceForDownload(
-      state.providerOverride,
-      state.providerPriority,
-      state.disabledProviders,
-      state.autoFallback,
-    );
-    showTryingArchiveProviderBadge(
-      firstTrySequence[0]?.label ?? getProviderDisplayName(state.providerOverride),
+    // The cache is read before any provider is considered, so the badge has to
+    // say that. Picking the provider sequence up here used to announce
+    // "Fetching beatmap archive from <provider>" before the lookup had even
+    // started: a cached load flashed a download label, which reads as the
+    // extension going to the network when it never did.
+    setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
+    setAudioBadgeWithProvider(
+      'loading',
+      'Loading full audio',
+      CACHE_AUDIO_PROVIDER_LABEL,
+      'Checking the audio cache',
     );
     addDebugLog(`audio: full-load start set=${setId} file=${audioFileName}`);
 
     try {
+      const cacheLookupStartedMs = performance.now();
       const cachedBlob = await readCachedFullAudioBlob(setId, audioFileName);
+      const cacheLookupMs = Math.round(performance.now() - cacheLookupStartedMs);
 
       // Staleness is checked on its own, before the cache result is interpreted.
       // Folding the two together meant a superseded job that had *found* its audio
@@ -523,14 +528,26 @@ const createFullAudioController = ({
       if (cachedBlob) {
         setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
         setAudioBadgeWithProvider('loading', 'Loading full audio', CACHE_AUDIO_PROVIDER_LABEL, 'Using cached full audio');
-        addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB)`);
+        addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB, looked up in ${cacheLookupMs} ms)`);
         // Entries cached before names were stored only ever get one chance to pick
         // theirs up, since the write path is skipped for a hit.
         void ensureCachedMapsetInfo(setId, audioFileName, getCurrentMapsetInfo(), cachedBlob);
         await hotswapToFullAudio(cachedBlob, setId, audioFileName, jobId, CACHE_AUDIO_PROVIDER_LABEL);
         return;
       }
-      addDebugLog('audio: cache miss');
+      addDebugLog(`audio: cache miss (${cacheLookupMs} ms)`);
+
+      // Nothing before this point may touch the network, so this is the first
+      // moment a "fetching from ..." label can be true.
+      const firstTrySequence = getProviderSequenceForDownload(
+        state.providerOverride,
+        state.providerPriority,
+        state.disabledProviders,
+        state.autoFallback,
+      );
+      showTryingArchiveProviderBadge(
+        firstTrySequence[0]?.label ?? getProviderDisplayName(state.providerOverride),
+      );
 
       // Stays null when the worker never answers, which is the main case the
       // popup's own download exists for.
@@ -622,7 +639,17 @@ const createFullAudioController = ({
         audioBlob = new Blob([extractionResult.audioBytes], { type: mime || getAudioMimeType(pickedAudioFilename) });
         byteLength = extractionResult.audioBytes.byteLength;
         addDebugLog(`audio: archive extracted in popup from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
-        await writeCachedFullAudioBlob(setId, audioFileName, audioBlob, getCurrentMapsetInfo());
+        const cachedWriteOk = await writeCachedFullAudioBlob(
+          setId,
+          audioFileName,
+          audioBlob,
+          getCurrentMapsetInfo(),
+        );
+        if (!cachedWriteOk) {
+          // Nothing else reports this: the audio still plays, but the next load
+          // finds no entry and downloads the archive again.
+          addDebugLog('audio: cache write failed; this track will be downloaded again next time');
+        }
       }
 
       if (!audioBlob || byteLength <= 0) {

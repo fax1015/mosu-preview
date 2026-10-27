@@ -1,4 +1,11 @@
 import { getTimingStateAt } from './core/controlPoints.js';
+import { clamp } from './core/math.js';
+
+// osu! holds a greenline's slider velocity to this range; without the clamp a
+// beat length of -5 reads as 20x and the slider it times runs half as long as
+// it should.
+const MIN_SLIDER_VELOCITY = 0.1;
+const MAX_SLIDER_VELOCITY = 10;
 
 export const parseMetadata = (content) => {
   const data = {};
@@ -119,7 +126,9 @@ const toTimingControlPoint = (tp) => ({
   volume: tp.volume,
   uninherited: Boolean(tp.uninherited),
   bpm: tp.uninherited && tp.beatLength > 0 ? (60000 / tp.beatLength) : 0,
-  svMultiplier: !tp.uninherited && tp.beatLength < 0 ? (-100 / tp.beatLength) : 1,
+  svMultiplier: !tp.uninherited && tp.beatLength < 0
+    ? clamp(-100 / tp.beatLength, MIN_SLIDER_VELOCITY, MAX_SLIDER_VELOCITY)
+    : 1,
   omitFirstBarLine: Boolean((tp.effects || 0) & 8),
   kiai: Boolean((tp.effects || 0) & 1),
 });

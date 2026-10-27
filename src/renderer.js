@@ -12,7 +12,12 @@ import {
 } from './core/sliderPath.js';
 import { getElapsedBeatsAt, getTimingSections, getTimingStateAt } from './core/controlPoints.js';
 import { clamp, findFirstIndexAtOrAfter } from './core/math.js';
-import { FOLLOW_LINE_FADE_OUT_MS, getFollowLineAt, hasFollowPoints } from './core/followPoints.js';
+import {
+  FOLLOW_LINE_FADE_MS,
+  followLineAlphaAt,
+  getFollowLineAt,
+  getFollowLinePreemptMs,
+} from './core/followPoints.js';
 import { getCanvasContext } from './core/canvas.js';
 import { TimelineRenderer } from './timeline.js';
 
@@ -42,6 +47,10 @@ const CIRCLE_POST_HIT_FADE_MS = 120;
 const LONG_OBJECT_POST_HIT_FADE_MS = 140;
 const SLIDER_HEAD_HIT_FADE_MS = 120;
 const SLIDER_HEAD_HIT_SCALE_BOOST = 0.2;
+// osu!lazer's DrawableSliderTick animation length, and the fixed lead-in
+// SliderTick.ApplyDefaultsToSelf gives a tick on any span after the first.
+const SLIDER_TICK_FADE_IN_MS = 150;
+const SLIDER_TICK_REPEAT_OFFSET_MS = 200;
 const COMBO_NUMBER_FONT_SCALE = 0.84;
 const OBJECT_VISUAL_MAX_ALPHA = 0.84;
 const STANDARD_OBJECT_SHADOW_ALPHA = 0.26;
@@ -201,6 +210,36 @@ const getComboColour = (colours, object) => {
   const palette = (Array.isArray(colours) && colours.length > 0) ? colours : DEFAULT_COLOURS;
   const colourIndex = ((getComboColourIndex(object) % palette.length) + palette.length) % palette.length;
   return palette[colourIndex] || DEFAULT_COLOURS[0];
+};
+
+// White is the preview's own ink: a slider's border, the ball, a circle's rim
+// and its combo number are all drawn in it over the combo colour. A combo
+// colour near enough to white leaves nothing for them to read against, so a
+// slider becomes one flat white slab with the ball lost somewhere inside it.
+//
+// How much a colour has in common with white is the smallest of its three
+// channels, and scaling all three by one factor takes that down while leaving
+// the hue and the saturation exactly where the mapper put them. Anything whose
+// smallest channel is already under the cap goes through untouched, which is
+// every ordinary combo colour -- the four defaults among them.
+const MAX_COMBO_WHITENESS = 180;
+
+const normalizeComboColour = (colour) => {
+  const r = clamp(Math.round(Number(colour?.r) || 0), 0, 255);
+  const g = clamp(Math.round(Number(colour?.g) || 0), 0, 255);
+  const b = clamp(Math.round(Number(colour?.b) || 0), 0, 255);
+
+  const whiteness = Math.min(r, g, b);
+  if (whiteness <= MAX_COMBO_WHITENESS) {
+    return { r, g, b };
+  }
+
+  const scale = MAX_COMBO_WHITENESS / whiteness;
+  return {
+    r: Math.round(r * scale),
+    g: Math.round(g * scale),
+    b: Math.round(b * scale),
+  };
 };
 
 const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
@@ -664,12 +703,22 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersi
 };
 
 // Follow points are drawn as one continuous line per pair of objects (timing
-// in core/followPoints.js), at this opacity once it is fully in.
+// in core/followPoints.js), at this opacity where the band is solid.
 const FOLLOW_LINE_MAX_ALPHA = 0.225;
-// How far the start of the line trails off, in circle radii (at most half the
-// line), and how many steps its eased fade is drawn in.
-const FOLLOW_LINE_TAIL_RADII = 3;
-const FOLLOW_LINE_TAIL_STEPS = 8;
+// How many stops the band's opacity is drawn in. Its profile has four corners
+// of its own plus an edge fade at each end, so enough to round those off
+// without parsing a colour per pixel.
+const FOLLOW_LINE_GRADIENT_STEPS = 24;
+// Both ends of the band trail off over this many circle radii (at most half
+// its length), so it never starts or stops on a hard edge -- the timing only
+// softens an end while that end is mid-fade.
+const FOLLOW_LINE_EDGE_RADII = 3;
+
+const getObjectEndTimeMs = (object) => (
+  Number.isFinite(object?.endTime) ? object.endTime : (Number(object?.time) || 0)
+);
+
+const smoothstep = (t) => t * t * (3 - (2 * t));
 
 const drawFollowPoints = ({
   ctx,
@@ -685,59 +734,76 @@ const drawFollowPoints = ({
   }
 
   let drawnCount = 0;
-  // A line shows from no earlier than when the object it leads to starts
-  // fading in until shortly after that object is hit. `next` is the object
-  // being searched for, so start one pair earlier.
+  const followPreemptMs = getFollowLinePreemptMs(preemptMs);
+  // The band is gone a fade after the object it leads to is hit, so no pair
+  // before that can still be showing. `next` is the object being searched for,
+  // so start one pair earlier.
   const startIndex = Math.max(
     0,
-    findFirstIndexAtOrAfter(objects, currentTime - FOLLOW_LINE_FADE_OUT_MS) - 1,
+    findFirstIndexAtOrAfter(objects, currentTime - FOLLOW_LINE_FADE_MS) - 1,
   );
 
   for (let i = startIndex; i < objects.length - 1; i += 1) {
     const current = objects[i];
     const next = objects[i + 1];
     if (!current || !next) continue;
-    if (next.time > currentTime + preemptMs) break;
+    // Nothing shows until a preempt before the object behind the line ends,
+    // which is at or after it starts: past that, no later pair can show yet.
+    if (current.time > currentTime + followPreemptMs) break;
     // Lazer: no follow points into a new combo, or to or from a spinner.
     if ((current.comboIndex ?? 0) !== (next.comboIndex ?? 0)) continue;
     if (current.kind === 'spinner' || next.kind === 'spinner') continue;
-
-    const line = getFollowLineAt(currentTime, { endTimeMs: next.time, preemptMs });
-    if (!line || line.alpha <= 0.001) continue;
 
     // From where the start object ends (a slider's end), centre to centre: the
     // objects drawn over it hide the ends while they are there.
     const start = getObjectEndPositionOsu(current);
     const end = getObjectStartPositionOsu(next);
-    if (!hasFollowPoints(Math.hypot(end.x - start.x, end.y - start.y))) continue;
+    const line = getFollowLineAt(currentTime, {
+      startTimeMs: getObjectEndTimeMs(current),
+      endTimeMs: next.time,
+      objectPreemptMs: preemptMs,
+      distanceOsu: Math.hypot(end.x - start.x, end.y - start.y),
+    });
+    if (!line) continue;
 
     const from = toCanvas(start.x, start.y);
     const to = toCanvas(end.x, end.y);
-    const length = Math.hypot(to.x - from.x, to.y - from.y);
-    if (!(length > 0)) continue;
-    const alpha = clamp(FOLLOW_LINE_MAX_ALPHA * line.alpha, 0, 1);
-    // The start trails off to nothing at the start object's centre, eased at
-    // both ends of the fade so it neither starts nor stops visibly.
-    const tail = Math.min(circleRadius * FOLLOW_LINE_TAIL_RADII, length / 2) / length;
-    const fade = ctx.createLinearGradient(
-      from.x,
-      from.y,
-      from.x + ((to.x - from.x) * tail),
-      from.y + ((to.y - from.y) * tail),
-    );
-    for (let k = 0; k <= FOLLOW_LINE_TAIL_STEPS; k += 1) {
-      const offset = k / FOLLOW_LINE_TAIL_STEPS;
-      const eased = offset * offset * (3 - (2 * offset));
+    const deltaX = to.x - from.x;
+    const deltaY = to.y - from.y;
+    if (!(Math.hypot(deltaX, deltaY) > 0)) continue;
+
+    const headX = from.x + (deltaX * line.from);
+    const headY = from.y + (deltaY * line.from);
+    const tailX = from.x + (deltaX * line.to);
+    const tailY = from.y + (deltaY * line.to);
+
+    const bandLength = Math.hypot(tailX - headX, tailY - headY);
+    const edge = bandLength > 0
+      ? Math.min((circleRadius * FOLLOW_LINE_EDGE_RADII) / bandLength, 0.5)
+      : 0.5;
+
+    const fade = ctx.createLinearGradient(headX, headY, tailX, tailY);
+    let peak = 0;
+    for (let k = 0; k <= FOLLOW_LINE_GRADIENT_STEPS; k += 1) {
+      const offset = k / FOLLOW_LINE_GRADIENT_STEPS;
+      const edgeFade = smoothstep(clamp(Math.min(offset, 1 - offset) / edge, 0, 1));
+      const alpha = clamp(FOLLOW_LINE_MAX_ALPHA * edgeFade * followLineAlphaAt(
+        line.from + ((line.to - line.from) * offset),
+        line,
+      ), 0, 1);
+      if (alpha > peak) peak = alpha;
       // Rounded well below a step of 8-bit alpha, so the colours parse from cache.
-      fade.addColorStop(offset, `rgba(255, 255, 255, ${(alpha * eased).toFixed(3)})`);
+      fade.addColorStop(offset, `rgba(255, 255, 255, ${alpha.toFixed(3)})`);
     }
+    if (peak <= 0.001) continue;
+
     ctx.strokeStyle = fade;
     // Thinner continuous line, decoupled from circle radius
     ctx.lineWidth = Math.max(1.0, 2.5 * scale);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(from.x + ((to.x - from.x) * line.extent), from.y + ((to.y - from.y) * line.extent));
+    ctx.moveTo(headX, headY);
+    ctx.lineTo(tailX, tailY);
     ctx.stroke();
     drawnCount += 1;
   }
@@ -816,7 +882,7 @@ export class PreviewRenderer {
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     this.timeline.setBeatmap(mapData, this.durationMs, { previewTimeMs });
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
-      ? mapData.comboColours
+      ? mapData.comboColours.map(normalizeComboColour)
       : DEFAULT_COLOURS;
 
     // Objects are sorted by start time but may overlap, so the visible-window
@@ -1041,12 +1107,14 @@ export class PreviewRenderer {
       ? this.mapData.sliderTickRate
       : 1;
     const stackIndex = object.stackIndex || 0;
+    const objectPreemptMs = getApproachPreemptMs(this.mapData?.approachRate);
     const cachedTicks = standardSliderTickCache.get(object);
     if (
       cachedTicks
       && Array.isArray(cachedTicks.ticks)
       && cachedTicks.sliderTickRate === sliderTickRate
       && cachedTicks.stackIndex === stackIndex
+      && cachedTicks.objectPreemptMs === objectPreemptMs
     ) {
       return cachedTicks.ticks;
     }
@@ -1055,7 +1123,9 @@ export class PreviewRenderer {
     const pathLength = Number.isFinite(object.length) && object.length > 0 ? object.length : 0;
     const ticks = [];
     const cacheTicks = () => {
-      standardSliderTickCache.set(object, { sliderTickRate, stackIndex, ticks });
+      standardSliderTickCache.set(object, {
+        sliderTickRate, stackIndex, objectPreemptMs, ticks,
+      });
       return ticks;
     };
 
@@ -1094,6 +1164,13 @@ export class PreviewRenderer {
 
         ticks.push({
           time: tickTime,
+          // osu!lazer's SliderTick.ApplyDefaultsToSelf: a tick comes in half of
+          // its own way into the span ahead of its time, plus a lead-in of two
+          // thirds of the approach on the first span and a flat 200ms after
+          // that. Drawing them all with the slider lit the whole dotted track
+          // up during the approach instead of along the ball.
+          preempt: ((timeProgress * spanDuration) / 2)
+            + (spanIndex > 0 ? SLIDER_TICK_REPEAT_OFFSET_MS : objectPreemptMs * 0.66),
           position: positionOnSliderPathAtProgress(path, pathProgress),
         });
       }
@@ -2133,7 +2210,10 @@ export class PreviewRenderer {
         const sliderRenderPathLength = getSliderRenderPathLength(sliderRenderPathPoints);
         if (this.standardSnakingSliders && timeUntil > 0) {
           const fadeInElapsedMs = preemptMs - timeUntil;
-          const snakeProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+          // osu!lazer's SnakingSliderBody snakes over a third of the approach,
+          // not over the fade-in: the two only agree at AR 5, and at AR 9 the
+          // body took twice as long to reach its tail as it should have.
+          const snakeProgress = clamp(fadeInElapsedMs / Math.max(1, preemptMs / 3), 0, 1);
           if (sliderRenderPathLength > 0) {
             sliderDrawPointsOsu = trimPathToLength(
               sliderRenderPathPoints,
@@ -2164,7 +2244,12 @@ export class PreviewRenderer {
         }
         const pathPoints = sliderDrawPointsOsu.map((p) => toCanvas(p.x, p.y));
         if (pathPoints.length > 0) {
-          sliderTailCanvasPoint = pathPoints[pathPoints.length - 1];
+          // osu!lazer's DrawableSliderTail puts the end circle on whichever end
+          // the last span finishes at, which on a slider with an even number of
+          // spans is back at the head rather than out at the tail.
+          sliderTailCanvasPoint = ((getSliderSpanTiming(object).slides - 1) % 2) === 0
+            ? pathPoints[pathPoints.length - 1]
+            : pathPoints[0];
         }
         if (pathPoints.length > 1) {
           const sliderShadowAlpha = clamp(baseAlpha * 0.24, 0, 0.3);
@@ -2209,6 +2294,11 @@ export class PreviewRenderer {
             }
 
             const tickElapsed = this.currentTimeMs - tick.time;
+            const tickPreempt = Number.isFinite(tick.preempt) ? tick.preempt : 0;
+            if (tickElapsed < -tickPreempt) {
+              continue;
+            }
+
             let tickAlpha = objectRenderAlpha * 0.72;
             let tickRadius = baseTickRadius;
 
@@ -2218,6 +2308,13 @@ export class PreviewRenderer {
               tickAlpha *= (1 - tickFadeProgress);
               // Scale expansion: grow by 80% as it fades out to make it punchier.
               tickRadius = baseTickRadius * (1 + (0.8 * tickEaseOut));
+            } else {
+              // Comes in over lazer's 150ms, swelling from half size over four
+              // times that, so a tick arrives rather than simply being there.
+              const sinceAppeared = tickPreempt + tickElapsed;
+              tickAlpha *= clamp(sinceAppeared / SLIDER_TICK_FADE_IN_MS, 0, 1);
+              const grow = clamp(sinceAppeared / (SLIDER_TICK_FADE_IN_MS * 4), 0, 1);
+              tickRadius = baseTickRadius * (0.5 + (0.5 * (1 - ((1 - grow) ** 2))));
             }
             if (tickAlpha <= 0.001) {
               continue;
@@ -2250,10 +2347,17 @@ export class PreviewRenderer {
               const reverseTime = object.time + ((spanIndex + 1) * spanDuration);
               const isAtEnd = (spanIndex % 2) === 0;
               const elapsed = this.currentTimeMs - reverseTime;
-              const timeUntil = -elapsed;
+              // osu!lazer's SliderEndCircle: the first arrow fades in with the
+              // slider itself, and each later one simply appears two spans
+              // ahead, with no fade. Giving them all the approach preempt
+              // showed the first one late on a slow slider and stacked half a
+              // dozen of them at each end of a fast one.
+              const reversePreempt = spanIndex === 0
+                ? preemptMs + (reverseTime - object.time)
+                : spanDuration * 2;
+              const reverseFadeInMs = spanIndex === 0 ? timeFadeInMs : 0;
 
-              if (timeUntil > preemptMs) {
-                // Not yet visible according to Approach Rate
+              if (-elapsed > reversePreempt) {
                 continue;
               }
 
@@ -2272,14 +2376,17 @@ export class PreviewRenderer {
                 reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * (1 - hitEaseOut);
                 reverseSize = indicatorSize * (1.0 + (0.5 * hitEaseOut)); // Expands 1.0 -> 1.5
               } else {
-                // Fade in based on standard AR fade-in time
-                const fadeInElapsedMs = preemptMs - timeUntil;
-                const fadeInProgress = clamp(fadeInElapsedMs / Math.max(1, timeFadeInMs), 0, 1);
+                const fadeInProgress = reverseFadeInMs > 0
+                  ? clamp((reversePreempt + elapsed) / reverseFadeInMs, 0, 1)
+                  : 1;
                 reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * fadeInProgress;
 
                 // Continuous Heartbeat Pulse Animation
-                // 300ms loop: 0-35ms snaps out to 1.3x, 35-285ms smoothly shrinks back to 1.0x
-                const loopCurrentTime = this.currentTimeMs % 300;
+                // 300ms loop: 0-35ms snaps out to 1.3x, 35-285ms smoothly shrinks back to 1.0x.
+                // osu!lazer times the loop from when the arrow itself appeared;
+                // running it off the map clock made every arrow on screen pulse
+                // together and let a new one pop in halfway through a beat.
+                const loopCurrentTime = (this.currentTimeMs - (reverseTime - reversePreempt)) % 300;
                 let scaleAmount = 1.0;
 
                 if (loopCurrentTime < 35) {
@@ -2513,10 +2620,12 @@ export class PreviewRenderer {
 
 export {
   DEFAULT_COLOURS,
+  MAX_COMBO_WHITENESS,
   assignComboIndices,
   applyPreviewStacking,
   formatTime,
   getComboColour,
+  normalizeComboColour,
   getCircleRadius,
   getStandardPlayfieldLayout,
 };

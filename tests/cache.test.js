@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  getCachedMapsetSummaries,
   getFullAudioCacheKeyCandidates,
   getFullAudioCacheAliasEntries,
   getPrimaryFullAudioCacheKey,
@@ -10,6 +11,7 @@ import {
   buildMapsetInfoHeaders,
   parseCachedMapsetInfo,
 } from '../src/audio/cache.js';
+
 
 test('normalizes backslashes in audio paths', () => {
   assert.equal(normalizePath('audio\\song.mp3'), 'audio/song.mp3');
@@ -127,4 +129,43 @@ test('absent and malformed name headers read as empty, never as a throw', () => 
 test('an over-long title is truncated rather than rejected', () => {
   const headers = buildMapsetInfoHeaders({ title: 'a'.repeat(500) });
   assert.equal(parseCachedMapsetInfo(new Response('', { headers })).title.length, 200);
+});
+
+test('cached mapset list omits entries past the read expiry', async () => {
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const makeEntry = (setId, cachedAtMs) => ({
+    url: `https://osu.ppy.sh/beatmapsets/${setId}/audio/song.mp3`,
+    response: new Response('', {
+      headers: {
+        'x-mosu-cached-at': String(cachedAtMs),
+        ...buildMapsetInfoHeaders({ title: `Set ${setId}` }),
+      },
+    }),
+  });
+  const entries = [
+    makeEntry('111', now - dayMs),
+    makeEntry('222', now - (dayMs * 8)),
+  ];
+
+  const previousCaches = globalThis.caches;
+  globalThis.caches = {
+    open: async () => ({
+      keys: async () => entries.map(({ url }) => ({ url })),
+      match: async (request) => entries.find((entry) => entry.url === request.url)?.response,
+    }),
+  };
+
+  try {
+    const summaries = await getCachedMapsetSummaries();
+    // 222 would be deleted by the first read attempt, so listing it as cached
+    // would promise audio that instantly triggers another download.
+    assert.deepEqual(summaries.map((summary) => summary.setId), ['111']);
+  } finally {
+    if (previousCaches === undefined) {
+      delete globalThis.caches;
+    } else {
+      globalThis.caches = previousCaches;
+    }
+  }
 });

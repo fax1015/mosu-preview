@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_COLOURS,
+  MAX_COMBO_WHITENESS,
   PreviewRenderer,
   assignComboIndices,
   applyPreviewStacking,
   getComboColour,
   getCircleRadius,
   getStandardPlayfieldLayout,
+  normalizeComboColour,
 } from '../src/renderer.js';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
@@ -431,6 +433,188 @@ CircleSize:4
     renderer.setBeatmap(convertMapForMode(source, 2), 3000);
     renderer.renderPlayfield();
     assert.equal(passes, 2, 'a new map gets its own pass');
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+// A slider at 1000ms with five spans of 500ms, so it reverses at 1500, 2000,
+// 2500 and 3000, and at tick rate 2 drops one tick halfway along each span.
+const REPEAT_SLIDER_MAP = `
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+ApproachRate:9
+SliderMultiplier:1.4
+SliderTickRate:2
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,192,1000,2,0,L|204:192,5,140
+`;
+
+// A renderer over a recording context, so a test can count what was drawn.
+const withRepeatSlider = (run) => {
+  const log = [];
+  const context = new Proxy({}, {
+    get(_target, property) {
+      if (property === 'canvas') return canvas;
+      if (property === 'getTransform') return () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 });
+      if (property === 'createLinearGradient') return () => ({ addColorStop() {} });
+      return (...args) => { log.push({ call: property, args }); };
+    },
+    set(_target, property, value) {
+      log.push({ set: property, value });
+      return true;
+    },
+  });
+  const canvas = {
+    clientWidth: 512, clientHeight: 384, width: 512, height: 384, getContext: () => context,
+  };
+  const previousWindow = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1 };
+
+  try {
+    const map = convertMapForMode(parseMapPreviewData(REPEAT_SLIDER_MAP), 0);
+    const renderer = new PreviewRenderer(canvas, canvas);
+    renderer.setBeatmap(map, 5000);
+    run({
+      renderer,
+      slider: map.objects[0],
+      // drawReverseIndicator is the only path stroked with exactly two lineTo
+      // calls: circles are arcs, and a linear slider body has one.
+      reverseArrowsAt: (timeMs) => {
+        log.length = 0;
+        renderer.setTime(timeMs);
+        renderer.renderPlayfield();
+        let arrows = 0;
+        let lineTos = 0;
+        for (const entry of log) {
+          if (entry.call === 'beginPath') lineTos = 0;
+          else if (entry.call === 'lineTo') lineTos += 1;
+          else if (entry.call === 'stroke' && lineTos === 2) arrows += 1;
+        }
+        return arrows;
+      },
+    });
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+};
+
+test('slider ticks come in along the slider, on lazer SliderTick preempts', () => {
+  withRepeatSlider(({ renderer, slider }) => {
+    assert.equal(slider.endTime, 3500);
+    const ticks = renderer.buildStandardSliderTicks(slider);
+    assert.deepEqual(ticks.map((tick) => tick.time), [1250, 1750, 2250, 2750, 3250]);
+
+    // osu!lazer: half the tick's own way into its span, plus two thirds of the
+    // approach on the first span and a flat 200ms on every one after it.
+    assert.ok(Math.abs(ticks[0].preempt - (((1250 - 1000) / 2) + (600 * 0.66))) < 1e-6);
+    for (const tick of ticks.slice(1)) {
+      const spanStart = 1000 + (Math.floor((tick.time - 1000) / 500) * 500);
+      assert.ok(Math.abs(tick.preempt - (((tick.time - spanStart) / 2) + 200)) < 1e-6);
+    }
+
+    // So they arrive one at a time rather than all with the slider body.
+    const appears = ticks.map((tick) => tick.time - tick.preempt);
+    for (let i = 1; i < appears.length; i += 1) {
+      assert.ok(appears[i] > appears[i - 1], 'each tick waits for its own turn');
+    }
+    assert.ok(appears[0] > slider.time - 600, 'no tick is out before the slider itself');
+  });
+});
+
+test('reverse arrows follow lazer SliderEndCircle preempts, not the approach rate', () => {
+  withRepeatSlider(({ reverseArrowsAt }) => {
+    // The first arrow fades in with the slider at 400ms; each later one shows
+    // two spans ahead of its own reverse, so at 1000, 1500 and 2000. All of
+    // them linger min(300, spanDuration) past the reverse itself.
+    assert.equal(reverseArrowsAt(300), 0, 'nothing before the slider appears');
+    assert.equal(reverseArrowsAt(450), 1, 'the first arrow is out with the slider');
+    assert.equal(reverseArrowsAt(900), 1);
+    assert.equal(reverseArrowsAt(1050), 2);
+    assert.equal(reverseArrowsAt(1600), 3);
+    assert.equal(reverseArrowsAt(2100), 3, 'never more than three at once');
+    assert.equal(reverseArrowsAt(2600), 2);
+    assert.equal(reverseArrowsAt(3200), 1, 'the last one lingers 300ms past its reverse at 3000');
+  });
+});
+
+test('a near-white combo colour is pulled off white, and every other one is left alone', () => {
+  // Every ordinary combo colour has a dark channel, so it goes through
+  // untouched -- the four defaults among them.
+  for (const colour of DEFAULT_COLOURS) {
+    assert.deepEqual(normalizeComboColour(colour), colour);
+  }
+  assert.deepEqual(normalizeComboColour({ r: 18, g: 124, b: 255 }), { r: 18, g: 124, b: 255 });
+  assert.deepEqual(
+    normalizeComboColour({ r: MAX_COMBO_WHITENESS, g: 255, b: 220 }),
+    { r: MAX_COMBO_WHITENESS, g: 255, b: 220 },
+  );
+
+  // White itself comes back as the cap, so the white border, the ball and the
+  // combo number all have something left to read against.
+  assert.deepEqual(
+    normalizeComboColour({ r: 255, g: 255, b: 255 }),
+    { r: MAX_COMBO_WHITENESS, g: MAX_COMBO_WHITENESS, b: MAX_COMBO_WHITENESS },
+  );
+
+  // A washed-out colour keeps its hue and its saturation: only the value drops.
+  const washed = { r: 255, g: 230, b: 230 };
+  const pale = normalizeComboColour(washed);
+  const saturation = (c) => (Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b)) / Math.max(c.r, c.g, c.b);
+  assert.equal(Math.min(pale.r, pale.g, pale.b), MAX_COMBO_WHITENESS);
+  assert.ok(Math.abs(saturation(pale) - saturation(washed)) < 0.01, 'saturation holds');
+  assert.ok(pale.r > pale.g && pale.g === pale.b, 'and so does the hue');
+
+  assert.deepEqual(normalizeComboColour(undefined), { r: 0, g: 0, b: 0 });
+});
+
+test('a beatmap\'s white combo colour is normalized before anything is drawn with it', () => {
+  const context = new Proxy({}, { get: () => () => {}, set: () => true });
+  const canvas = {
+    clientWidth: 512, clientHeight: 384, width: 512, height: 384, getContext: () => context,
+  };
+  const previousWindow = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1 };
+
+  try {
+    const map = convertMapForMode(parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+ApproachRate:9
+SliderMultiplier:1.4
+
+[Colours]
+Combo1 : 255,255,255
+Combo2 : 18,124,255
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,192,1000,2,0,L|304:192,1,240
+`), 0);
+    assert.deepEqual(map.comboColours[0], { r: 255, g: 255, b: 255 }, 'the map still says what it said');
+
+    const renderer = new PreviewRenderer(canvas, canvas);
+    renderer.setBeatmap(map, 5000);
+    assert.deepEqual(renderer.comboColours, [
+      { r: MAX_COMBO_WHITENESS, g: MAX_COMBO_WHITENESS, b: MAX_COMBO_WHITENESS },
+      { r: 18, g: 124, b: 255 },
+    ]);
+    assert.deepEqual(
+      getComboColour(renderer.comboColours, map.objects[0]),
+      { r: MAX_COMBO_WHITENESS, g: MAX_COMBO_WHITENESS, b: MAX_COMBO_WHITENESS },
+    );
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;

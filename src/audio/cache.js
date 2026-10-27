@@ -464,6 +464,7 @@ const getCachedMapsetSummaries = async () => {
     const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
     const requests = await cache.keys();
     const summaries = new Map();
+    const now = Date.now();
 
     for (const request of requests) {
       const match = request.url.match(CACHE_KEY_SET_ID_PATTERN);
@@ -481,6 +482,13 @@ const getCachedMapsetSummaries = async () => {
       try {
         const response = await cache.match(request);
         if (response) {
+          // A row that advertises audio the reader refuses to serve is worse
+          // than no row: opening it downloads the archive again even though the
+          // list said it was cached. Prune deletes these; listing just skips.
+          const cachedAtMs = parseCachedAtMs(response);
+          if (cachedAtMs > 0 && (now - cachedAtMs) > FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS) {
+            continue;
+          }
           info = parseCachedMapsetInfo(response);
         }
       } catch (error) {

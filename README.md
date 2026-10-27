@@ -69,6 +69,8 @@ full audio cache eviction removes expired entries first, then removes the oldest
 
 each cached audio entry also stores its mapset's title, artist and creator, so the cached mapsets list can name a set for as long as its audio is kept. the view history is a 20-entry recency list and ages out much sooner than the audio does.
 
+an entry past its max age is deleted when it is next read and is already left out of the cached mapsets list, so every set the list offers loads from the cache rather than downloading its archive again.
+
 ## host permissions
 
 host permissions are scoped to the services the extension actually fetches from:
@@ -77,13 +79,11 @@ host permissions are scoped to the services the extension actually fetches from:
 - `https://b.ppy.sh/*`
 - `https://catboy.best/*`
 - `https://osu.direct/*`
-- `https://dl.osu.direct/*`
+- `https://storage.osu.direct/*` (download redirect target)
 - `https://api.nerinyan.moe/*`
-- `https://dl.nerinyan.moe/*`
+- `https://dl.nerinyan.moe/*` (download redirect target)
 - `https://txy1.sayobot.cn/*`
-- `https://*.idrivee2-50.com/*`
-- `https://tc1.sayobot.cn:25225/*`
-- `https://osu.sayobot.cn/*`
+- `https://tc1.sayobot.cn:25225/*` (download redirect target)
 
 the extension does not inject content scripts into arbitrary pages. it runs from the popup and makes network requests only to the hosts above.
 

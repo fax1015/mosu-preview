@@ -39,7 +39,11 @@ const createInitialState = ({ audio = null } = {}) => {
     fullAudioSetId: null,
     fullAudioStatus: 'idle',
     fullAudioCacheKey: '',
-    fullAudioJobId: 0,
+    // The service worker addresses extraction progress by this id and the popup
+    // filters on it. A per-page-load base keeps a reply meant for an earlier
+    // popup instance (closed mid-download) from matching this one's first job
+    // and painting its "fetching from ..." badge over a cache hit.
+    fullAudioJobId: Date.now(),
     fullAudioObjectUrl: null,
     // An MP3 or Ogg Vorbis track plays from a slice of itself after each seek
     // (see audio/frameSeeker.js); this is the slice playing now, and the

@@ -1,17 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  FOLLOW_LINE_FADE_OUT_MS,
+  FOLLOW_LINE_FADE_MS,
+  FOLLOW_LINE_PREEMPT_MS,
   FOLLOW_POINT_SPACING,
+  followLineAlphaAt,
   getFollowLineAt,
+  getFollowLinePreemptMs,
   hasFollowPoints,
 } from '../src/core/followPoints.js';
 import { PreviewRenderer, getCircleRadius, getStandardPlayfieldLayout } from '../src/renderer.js';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
 
-// AR 9: the object at 1000ms starts fading in at 400ms.
-const ar9 = { endTimeMs: 1000, preemptMs: 600 };
+// A slider ending at 1000ms, the next object hit at 2000ms, 400 osu!px apart,
+// on an AR 9 map. The band covers 48px out of the first to 32px short of the
+// second, so fractions 0.12 to 0.92 of the way between their centres.
+const gap = {
+  startTimeMs: 1000,
+  endTimeMs: 2000,
+  objectPreemptMs: 600,
+  distanceOsu: 400,
+};
+const NEAR = 0.12;
+const FAR = 0.92;
+
+// When the point at `fraction` of the way along is lazer's to draw: it appears
+// a preempt before this, is solid from a fade after that until this, and is
+// gone a fade later.
+const momentOf = (fraction) => gap.startTimeMs + (fraction * (gap.endTimeMs - gap.startTimeMs));
 
 test('follow points are skipped exactly where lazer lays none', () => {
   const lazerPointCount = (length) => {
@@ -31,69 +48,141 @@ test('follow points are skipped exactly where lazer lays none', () => {
   assert.equal(hasFollowPoints(Number.NaN), false);
 });
 
-test('a follow line fades in after its object starts to, and out shortly after it is hit', () => {
-  // The object starts fading in at 400ms; the line waits until 520ms.
-  assert.equal(getFollowLineAt(400, ar9), null);
-  assert.equal(getFollowLineAt(520, ar9), null);
-
-  // Then fades in gently over 420ms, while shooting out hard.
-  const early = getFollowLineAt(570, ar9);
-  assert.ok(early.alpha > 0 && early.alpha < 0.05);
-  assert.ok(early.extent > 0.5 && early.extent < 1);
-  const halfway = getFollowLineAt(730, ar9);
-  assert.equal(halfway.alpha, 0.5);
-  assert.ok(halfway.extent > 0.999);
-  assert.deepEqual(getFollowLineAt(940, ar9), { alpha: 1, extent: 1 });
-  assert.deepEqual(getFollowLineAt(1000, ar9), { alpha: 1, extent: 1 });
-
-  // From the hit, out over 120ms.
-  assert.equal(FOLLOW_LINE_FADE_OUT_MS, 120);
-  assert.ok(getFollowLineAt(1010, ar9).alpha > 0.95);
-  assert.equal(getFollowLineAt(1060, ar9).alpha, 0.5);
-  assert.ok(getFollowLineAt(1110, ar9).alpha < 0.05);
-  assert.equal(getFollowLineAt(1120, ar9), null);
-  assert.equal(getFollowLineAt(5000, ar9), null);
+test('the line\'s own preempt is lazer\'s 800ms, and only shortens past AR 10', () => {
+  assert.equal(FOLLOW_LINE_PREEMPT_MS, 800);
+  assert.equal(FOLLOW_LINE_FADE_MS, 400);
+  // The approach rate barely enters into it, where the objects' own fades
+  // depend on little else: AR 5, 9 and 10 all give the full 800ms.
+  assert.equal(getFollowLinePreemptMs(1200), 800);
+  assert.equal(getFollowLinePreemptMs(600), 800);
+  assert.equal(getFollowLinePreemptMs(450), 800);
+  // Below OsuHitObject.PREEMPT_MIN it is cut back in proportion.
+  assert.equal(getFollowLinePreemptMs(225), 400);
+  assert.equal(getFollowLinePreemptMs(0), 0);
 });
+
+test('each point along the line keeps its own lazer fade times', () => {
+  const alphaAt = (timeMs, fraction) => followLineAlphaAt(fraction, getFollowLineAt(timeMs, gap));
+
+  for (const fraction of [0.2, 0.5, 0.9]) {
+    const moment = momentOf(fraction);
+    const label = `fraction ${fraction}`;
+
+    // Nothing of it until a preempt before its moment, then in over a fade.
+    assert.equal(alphaAt(moment - 801, fraction), 0, label);
+    assert.ok(alphaAt(moment - 700, fraction) > 0, label);
+    assert.ok(alphaAt(moment - 700, fraction) < 1, label);
+    assert.equal(alphaAt(moment - 400, fraction), 1, label);
+
+    // Solid until its own moment, then out over another fade.
+    assert.equal(alphaAt(moment - 100, fraction), 1, label);
+    assert.equal(alphaAt(moment, fraction), 1, label);
+    assert.ok(alphaAt(moment + 200, fraction) < 1, label);
+    assert.ok(alphaAt(moment + 200, fraction) > 0, label);
+    assert.equal(alphaAt(moment + 401, fraction), 0, label);
+  }
+});
+
+test('the band travels from the object behind to the one ahead', () => {
+  // The first point appears a preempt before its own moment, which is well
+  // before the object behind the line has even been hit.
+  assert.equal(getFollowLineAt(momentOf(NEAR) - 800, gap), null);
+  const appearing = getFollowLineAt(momentOf(NEAR) - 700, gap);
+  assert.ok(appearing, 'the head of the band is out before the slider ends');
+  assert.ok(appearing.to < 0.3, `expected only the near end, got ${appearing.to}`);
+  assert.equal(appearing.from, NEAR);
+
+  // By the time the object ahead is hit the band has reached it and the near
+  // end has begun to go.
+  const arriving = getFollowLineAt(gap.endTimeMs, gap);
+  assert.equal(arriving.to, FAR);
+  assert.ok(arriving.from > NEAR, `expected the near end to have left, got ${arriving.from}`);
+
+  // The last point goes a fade after its own moment, and nothing is left.
+  assert.ok(getFollowLineAt(momentOf(FAR) + 399, gap));
+  assert.equal(getFollowLineAt(momentOf(FAR) + 400, gap), null);
+
+  // Neither end ever moves backwards.
+  let previous = null;
+  for (let timeMs = 0; timeMs <= 2500; timeMs += 0.5) {
+    const line = getFollowLineAt(timeMs, gap);
+    if (line && previous) {
+      assert.ok(line.from >= previous.from - 1e-9, `near end goes back at ${timeMs}ms`);
+      assert.ok(line.to >= previous.to - 1e-9, `far end goes back at ${timeMs}ms`);
+    }
+    previous = line;
+  }
+});
+
+// How much of the line is inked in at `timeMs`: the opacity integrated along
+// the visible band. A line that popped in or out would step this.
+const inkAt = (timeMs, connection) => {
+  const line = getFollowLineAt(timeMs, connection);
+  if (!line) {
+    return 0;
+  }
+
+  const steps = 256;
+  let total = 0;
+  for (let k = 0; k <= steps; k += 1) {
+    total += followLineAlphaAt(line.from + ((line.to - line.from) * (k / steps)), line);
+  }
+  return (total / (steps + 1)) * (line.to - line.from);
+};
 
 test('a follow line never pops in or out', () => {
   const cases = [
-    ar9,
-    { endTimeMs: 1000, preemptMs: 1200 }, // AR 5
-    { endTimeMs: 1000, preemptMs: 300 }, // AR 11
+    gap,
+    { ...gap, objectPreemptMs: 1200 }, // AR 5
+    { ...gap, objectPreemptMs: 300 }, // AR 11
+    { ...gap, endTimeMs: 1120 }, // a 1/4 at 125 BPM
+    { ...gap, endTimeMs: 5000, distanceOsu: 120 }, // a long, close-set gap
   ];
 
   for (const connection of cases) {
     const label = JSON.stringify(connection);
     const stepMs = 0.25;
-    // Smoothstep is at its steepest halfway, at 1.5 times a straight fade.
-    const fadeInMs = connection.preemptMs * 0.7;
-    const maxAlphaStep = ((1.5 * stepMs) / Math.min(fadeInMs, FOLLOW_LINE_FADE_OUT_MS)) + 1e-9;
-    let previous = null;
-    const firstMs = connection.endTimeMs - connection.preemptMs - 50;
-    for (let timeMs = firstMs; timeMs <= connection.endTimeMs + 200; timeMs += stepMs) {
-      const line = getFollowLineAt(timeMs, connection);
-      const alpha = line ? line.alpha : 0;
-      const previousAlpha = previous ? previous.alpha : 0;
-      assert.ok(Math.abs(alpha - previousAlpha) <= maxAlphaStep, `${label} jumps at ${timeMs}ms`);
-      if (line && previous) {
-        assert.ok(line.extent >= previous.extent, `${label} shrinks at ${timeMs}ms`);
-      }
-      previous = line;
+    let previous = 0;
+    for (
+      let timeMs = connection.startTimeMs - FOLLOW_LINE_PREEMPT_MS - 50;
+      timeMs <= connection.endTimeMs + FOLLOW_LINE_FADE_MS + 50;
+      timeMs += stepMs
+    ) {
+      const ink = inkAt(timeMs, connection);
+      assert.ok(Math.abs(ink - previous) <= 0.01, `${label} jumps at ${timeMs}ms`);
+      previous = ink;
     }
+    assert.equal(previous, 0, `${label} is still showing at the end`);
   }
+});
+
+test('objects that overlap share one moment rather than dividing by no gap', () => {
+  // A slider that runs past the object after it leaves no gap to travel over,
+  // so the whole line comes in and goes again together.
+  const overlap = { ...gap, startTimeMs: 2000, endTimeMs: 2000 };
+  assert.equal(getFollowLineAt(1199, overlap), null);
+
+  const whole = getFollowLineAt(1800, overlap);
+  assert.equal(whole.from, NEAR);
+  assert.equal(whole.to, FAR);
+  assert.equal(followLineAlphaAt(NEAR + 0.01, whole), followLineAlphaAt(FAR - 0.01, whole));
+  assert.equal(followLineAlphaAt(0.5, whole), 1);
+
+  assert.ok(followLineAlphaAt(0.5, getFollowLineAt(2200, overlap)) < 1);
+  assert.equal(getFollowLineAt(2400, overlap), null);
 });
 
 test('the follow line depends only on the time asked for', () => {
   const times = [];
-  for (let timeMs = 300; timeMs <= 1100; timeMs += 7) times.push(timeMs);
-  const forward = times.map((timeMs) => getFollowLineAt(timeMs, ar9));
-  const scrubbed = [...times].reverse().map((timeMs) => getFollowLineAt(timeMs, ar9)).reverse();
+  for (let timeMs = 0; timeMs <= 2500; timeMs += 7) times.push(timeMs);
+  const forward = times.map((timeMs) => getFollowLineAt(timeMs, gap));
+  const scrubbed = [...times].reverse().map((timeMs) => getFollowLineAt(timeMs, gap)).reverse();
   assert.deepEqual(scrubbed, forward);
 });
 
 // A slider from x 64 to x 164 (ending at 1357ms), a circle at x 448 at 1700ms,
-// a spinner, then a circle in a new combo. AR 9: the circle at 1700ms starts
-// fading in at 1100ms, and the line to it at 1220ms, fully in by 1640ms.
+// a spinner, then a circle in a new combo. AR 9: the band between the slider
+// and the circle is 284px long, so it runs from ~615ms to ~2061ms.
 const SLIDER_SPINNER_MAP = `
 osu file format v14
 
@@ -112,6 +201,13 @@ SliderMultiplier:1.4
 64,64,3400,1,0,0:0:0:0:
 448,64,3700,5,0,0:0:0:0:
 `;
+
+const SLIDER_TO_CIRCLE = {
+  startTimeMs: 1357,
+  endTimeMs: 1700,
+  objectPreemptMs: 600,
+  distanceOsu: 284,
+};
 
 // A renderer drawing into recording contexts, with a stand-in OffscreenCanvas
 // so that follow lines land on a layer of their own.
@@ -190,57 +286,81 @@ const withRecordingRenderer = (run) => {
   }
 };
 
-test('draws the follow line from a slider\'s end to the next object\'s centre', () => {
-  withRecordingRenderer(({ log, layers, layout, renderAt, toCanvas }) => {
-    renderAt(1660);
+test('draws the band between a slider\'s end and the next object\'s centre', () => {
+  withRecordingRenderer(({
+    log, layers, layout, renderAt, toCanvas,
+  }) => {
+    const timeMs = 1660;
+    renderAt(timeMs);
     const [lines] = layers;
     const drawn = log.filter((entry) => entry.canvas === lines);
     const close = (a, b) => Math.abs(a - b) < 1e-6;
+
+    const line = getFollowLineAt(timeMs, SLIDER_TO_CIRCLE);
     const sliderEnd = toCanvas(164, 192);
     const circle = toCanvas(448, 192);
+    const along = (fraction) => ({
+      x: sliderEnd.x + ((circle.x - sliderEnd.x) * fraction),
+      y: sliderEnd.y + ((circle.y - sliderEnd.y) * fraction),
+    });
+    const head = along(line.from);
+    const tail = along(line.to);
 
+    // The band stops short of both centres, where lazer's first and last
+    // points sit, rather than running the whole way.
+    assert.ok(line.from > 0 && line.to < 1);
     const moveTo = drawn.find((entry) => entry.call === 'moveTo');
     const lineTo = drawn.find((entry) => entry.call === 'lineTo');
-    assert.ok(close(moveTo.args[0], sliderEnd.x) && close(moveTo.args[1], sliderEnd.y));
-    assert.ok(close(lineTo.args[0], circle.x) && close(lineTo.args[1], circle.y));
+    assert.ok(close(moveTo.args[0], head.x) && close(moveTo.args[1], head.y));
+    assert.ok(close(lineTo.args[0], tail.x) && close(lineTo.args[1], tail.y));
     assert.equal(drawn.filter((entry) => entry.call === 'stroke').length, 1);
 
-    // It trails off to nothing at the slider's end, over three circle radii,
-    // easing in and out of the fade.
+    // The gradient spans exactly the band, and its stops are the band's own
+    // opacity at that fraction of the way along it, trailed off at both ends
+    // over three circle radii so neither end is a hard edge.
     const { args, gradient } = drawn.find((entry) => entry.call === 'createLinearGradient');
+    assert.ok(close(args[0], head.x) && close(args[1], head.y));
+    assert.ok(close(args[2], tail.x) && close(args[3], tail.y));
+
     const drawnRadius = Math.max(0.5, (getCircleRadius(4) * layout.scale * 0.92) - 0.75);
-    assert.ok(close(args[0], sliderEnd.x) && close(args[1], sliderEnd.y));
-    assert.ok(close(args[2], sliderEnd.x + (3 * drawnRadius)) && close(args[3], sliderEnd.y));
+    const bandLength = Math.hypot(tail.x - head.x, tail.y - head.y);
+    const edge = Math.min((drawnRadius * 3) / bandLength, 0.5);
+    const smoothstep = (t) => t * t * (3 - (2 * t));
     const stops = gradient.stops.map(([offset, colour]) => [offset, Number(colour.match(/([\d.]+)\)$/)[1])]);
-    const middle = Math.floor(stops.length / 2);
-    assert.deepEqual(stops[0], [0, 0]);
-    assert.deepEqual(stops[stops.length - 1], [1, 0.225]);
-    assert.equal(stops[middle][0], 0.5);
-    assert.ok(Math.abs(stops[middle][1] - 0.1125) < 0.001);
-    for (let k = 1; k < stops.length; k += 1) {
-      assert.ok(stops[k][0] > stops[k - 1][0] && stops[k][1] >= stops[k - 1][1]);
+
+    for (const [offset, alpha] of stops) {
+      const fraction = line.from + ((line.to - line.from) * offset);
+      const edgeFade = smoothstep(Math.min(Math.min(offset, 1 - offset) / edge, 1));
+      const expected = 0.225 * edgeFade * followLineAlphaAt(fraction, line);
+      assert.ok(
+        Math.abs(alpha - expected) < 0.001,
+        `stop at ${offset} was ${alpha}, expected ${expected}`,
+      );
     }
-    // Gentle at both ends: the first and last steps change less than the middle ones.
-    const rise = (k) => stops[k][1] - stops[k - 1][1];
-    assert.ok(rise(1) < rise(middle) && rise(stops.length - 1) < rise(middle));
+
+    // Both ends really do reach nothing, and the middle is brighter than both.
+    assert.deepEqual(stops[0], [0, 0]);
+    assert.deepEqual(stops[stops.length - 1], [1, 0]);
+    const middle = stops[Math.floor(stops.length / 2)];
+    assert.ok(middle[1] > stops[1][1] && middle[1] > stops[stops.length - 2][1]);
     assert.ok(drawn.some((entry) => entry.set === 'strokeStyle' && entry.value === gradient));
   });
 });
 
-test('no follow line before it fades in, once it has faded out after the hit, around spinners or into a new combo', () => {
+test('the band is out well before the slider ends, and gone well after the hit', () => {
   withRecordingRenderer(({ log, layers, renderAt }) => {
     const strokes = () => log.filter((entry) => entry.canvas === layers[0] && entry.call === 'stroke').length;
 
+    // The slider is not hit until 1000ms and does not end until 1357ms, but
+    // the head of the band is already on its way out.
+    renderAt(700);
+    assert.equal(strokes(), 1, 'the band has left the slider before it is hit');
     renderAt(1250);
-    assert.equal(strokes(), 1, 'fading in, after the circle at 1700ms starts to');
-    renderAt(1760);
-    assert.equal(strokes(), 1, 'just after the hit, still going');
-    const { gradient } = log.find((entry) => entry.call === 'createLinearGradient');
-    const [offset, colour] = gradient.stops[gradient.stops.length - 1];
-    assert.equal(offset, 1);
-    assert.ok(Math.abs(Number(colour.match(/([\d.]+)\)$/)[1]) - 0.1125) < 0.001, colour);
+    assert.equal(strokes(), 1, 'still travelling');
+    renderAt(1900);
+    assert.equal(strokes(), 1, 'the tail is still going after the circle is hit');
 
-    for (const timeMs of [1100, 1200, 1825, 2400, 2800, 3200, 3600, 3800, 4500]) {
+    for (const timeMs of [0, 500, 610, 2100, 2400, 2800, 3200, 3600, 3800, 4500]) {
       renderAt(timeMs);
       assert.equal(strokes(), 0, `no follow line at ${timeMs}ms`);
     }

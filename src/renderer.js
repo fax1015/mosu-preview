@@ -13,7 +13,7 @@ import {
 import { getElapsedBeatsAt, getTimingSections, getTimingStateAt } from './core/controlPoints.js';
 import { clamp, findFirstIndexAtOrAfter } from './core/math.js';
 import {
-  FOLLOW_LINE_FADE_MS,
+  FOLLOW_LINE_FADE_OUT_MS,
   followLineAlphaAt,
   getFollowLineAt,
   getFollowLinePreemptMs,
@@ -704,15 +704,18 @@ const applyPreviewStacking = (objects, approachRate, stackLeniency, beatmapVersi
 
 // Follow points are drawn as one continuous line per pair of objects (timing
 // in core/followPoints.js), at this opacity where the band is solid.
-const FOLLOW_LINE_MAX_ALPHA = 0.225;
+const FOLLOW_LINE_MAX_ALPHA = 0.15;
 // How many stops the band's opacity is drawn in. Its profile has four corners
 // of its own plus an edge fade at each end, so enough to round those off
 // without parsing a colour per pixel.
 const FOLLOW_LINE_GRADIENT_STEPS = 24;
-// Both ends of the band trail off over this many circle radii (at most half
-// its length), so it never starts or stops on a hard edge -- the timing only
-// softens an end while that end is mid-fade.
-const FOLLOW_LINE_EDGE_RADII = 3;
+// An end of the band that is an object's own centre trails off over this many
+// circle radii (at most half its length), so that it is never a hard edge in
+// the moments before that object is drawn and cut back out of the line. One
+// radius, so the band is already at full strength where the object's edge
+// will be. An end the fade itself has swept to is at nothing anyway and is
+// left alone: that is what lets the band sweep in and out.
+const FOLLOW_LINE_EDGE_RADII = 1;
 
 const getObjectEndTimeMs = (object) => (
   Number.isFinite(object?.endTime) ? object.endTime : (Number(object?.time) || 0)
@@ -735,12 +738,12 @@ const drawFollowPoints = ({
 
   let drawnCount = 0;
   const followPreemptMs = getFollowLinePreemptMs(preemptMs);
-  // The band is gone a fade after the object it leads to is hit, so no pair
-  // before that can still be showing. `next` is the object being searched for,
-  // so start one pair earlier.
+  // The band is gone a fade out after the object it leads to is hit, so no
+  // pair before that can still be showing. `next` is the object being searched
+  // for, so start one pair earlier.
   const startIndex = Math.max(
     0,
-    findFirstIndexAtOrAfter(objects, currentTime - FOLLOW_LINE_FADE_MS) - 1,
+    findFirstIndexAtOrAfter(objects, currentTime - FOLLOW_LINE_FADE_OUT_MS) - 1,
   );
 
   for (let i = startIndex; i < objects.length - 1; i += 1) {
@@ -786,7 +789,9 @@ const drawFollowPoints = ({
     let peak = 0;
     for (let k = 0; k <= FOLLOW_LINE_GRADIENT_STEPS; k += 1) {
       const offset = k / FOLLOW_LINE_GRADIENT_STEPS;
-      const edgeFade = smoothstep(clamp(Math.min(offset, 1 - offset) / edge, 0, 1));
+      const fromFade = line.fromCut ? smoothstep(clamp(offset / edge, 0, 1)) : 1;
+      const toFade = line.toCut ? smoothstep(clamp((1 - offset) / edge, 0, 1)) : 1;
+      const edgeFade = fromFade * toFade;
       const alpha = clamp(FOLLOW_LINE_MAX_ALPHA * edgeFade * followLineAlphaAt(
         line.from + ((line.to - line.from) * offset),
         line,
@@ -2620,6 +2625,8 @@ export class PreviewRenderer {
 
 export {
   DEFAULT_COLOURS,
+  FOLLOW_LINE_EDGE_RADII,
+  FOLLOW_LINE_MAX_ALPHA,
   MAX_COMBO_WHITENESS,
   assignComboIndices,
   applyPreviewStacking,

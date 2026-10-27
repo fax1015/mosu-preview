@@ -4,9 +4,17 @@
 // osu! lays a row of separate points along the line, each one fading in 800ms
 // before the cursor would reach it and out again as the cursor passes, so the
 // row travels from the object behind to the object ahead across the whole gap
-// between them. mosu! draws one continuous line rather than dots, but takes
-// the same timing: this works out where the band's two ends have got to, as
-// fractions of the way from the first object's centre to the second's.
+// between them, the tail here cut shorter than lazer's so the line leaves an
+// object promptly once it has been hit. mosu! draws one continuous line
+// rather than dots, but takes the same timing: this works out where the
+// band's two ends have got to, as fractions of the way from the first
+// object's centre to the second's.
+//
+// The band runs centre to centre, where lazer's row of points stops short of
+// both. A row of dots reads as spaced out; a line stopping short of a circle
+// reads as clipped, the more so the closer the two objects are. The drawing
+// cuts the objects back out of the line, so what is left of it ends at their
+// edges either way.
 
 import { clamp } from './math.js';
 
@@ -15,8 +23,12 @@ import { clamp } from './math.js';
 // which that preempt is cut back in proportion.
 const FOLLOW_POINT_SPACING = 32;
 const FOLLOW_LINE_PREEMPT_MS = 800;
-const FOLLOW_LINE_FADE_MS = 400;
+const FOLLOW_LINE_FADE_IN_MS = 400;
 const FOLLOW_LINE_PREEMPT_FLOOR_MS = 450;
+// Lazer fades a point out over the same 400ms it faded in. Here the tail is
+// cut shorter, so the line clears away from an object once it has been hit
+// rather than hanging about behind the cursor.
+const FOLLOW_LINE_FADE_OUT_MS = 150;
 
 // Eased at both ends, so neither end of the band starts or stops visibly.
 const smoothstep = (t) => t * t * (3 - (2 * t));
@@ -40,7 +52,8 @@ const getFollowLinePreemptMs = (objectPreemptMs) => (
 /**
  * Opacity at `fraction` of the way between the two object centres, 0 to 1.
  * The band is solid between `fadeStart` and `solidLead`, and ramps away to
- * nothing at `trail` behind it and `lead` ahead of it.
+ * nothing at `trail` behind it and `lead` ahead of it -- the trailing ramp
+ * the shorter of the two, being the fade out.
  */
 const followLineAlphaAt = (fraction, line) => {
   if (!line) {
@@ -69,7 +82,9 @@ const followLineAlphaAt = (fraction, line) => {
  *
  * Returns null while none of it is showing. Otherwise `from` and `to` are the
  * ends of the visible band as fractions of the way between the two centres,
- * and followLineAlphaAt() gives the opacity anywhere along it.
+ * and followLineAlphaAt() gives the opacity anywhere along it. `fromCut` and
+ * `toCut` say which of those ends is an object's own centre, rather than
+ * where the fade has swept to and the opacity is already nothing.
  */
 const getFollowLineAt = (timeMs, {
   startTimeMs, endTimeMs, objectPreemptMs, distanceOsu,
@@ -78,10 +93,6 @@ const getFollowLineAt = (timeMs, {
     return null;
   }
 
-  // The band covers the same ground as lazer's row of points: a point and a
-  // half out of the object behind, stopping a point short of the one ahead.
-  const near = (FOLLOW_POINT_SPACING * 1.5) / distanceOsu;
-  const far = (distanceOsu - FOLLOW_POINT_SPACING) / distanceOsu;
   const preemptMs = getFollowLinePreemptMs(objectPreemptMs);
   const durationMs = endTimeMs - startTimeMs;
 
@@ -91,9 +102,9 @@ const getFollowLineAt = (timeMs, {
     // to appear a preempt before that moment and is gone a fade after it.
     const fractionAt = (offsetMs) => (timeMs - startTimeMs + offsetMs) / durationMs;
     line = {
-      trail: fractionAt(-FOLLOW_LINE_FADE_MS),
+      trail: fractionAt(-FOLLOW_LINE_FADE_OUT_MS),
       fadeStart: fractionAt(0),
-      solidLead: fractionAt(preemptMs - FOLLOW_LINE_FADE_MS),
+      solidLead: fractionAt(preemptMs - FOLLOW_LINE_FADE_IN_MS),
       lead: fractionAt(preemptMs),
       alpha: 1,
     };
@@ -106,24 +117,31 @@ const getFollowLineAt = (timeMs, {
       fadeStart: -Infinity,
       solidLead: Infinity,
       lead: Infinity,
-      alpha: clamp((elapsedMs + preemptMs) / FOLLOW_LINE_FADE_MS, 0, 1)
-        * (1 - clamp(elapsedMs / FOLLOW_LINE_FADE_MS, 0, 1)),
+      alpha: clamp((elapsedMs + preemptMs) / FOLLOW_LINE_FADE_IN_MS, 0, 1)
+        * (1 - clamp(elapsedMs / FOLLOW_LINE_FADE_OUT_MS, 0, 1)),
     };
   }
 
   // Everything strictly inside (trail, lead) has some opacity, so a band with
   // any width at all is a band with something to draw.
-  const from = Math.max(near, line.trail);
-  const to = Math.min(far, line.lead);
+  const from = Math.max(0, line.trail);
+  const to = Math.min(1, line.lead);
   if (!(to > from) || !(line.alpha > 0)) {
     return null;
   }
 
-  return { ...line, from, to };
+  return {
+    ...line,
+    from,
+    to,
+    fromCut: !(line.trail > 0),
+    toCut: !(line.lead < 1),
+  };
 };
 
 export {
-  FOLLOW_LINE_FADE_MS,
+  FOLLOW_LINE_FADE_IN_MS,
+  FOLLOW_LINE_FADE_OUT_MS,
   FOLLOW_LINE_PREEMPT_MS,
   FOLLOW_POINT_SPACING,
   followLineAlphaAt,

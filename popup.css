@@ -501,39 +501,68 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     transform: none;
 }
 
+/* Two lines, the song's title on its own and the artist and difficulty under
+   it, in about the height of the header's buttons: the title no longer shares
+   its line with the artist. */
 .map-preview-headings {
     min-width: 0;
     flex: 1;
-}
-
-.map-preview-title-row {
     display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    min-width: 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.05rem;
 }
 
 .map-preview-title {
-    flex: 1 1 auto;
     min-width: 0;
-    font-size: 0.88rem;
+    margin: 0;
+    font-size: 0.82rem;
     font-weight: 700;
-    line-height: 1.2;
+    line-height: 1.15;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.map-preview-subtitle {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    margin: 0;
+    font-size: 0.64rem;
+    line-height: 1.2;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.map-preview-subtitle[hidden] {
+    display: none;
+}
+
+/* The artist gives way first; the difficulty, which says which map this is,
+   keeps up to just over half the line. */
+.map-preview-artist {
+    flex: 0 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .map-preview-version {
-    flex: 0 1 42%;
+    flex: 0 0 auto;
     min-width: 0;
-    max-width: 42%;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-    white-space: nowrap;
+    max-width: 55%;
     overflow: hidden;
     text-overflow: ellipsis;
-    text-align: right;
+    color: rgba(226, 222, 238, 0.86);
+    font-weight: 600;
+}
+
+.map-preview-artist:not(:empty) + .map-preview-version:not(:empty)::before {
+    content: "·";
+    margin: 0 0.32rem;
+    color: var(--text-secondary);
+    font-weight: 400;
 }
 
 .map-preview-stats {
@@ -591,10 +620,20 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     transform: translateY(0);
 }
 
+/* The audio badge's pill, tinted purple, in the badge's own spot: the badge
+   steps aside while it shows rather than peeking out from under it. */
 .map-preview-toast.is-copied {
-    color: rgba(200, 190, 220, 0.92);
-    background: rgba(58, 50, 75, 0.85);
-    border-color: rgba(140, 120, 170, 0.35);
+    display: inline-flex;
+    align-items: center;
+    color: rgba(226, 210, 255, 0.97);
+    background: rgba(48, 30, 74, 0.8);
+    border-color: rgba(178, 136, 255, 0.45);
+}
+
+.map-preview-canvas-wrap:has(.map-preview-toast.is-copied.is-visible) .map-preview-audio-badge {
+    opacity: 0;
+    transform: translateY(-4px);
+    pointer-events: none;
 }
 
 .map-preview-canvas {
@@ -1124,6 +1163,10 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     background: rgba(214, 224, 238, 0.66);
 }
 
+.map-preview-shortcut-item[hidden] {
+    display: none;
+}
+
 .map-preview-shortcut-item {
     display: flex;
     justify-content: space-between;
@@ -1209,13 +1252,17 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 /* One capsule holding the whole row: volume, the timeline, the time, and
-   speed past a hairline at the end. Everything inside sits on the same 22px
-   line, 3px in from the capsule's edge. */
+   speed past a hairline at the end (with mania's key count before it, behind a
+   hairline of its own). Everything inside sits on the same 22px line, 3px in
+   from the capsule's edge. Each item past the timeline gets a column of its
+   own as it appears, so a hidden one leaves no gap behind. */
 .map-preview-controls {
     --map-preview-capsule-inner-height: 22px;
     position: relative;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-auto-columns: auto;
+    grid-auto-flow: column;
     align-items: center;
     gap: 4px;
     box-sizing: border-box;
@@ -1238,7 +1285,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
    its longest label, "0.55x"), so the timeline keeps its width as the values
    change. */
 .map-preview-speed-control,
-.map-preview-volume-control {
+.map-preview-volume-control,
+.map-preview-keys-control {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -1253,8 +1301,19 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     --map-preview-pill-width: 34px;
 }
 
+/* Fits "10K". */
+.map-preview-keys-control {
+    --map-preview-pill-width: 34px;
+}
+
+.map-preview-keys-control[hidden],
+#mapPreviewKeysDivider[hidden] {
+    display: none;
+}
+
 .map-preview-speed-btn,
-.map-preview-volume-btn {
+.map-preview-volume-btn,
+.map-preview-keys-btn {
     width: var(--map-preview-pill-width);
     height: var(--map-preview-capsule-inner-height);
     padding: 0;
@@ -1276,20 +1335,23 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 /* Hover only lifts it; the accent is reserved for the open popover, so the
    button reads as active rather than merely pointed at. */
 .map-preview-speed-btn:hover,
-.map-preview-volume-btn:hover {
+.map-preview-volume-btn:hover,
+.map-preview-keys-btn:hover {
     color: rgba(238, 236, 245, 0.95);
     border-color: transparent;
     background: rgba(255, 255, 255, 0.1);
 }
 
 .map-preview-speed-btn:focus-visible,
-.map-preview-volume-btn:focus-visible {
+.map-preview-volume-btn:focus-visible,
+.map-preview-keys-btn:focus-visible {
     outline: 1px solid rgba(181, 164, 244, 0.9);
     outline-offset: -1px;
 }
 
 .map-preview-speed-control.is-speed-open .map-preview-speed-btn,
-.map-preview-volume-control.is-volume-open .map-preview-volume-btn {
+.map-preview-volume-control.is-volume-open .map-preview-volume-btn,
+.map-preview-keys-control.is-keys-open .map-preview-keys-btn {
     color: var(--accent-primary);
     background: rgba(140, 102, 255, 0.16);
 }
@@ -1429,7 +1491,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 /* Sits above its button and only exists while the control is open, so it
    never steals room from the timeline row. */
 .map-preview-speed-popover,
-.map-preview-volume-popover {
+.map-preview-volume-popover,
+.map-preview-keys-popover {
     position: absolute;
     bottom: 100%;
     /* Anchored at the edge the button sits against, not centred: speed is at
@@ -1458,7 +1521,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-speed-control.is-speed-open .map-preview-speed-popover,
-.map-preview-volume-control.is-volume-open .map-preview-volume-popover {
+.map-preview-volume-control.is-volume-open .map-preview-volume-popover,
+.map-preview-keys-control.is-keys-open .map-preview-keys-popover {
     opacity: 1;
     visibility: visible;
     transform: translateY(0) scale(1);
@@ -1469,7 +1533,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 .map-preview-speed-panel,
-.map-preview-volume-panel {
+.map-preview-volume-panel,
+.map-preview-keys-panel {
     /* Both panels are one height whatever they hold: the speed panel's reset
        button is the tallest thing in either, and keeps its height even while
        collapsed, so the row is sized to it. */
@@ -1494,7 +1559,8 @@ body.is-firefox-popup .map-preview-toggle-indicator {
    carries on around the tip. Sits over the panel's bottom edge, lined up with
    the middle of its button. */
 .map-preview-speed-panel::after,
-.map-preview-volume-panel::after {
+.map-preview-volume-panel::after,
+.map-preview-keys-panel::after {
     content: '';
     position: absolute;
     bottom: -4px;
@@ -1589,6 +1655,159 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     fill: currentColor;
 }
 
+/* A native mania map's own count: it reads like the others but is not a
+   control, so pointing at it changes nothing. */
+.map-preview-keys-btn.is-locked {
+    cursor: default;
+    opacity: 0.72;
+}
+
+.map-preview-keys-btn.is-locked:hover {
+    color: rgb(176, 171, 192);
+    background: transparent;
+}
+
+/* Two rows, stacked upwards: Auto, 4K and 7K -- the counts nearly everyone
+   plays -- on the bottom one by the button, and every other count one click
+   further up. */
+.map-preview-keys-panel {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    height: auto;
+    padding: 0.25rem;
+}
+
+.map-preview-keys-main {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+/* Unfolds by its height, from nothing to the row's own, rather than popping
+   in: a one-row grid track eased from 0fr to 1fr, which both engines can
+   animate where they cannot animate to `height: auto`. The panel is anchored
+   at its bottom, so it grows upwards with it. Its spacing and rule live
+   inside the clip, so a folded row leaves no gap or hairline behind. */
+.map-preview-keys-more {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 240ms cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 120ms ease;
+}
+
+.map-preview-keys-more.is-open {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transition: grid-template-rows 240ms cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 140ms ease 40ms;
+}
+
+.map-preview-keys-more-clip {
+    min-height: 0;
+    overflow: hidden;
+}
+
+.map-preview-keys-more-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 2px;
+    margin-bottom: 0.25rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .map-preview-keys-more,
+    .map-preview-keys-more.is-open {
+        transition: none;
+    }
+}
+
+.map-preview-keys-option,
+.map-preview-keys-more-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    margin: 0;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: rgb(176, 171, 192);
+    font: inherit;
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: color 120ms ease, background-color 120ms ease;
+}
+
+.map-preview-keys-option {
+    min-width: 30px;
+    /* The same lift the capsule's labels get for Torus' low-sitting figures. */
+    line-height: normal;
+    padding-bottom: 0.1em;
+}
+
+.map-preview-keys-option:hover,
+.map-preview-keys-more-btn:hover {
+    color: rgba(238, 236, 245, 0.95);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.map-preview-keys-option[aria-pressed="true"] {
+    color: var(--accent-primary);
+    background: rgba(140, 102, 255, 0.16);
+}
+
+.map-preview-keys-option:focus-visible,
+.map-preview-keys-more-btn:focus-visible {
+    outline: 1px solid rgba(181, 164, 244, 0.9);
+    outline-offset: -1px;
+}
+
+/* What Auto comes to on this map, quieter than the word itself. */
+.map-preview-keys-auto-count {
+    margin-left: 0.25em;
+    font-weight: 600;
+    opacity: 0.6;
+}
+
+.map-preview-keys-auto-count:empty {
+    display: none;
+}
+
+.map-preview-keys-option--minor {
+    min-width: 0;
+    height: 18px;
+    padding: 0 4px;
+    font-size: 0.64rem;
+    color: var(--text-secondary);
+}
+
+.map-preview-keys-more-btn {
+    flex: 0 0 auto;
+    width: 20px;
+    padding: 0;
+    color: var(--text-secondary);
+}
+
+/* Open, or closed over the count in force, so a forced 5K still shows where
+   it was picked. */
+.map-preview-keys-more-btn[aria-expanded="true"],
+.map-preview-keys-more-btn.has-selection {
+    color: var(--accent-primary);
+}
+
+.map-preview-keys-more-btn svg {
+    width: 10px;
+    height: 3px;
+    fill: currentColor;
+}
+
 /* Track, ticks and (while zoomed) the overview rail are all drawn in the one
    canvas; see src/timeline.js. The capsule around it is its frame, so it has
    no outline or rounding of its own. */
@@ -1625,6 +1844,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
    bottom pad lifts it back; with line-height: normal, Chromium and Firefox
    then agree to within a quarter pixel. */
 .map-preview-speed-btn,
+.map-preview-keys-btn,
 .map-preview-time-label {
     line-height: normal;
     padding-bottom: 0.1em;
@@ -2014,4 +2234,535 @@ html:not(.is-detached-window) .map-preview-popup:not(.is-unsupported) .map-previ
    a bare title and some ascii art, with no way back. */
 .map-preview-popup.is-unsupported .map-preview-info-cached-btn {
     display: none;
+}
+
+/* ---- Several difficulties at once --------------------------------------- */
+
+/* The playfields share the canvas area in a grid. With one difficulty it is a
+   single cell and the preview looks as it always has. */
+.map-preview-panels {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    grid-template-columns: repeat(var(--panel-cols, 1), minmax(0, 1fr));
+    grid-template-rows: repeat(var(--panel-rows, 1), minmax(0, 1fr));
+    gap: 0;
+}
+
+.map-preview-panel {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Each panel draws its own hairline, the same as the frame around them, so
+   the 2px gap reads as one line. The grid behind is the playfield's black:
+   while panels move it shows wherever none has arrived yet, and a lighter
+   one flashed there. */
+html.is-comparing .map-preview-panels {
+    gap: 2px;
+    background: rgb(7, 7, 9);
+}
+
+/* What an opaque playfield canvas comes to, so a panel with nothing drawn yet
+   (loading, or failed) reads as an empty playfield. */
+html.is-comparing .map-preview-panel {
+    background: rgb(7, 7, 9);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* Under the audio badge (z-index 3), which can reach across the top-right
+   panel's label in a narrow window and carries the live status.
+
+   Kept small and see-through, tucked into the corner and capped in width, so
+   it covers as little of the playfield as it can: the map shows through it,
+   and it firms up while the pointer is over its panel. Clicks pass through it
+   to the playfield, all but the remove button's. */
+.map-preview-panel-label {
+    position: absolute;
+    top: 0.3rem;
+    left: 0.3rem;
+    z-index: 2;
+    display: none;
+    align-items: center;
+    gap: 0.22rem;
+    max-width: min(calc(100% - 0.6rem), 11rem);
+    box-sizing: border-box;
+    padding: 0.08rem 0.3rem 0.08rem 0.08rem;
+    border-radius: 999px;
+    background: rgba(14, 14, 18, 0.5);
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 0.56rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    opacity: 0.82;
+    pointer-events: none;
+    transition: opacity 160ms ease, background-color 160ms ease;
+}
+
+/* Keyboard focus only: a clicked pill keeps focus, and :focus-within held the
+   label firm (and its x out) after the pointer had gone. */
+.map-preview-panel:hover .map-preview-panel-label,
+.map-preview-panel-label:has(:focus-visible) {
+    opacity: 1;
+    background: rgba(20, 19, 24, 0.85);
+}
+
+html.is-comparing .map-preview-panel-label {
+    display: inline-flex;
+    animation: map-preview-panel-label-in 220ms cubic-bezier(0.32, 0.72, 0, 1) 120ms both;
+}
+
+/* Labels come in once their panels have mostly arrived. */
+@keyframes map-preview-panel-label-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+
+/* The pill itself: clicking it plays that difficulty's hitsounds. */
+.map-preview-panel-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.22rem;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+    text-align: left;
+    white-space: nowrap;
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.map-preview-panel-select:focus-visible {
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: 1px;
+}
+
+/* A speaker on the difficulty whose hitsounds are playing, and on no other:
+   it moves to whichever pill is clicked. */
+.map-preview-panel-sound {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0;
+    height: 11px;
+    margin: 0 -0.22rem 0 0;
+    overflow: hidden;
+    opacity: 0;
+    color: rgb(255, 255, 255);
+    transition: width 160ms ease, margin 160ms ease, opacity 120ms ease;
+}
+
+.map-preview-panel-sound svg {
+    display: block;
+    overflow: visible;
+}
+
+.map-preview-panel-sound-body {
+    fill: currentColor;
+}
+
+.map-preview-panel-sound-wave {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+}
+
+.map-preview-panel-label.is-sound-source .map-preview-panel-sound {
+    width: 12px;
+    margin: 0 0 0 0.18rem;
+    opacity: 1;
+}
+
+/* Hitsounds are off in settings: the choice still shows, but nothing plays. */
+html.is-hitsounds-off .map-preview-panel-label.is-sound-source .map-preview-panel-sound {
+    opacity: 0.4;
+}
+
+.map-preview-panel-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.map-preview-panel-stars[hidden] + .map-preview-panel-name {
+    padding-left: 0.22rem;
+}
+
+.map-preview-panel-keys {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+}
+
+/* The label's star badge is a size down from the picker's. */
+.map-preview-panel-label .map-preview-panel-stars {
+    min-width: 0;
+    padding: 0.1rem 0.3rem;
+    font-size: 0.52rem;
+}
+
+.map-preview-panel-stars {
+    flex: 0 0 auto;
+    min-width: 2.7rem;
+    box-sizing: border-box;
+    padding: 0.14rem 0.36rem;
+    border-radius: 999px;
+    background: var(--star-bg, #aaaaaa);
+    color: var(--star-fg, rgba(0, 0, 0, 0.82));
+    font-size: 0.58rem;
+    font-weight: 700;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.map-preview-panel-stars[hidden],
+.map-preview-panel-keys[hidden] {
+    display: none;
+}
+
+/* Folded away until the pointer is over the panel (or the button has focus),
+   so the label is no wider than it needs to be the rest of the time. A touch
+   screen has no hover, and keeps it out. */
+.map-preview-panel-remove {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0;
+    height: 13px;
+    margin: 0 -0.22rem 0 -0.08rem;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: auto;
+    cursor: pointer;
+    transition: width 160ms ease, margin 160ms ease, opacity 120ms ease;
+}
+
+/* Out on hover, or when the x itself is tabbed to; not because the pill next
+   to it was clicked, which only moves the speaker. */
+.map-preview-panel:hover .map-preview-panel-remove,
+.map-preview-panel-remove:focus-visible {
+    width: 13px;
+    margin: 0 -0.12rem 0 0;
+    opacity: 1;
+}
+
+@media (hover: none) {
+    .map-preview-panel-remove {
+        width: 13px;
+        margin: 0 -0.12rem 0 0;
+        opacity: 1;
+    }
+}
+
+.map-preview-panel-remove svg {
+    display: block;
+    overflow: visible;
+}
+
+.map-preview-panel-remove path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+}
+
+.map-preview-panel-remove:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-primary);
+}
+
+.map-preview-panel-remove:focus-visible {
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: 1px;
+}
+
+.map-preview-panel-status {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 1rem;
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-align: center;
+    pointer-events: none;
+}
+
+.map-preview-panel-status[hidden] {
+    display: none;
+}
+
+.map-preview-panel.is-loading .map-preview-panel-status {
+    animation: map-preview-panel-pulse 1.2s ease-in-out infinite;
+}
+
+/* A panel whose map is still on its way is a card a shade above the grid, so
+   it can be seen coming out from under the lead before there is anything
+   drawn on it. */
+html.is-comparing .map-preview-panel.is-loading {
+    background: rgb(17, 17, 21);
+}
+
+@keyframes map-preview-panel-pulse {
+    50% { opacity: 0.45; }
+}
+
+/* The picker drops down from its header button, over the playfield. */
+.map-preview-compare-control {
+    position: relative;
+    display: inline-flex;
+}
+
+.map-preview-compare-control[hidden] {
+    display: none;
+}
+
+.map-preview-compare-icon rect {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+}
+
+html.is-comparing .map-preview-compare-btn,
+.map-preview-compare-control.is-compare-open .map-preview-compare-btn {
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.24);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.map-preview-compare-popover {
+    position: absolute;
+    top: 100%;
+    right: -0.25rem;
+    z-index: 40;
+    padding-top: 8px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-6px) scale(0.98);
+    transform-origin: 90% 0%;
+    pointer-events: none;
+    transition: opacity 140ms ease,
+                transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s linear 180ms;
+}
+
+.map-preview-compare-control.is-compare-open .map-preview-compare-popover {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+    transition: opacity 140ms ease,
+                transform 180ms cubic-bezier(0.32, 0.72, 0, 1),
+                visibility 0s;
+}
+
+.map-preview-compare-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    width: 250px;
+    max-height: 280px;
+    box-sizing: border-box;
+    padding: 0.45rem 0.35rem 0.35rem;
+    border-radius: calc(var(--border-radius) - 1px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(36, 34, 42, 0.97);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.42);
+    backdrop-filter: blur(16px);
+    user-select: none;
+}
+
+/* Points up at the button, as the controls row's popovers point down at theirs. */
+.map-preview-compare-panel::before {
+    content: "";
+    position: absolute;
+    top: -5px;
+    right: calc(0.25rem + 12px - 5px);
+    width: 8px;
+    height: 8px;
+    transform: rotate(45deg);
+    border-left: 1px solid rgba(255, 255, 255, 0.12);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(36, 34, 42, 0.97);
+}
+
+.map-preview-compare-heading {
+    margin: 0;
+    padding: 0 0.35rem;
+    color: var(--text-secondary);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.map-preview-compare-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0.15rem 0.35rem;
+    color: var(--text-secondary);
+    font-size: 0.64rem;
+    font-weight: 600;
+}
+
+.map-preview-compare-status[hidden] {
+    display: none;
+}
+
+.map-preview-compare-retry {
+    padding: 0.12rem 0.45rem;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    cursor: pointer;
+}
+
+.map-preview-compare-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.map-preview-compare-option {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    min-height: 26px;
+    box-sizing: border-box;
+    padding: 0.2rem 0.35rem;
+    border: none;
+    border-radius: 0.45rem;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+}
+
+.map-preview-compare-option:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.map-preview-compare-option[aria-pressed="true"] {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.map-preview-compare-option:focus-visible {
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: -2px;
+}
+
+.map-preview-compare-option:disabled {
+    cursor: default;
+}
+
+.map-preview-compare-option:disabled:not(.is-lead) {
+    opacity: 0.45;
+}
+
+.map-preview-compare-option-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.map-preview-compare-option-tag {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-secondary);
+    font-size: 0.6rem;
+}
+
+/* A shown difficulty: a check in a soft green disc, in the green the controls
+   row already uses for "ready". */
+.map-preview-compare-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 999px;
+    background: rgba(124, 232, 158, 0.16);
+    box-shadow: inset 0 0 0 1px rgba(124, 232, 158, 0.28);
+    color: rgb(124, 232, 158);
+    animation: map-preview-compare-check-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.map-preview-compare-check svg {
+    display: block;
+    overflow: visible;
+}
+
+.map-preview-compare-check path {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+@keyframes map-preview-compare-check-in {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .map-preview-compare-popover,
+    .map-preview-compare-control.is-compare-open .map-preview-compare-popover {
+        transition: none;
+        transform: none;
+    }
+
+    .map-preview-panel.is-loading .map-preview-panel-status,
+    html.is-comparing .map-preview-panel-label,
+    .map-preview-compare-check {
+        animation: none;
+    }
+}
+
+html:not(.is-detached-window) body.is-firefox-popup .map-preview-panel-label,
+html:not(.is-detached-window) body.is-firefox-popup .map-preview-compare-check {
+    animation: none;
+}
+
+body.is-firefox-popup .map-preview-compare-popover {
+    transition: none;
 }

@@ -6,6 +6,7 @@ import {
 } from '../parser.js';
 import { findFirstIndexAtOrAfter } from '../core/math.js';
 import { LAZER_BANKS, MINIMAL_BANKS } from './hitsoundStyles.js';
+import { getTaikoDrumVoices, markTaikoFlourishes } from './taikoDrum.js';
 
 // Experimental hitsounds.
 //
@@ -346,12 +347,33 @@ const HITSOUND_STYLE_ROOM = Object.freeze({
 // Long enough not to click when the room changes under a ringing tail.
 const ROOM_CHANGE_SEC = 0.05;
 
+// The taiko drum is one set of voices whatever the style, so each style sets
+// its level, per kind of hit: each lands where the same note does in osu! mode
+// with that style -- a don at its hitnormal, a kat at hitnormal and clap, a big
+// don at hitnormal and finish, a big kat at all three -- so switching a map
+// between osu! and taiko does not jump the volume. Measured K-weighted over
+// each hit's first 150ms, through the soft clipper, against the normal bank.
+// The flourish rides at its big kat's gain. On top of that match, kats sit
+// 1.5dB under it and the don's low body 2dB over (see taikoDrum.js), so the
+// drum thumps rather than clicks.
+const HITSOUND_STYLE_DRUM_GAIN = Object.freeze({
+  argon: Object.freeze({ centre: 0.917, rim: 0.92, strongCentre: 1.143, strongRim: 1.057 }),
+  lazer: Object.freeze({ centre: 2.239, rim: 3.324, strongCentre: 4.372, strongRim: 4.183 }),
+  minimal: Object.freeze({ centre: 0.996, rim: 2.702, strongCentre: 2.133, strongRim: 2.485 }),
+});
+
 const getStyleBanks = (styleId) => (
   Object.hasOwn(HITSOUND_STYLE_BANKS, styleId) ? HITSOUND_STYLE_BANKS[styleId] : SAMPLE_BANKS
 );
 
 const getStyleRoom = (styleId) => (
   Object.hasOwn(HITSOUND_STYLE_ROOM, styleId) ? HITSOUND_STYLE_ROOM[styleId] : ROOM_WET_GAIN
+);
+
+const getStyleDrumGain = (styleId) => (
+  Object.hasOwn(HITSOUND_STYLE_DRUM_GAIN, styleId)
+    ? HITSOUND_STYLE_DRUM_GAIN[styleId]
+    : HITSOUND_STYLE_DRUM_GAIN.argon
 );
 
 const normalizeSampleSet = (value) => {
@@ -417,7 +439,9 @@ const resolveEventSamples = (events, samplePoints, defaultSampleSet) => {
       || beatmapSet
       || SAMPLE_SET_NORMAL;
 
+    // Spread first so a taiko strike keeps which half of the drum it is.
     return {
+      ...event,
       time: event.time,
       hitSound: event.hitSound,
       normalSet,
@@ -438,13 +462,8 @@ const resolveEventSamples = (events, samplePoints, defaultSampleSet) => {
  * Objects that a ruleset conversion has already expanded into one object per
  * sound arrive here as plain circles, so they pass straight through rather than
  * being expanded a second time.
- *
- * Banks and volume are resolved here, once per map, rather than per frame: a
- * slider crossing a greenline gets its nodes resolved individually, because
- * each node is its own event by the time the timing points are walked.
  */
-const buildHitsoundEvents = (objects, { samplePoints = [], defaultSampleSet = 0 } = {}) => {
-  const list = Array.isArray(objects) ? objects : [];
+const collectObjectEvents = (list) => {
   const events = [];
 
   for (const object of list) {
@@ -502,6 +521,97 @@ const buildHitsoundEvents = (objects, { samplePoints = [], defaultSampleSet = 0 
   // Slider nodes interleave with later objects' heads, so the flattened list is
   // not sorted by construction even though the source objects are.
   events.sort((a, b) => a.time - b.time);
+  return events;
+};
+
+// lazer's autoplay strikes a swell this fast at most (TaikoAutoGenerator).
+const SWELL_STRIKE_MS = 50;
+
+/**
+ * A taiko map as lazer's autoplay drums it: one strike per hit, on the rim if
+ * the hit whistles or claps and on the centre otherwise, a big one if it has a
+ * finish. A drumroll is struck on the centre at every tick, from its start to
+ * half a tick past its end. A swell is struck as many times as it needs, centre
+ * and rim in turn, from its start and at most every SWELL_STRIKE_MS, which on a
+ * long swell leaves the rest of it silent, as autoplay does. Neither is ever a
+ * big strike. Native maps and converts both arrive here, so a drumroll may be
+ * either a slider or a converted hold; the conversion gives both their tick
+ * spacing and hit count, and without them they are struck once at their start.
+ */
+const collectTaikoDrumEvents = (list) => {
+  const events = [];
+  const strike = (object, time, drum, strong = false) => {
+    events.push({
+      time,
+      hitSound: Number(object.hitSound) || 0,
+      normalSet: normalizeSampleSet(object.sampleSet),
+      additionSet: normalizeSampleSet(object.additionSet),
+      volume: Number(object.sampleVolume) || 0,
+      drum,
+      strong,
+    });
+    return events.length < MAX_HITSOUND_EVENTS;
+  };
+
+  for (const object of list) {
+    if (!object || !Number.isFinite(object.time)) {
+      continue;
+    }
+    const startTime = object.time;
+    const endTime = Number.isFinite(object.endTime) ? Math.max(startTime, object.endTime) : startTime;
+    let room = true;
+
+    if (object.kind === 'slider' || object.kind === 'hold') {
+      const tickMs = Number(object.taikoDrumrollTickMs);
+      if (!(tickMs > 0)) {
+        room = strike(object, startTime, 'centre');
+      }
+      for (let time = startTime; tickMs > 0 && room && time < endTime + (tickMs / 2); time += tickMs) {
+        room = strike(object, time, 'centre');
+      }
+    } else if (object.kind === 'spinner') {
+      const required = Math.max(1, Math.floor(Number(object.taikoRequiredHits) || 1));
+      const strikeMs = Math.min(SWELL_STRIKE_MS, (endTime - startTime) / required);
+      if (!(strikeMs > 0)) {
+        room = strike(object, startTime, 'centre');
+      }
+      for (let count = 0; strikeMs > 0 && room && count < required; count += 1) {
+        const time = startTime + (count * strikeMs);
+        if (time >= endTime) {
+          break;
+        }
+        room = strike(object, time, count % 2 === 0 ? 'centre' : 'rim');
+      }
+    } else {
+      const hitSound = Number(object.hitSound) || 0;
+      room = strike(
+        object,
+        startTime,
+        (hitSound & (HITSOUND_WHISTLE | HITSOUND_CLAP)) !== 0 ? 'rim' : 'centre',
+        Boolean(object.taikoStrong) || (hitSound & HITSOUND_FINISH) !== 0,
+      );
+    }
+
+    if (!room) {
+      break;
+    }
+  }
+
+  events.sort((a, b) => a.time - b.time);
+  return markTaikoFlourishes(events);
+};
+
+/**
+ * Every sound a map makes, in time order: per object and node for osu!, catch
+ * and mania, and as drum strikes for taiko (`mode` 1).
+ *
+ * Banks and volume are resolved here, once per map, rather than per frame: a
+ * slider crossing a greenline gets its nodes resolved individually, because
+ * each node is its own event by the time the timing points are walked.
+ */
+const buildHitsoundEvents = (objects, { samplePoints = [], defaultSampleSet = 0, mode = 0 } = {}) => {
+  const list = Array.isArray(objects) ? objects : [];
+  const events = mode === 1 ? collectTaikoDrumEvents(list) : collectObjectEvents(list);
   return resolveEventSamples(events, samplePoints, defaultSampleSet);
 };
 
@@ -571,11 +681,15 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   let roomSend = null;
   let roomWet = null;
   let voiceBus = null;
+  // The taiko drum's buses, see ensureDrumBus.
+  let drumBuses = {};
+  let drumGeneration = [];
   let noiseBuffer = null;
   let enabled = false;
   let volume = 0.5;
   let banks = SAMPLE_BANKS;
   let roomLevel = ROOM_WET_GAIN;
+  let drumGain = HITSOUND_STYLE_DRUM_GAIN.argon;
   let cursor = 0;
   let lastTimeMs = 0;
   let hasLoggedLatency = false;
@@ -708,16 +822,56 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     return voiceBus;
   };
 
+  /**
+   * One bus per half of the taiko drum, plus one for flourishes. The drum is
+   * fitted dry, so these skip the room whichever style is chosen.
+   *
+   * A big note chokes its half: lazer stops whatever that half of the drum is
+   * still sounding before it plays the strong voice, so a run of big notes does
+   * not pile up their long tails. The half's bus fades out where the big note
+   * lands, and the big note starts a new one. Flourishes play apart, as lazer
+   * plays them, so the next big kat does not cut one short. Every bus of the
+   * generation is kept, choked or not, so a seek still silences what was queued
+   * ahead of a choke.
+   */
+  const ensureDrumBus = (part) => {
+    if (!drumBuses[part]) {
+      const bus = audioContext.createGain();
+      bus.gain.value = 1;
+      bus.connect(mixBus);
+      drumBuses[part] = bus;
+      drumGeneration.push(bus);
+    }
+    return drumBuses[part];
+  };
+
+  const chokeDrum = (part, atSec) => {
+    const bus = drumBuses[part];
+    if (!bus) {
+      return;
+    }
+    bus.gain.setValueAtTime(1, atSec);
+    bus.gain.linearRampToValueAtTime(0, atSec + VOICE_BUS_FADE_SEC);
+    drumBuses[part] = null;
+  };
+
   const cancelScheduledVoices = () => {
-    if (!audioContext || !voiceBus) {
+    if (!audioContext) {
       return;
     }
 
     const now = audioContext.currentTime;
-    voiceBus.gain.cancelScheduledValues(now);
-    voiceBus.gain.setValueAtTime(voiceBus.gain.value, now);
-    voiceBus.gain.linearRampToValueAtTime(0, now + VOICE_BUS_FADE_SEC);
+    for (const bus of [voiceBus, ...drumGeneration]) {
+      if (!bus) {
+        continue;
+      }
+      bus.gain.cancelScheduledValues(now);
+      bus.gain.setValueAtTime(bus.gain.value, now);
+      bus.gain.linearRampToValueAtTime(0, now + VOICE_BUS_FADE_SEC);
+    }
     voiceBus = null;
+    drumBuses = {};
+    drumGeneration = [];
   };
 
   // A percussive envelope: near-instant but not a step, then an exponential
@@ -830,6 +984,22 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       return 0;
     }
 
+    // A taiko strike plays the drum, whatever the style: see taikoDrum.js.
+    if (event?.drum) {
+      const part = event.drum === 'rim' ? 'rim' : 'centre';
+      const kind = event.strong ? (part === 'rim' ? 'strongRim' : 'strongCentre') : part;
+      const drumScale = volumeScale * drumGain[kind];
+      if (event.strong) {
+        chokeDrum(part, startAt);
+      }
+      const [voice, flourish] = getTaikoDrumVoices(event);
+      let played = playLayers(voice, startAt, ensureDrumBus(part), drumScale);
+      if (flourish) {
+        played += playLayers(flourish, startAt, ensureDrumBus('flourish'), drumScale);
+      }
+      return played;
+    }
+
     const flags = Number.isFinite(event?.hitSound) ? event.hitSound : 0;
     // hitnormal plays under every object and takes the normal bank; the
     // additions layered on top take the addition bank.
@@ -862,9 +1032,10 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
 
   /**
    * Places every voice that falls in the next lookahead window. Call once per
-   * frame with the playhead and the rate the map is running at.
+   * frame with the playhead and the rate the map is running at, and a longer
+   * window when the calls come further apart than frames do.
    */
-  const update = (objects, currentTimeMs, { rate = 1 } = {}) => {
+  const update = (objects, currentTimeMs, { rate = 1, lookaheadSec = SCHEDULE_LOOKAHEAD_SEC } = {}) => {
     if (!Number.isFinite(currentTimeMs)) {
       return 0;
     }
@@ -888,7 +1059,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
 
     const speed = Number.isFinite(rate) && rate > 0 ? rate : 1;
     // The window is wall-clock time, so at 2x it spans twice as much map.
-    const horizonMapMs = currentTimeMs + (SCHEDULE_LOOKAHEAD_SEC * 1000 * speed);
+    const horizonMapMs = currentTimeMs + (lookaheadSec * 1000 * speed);
     if (list[cursor].time > horizonMapMs) {
       // Nothing near enough to place yet. Worth checking before building an
       // AudioContext for a map that has not started making noise.
@@ -953,6 +1124,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   // of the old style, where a resync would cut those hits off mid-tail.
   const setStyle = (styleId) => {
     banks = getStyleBanks(styleId);
+    drumGain = getStyleDrumGain(styleId);
     const nextRoomLevel = getStyleRoom(styleId);
     if (nextRoomLevel === roomLevel) {
       return;
@@ -1097,6 +1269,8 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     roomSend = null;
     roomWet = null;
     voiceBus = null;
+    drumBuses = {};
+    drumGeneration = [];
     noiseBuffer = null;
   };
 
@@ -1128,6 +1302,7 @@ export {
   SAMPLE_BANKS,
   HITSOUND_STYLE_BANKS,
   HITSOUND_STYLE_ROOM,
+  HITSOUND_STYLE_DRUM_GAIN,
   ROOM_WET_GAIN,
   MAX_CATCHUP_MS,
   SCHEDULE_LOOKAHEAD_SEC,

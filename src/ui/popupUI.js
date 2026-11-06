@@ -1,15 +1,18 @@
 import { bindTimelineInput } from './timelineInput.js';
 
-// Speed and volume each show their value on a button that opens a slider above
-// it. Both open and close on click alone: hover-to-open has no equivalent on
-// touch, where there is no pointer to move away. Read back from the class
-// rather than a local flag, so a popover cannot get out of step when loading a
-// map force-closes it.
-const bindPopover = ({ control, button, openClass }) => {
+// Speed, volume and mania's key count each show their value on a button that
+// opens a panel above it. All open and close on click alone: hover-to-open has
+// no equivalent on touch, where there is no pointer to move away. Read back
+// from the class rather than a local flag, so a popover cannot get out of step
+// when loading a map force-closes it. `canOpen` covers a button that stays
+// focusable, to explain itself, but has nothing to open.
+const bindPopover = ({
+  control, button, openClass, canOpen = () => true,
+}) => {
   const isOpen = () => Boolean(control?.classList.contains(openClass));
 
   const setOpen = (open) => {
-    const nextOpen = open && Boolean(control) && !button?.disabled;
+    const nextOpen = open && Boolean(control) && !button?.disabled && canOpen();
     if (nextOpen === isOpen()) {
       return;
     }
@@ -64,7 +67,11 @@ const bindPopupUiEvents = ({
     speedControl,
     speedSlider,
     speedResetButton,
+    keysButton,
+    keysControl,
+    keysMoreButton,
     playfieldCanvas,
+    compareControl,
     timelineCanvas,
     audioStatusBadge,
     infoButtons = [],
@@ -88,15 +95,19 @@ const bindPopupUiEvents = ({
     shortcutsCloseButton,
     recentClearBtn,
     recentPanel,
-    popupToast,
     detachButton,
     followButton,
     timelineTooltip,
   } = elements;
 
   const {
+    dismissComparePicker = () => false,
     cyclePlaybackSpeed,
     applyPlaybackSpeed,
+    selectManiaKeyCount,
+    cycleManiaKeyCount,
+    explainLockedManiaKeyCount,
+    toggleManiaKeysMore,
     togglePlayback,
     showCanvasToggleFeedback,
     toggleDebugPanelOpen,
@@ -195,8 +206,9 @@ const bindPopupUiEvents = ({
       return;
     }
 
-    // The cached-mapsets rows are buttons too.
-    if ((key === ' ' || key === 'Enter') && recentPanel?.contains(event.target)) {
+    // The cached-mapsets rows and the difficulty picker's are buttons too.
+    if ((key === ' ' || key === 'Enter')
+      && (recentPanel?.contains(event.target) || compareControl?.contains(event.target))) {
       return;
     }
 
@@ -234,6 +246,9 @@ const bindPopupUiEvents = ({
         break;
       case 's':
         cyclePlaybackSpeed();
+        break;
+      case 'k':
+        cycleManiaKeyCount?.();
         break;
       case 'm':
         toggleMute();
@@ -315,6 +330,35 @@ const bindPopupUiEvents = ({
 
   const speedPopover = bindPopover({ control: speedControl, button: speedButton, openClass: 'is-speed-open' });
   const volumePopover = bindPopover({ control: volumeControl, button: volumeButton, openClass: 'is-volume-open' });
+  // A native mania map's count is locked; its button says why instead.
+  const isKeysLocked = () => Boolean(keysButton?.classList.contains('is-locked'));
+  const keysPopover = bindPopover({
+    control: keysControl,
+    button: keysButton,
+    openClass: 'is-keys-open',
+    canOpen: () => !isKeysLocked(),
+  });
+
+  keysButton?.addEventListener('click', () => {
+    if (isKeysLocked()) {
+      explainLockedManiaKeyCount?.();
+    }
+  });
+
+  // Stays open after a pick, so 4K and 7K can be flipped between while the
+  // map plays.
+  keysControl?.addEventListener('click', (event) => {
+    const option = event.target.closest?.('.map-preview-keys-option');
+    if (!option || !keysControl.contains(option)) {
+      return;
+    }
+    const { keys } = option.dataset;
+    selectManiaKeyCount?.(keys === 'auto' ? 'auto' : Number(keys));
+  });
+
+  keysMoreButton?.addEventListener('click', () => {
+    toggleManiaKeysMore?.();
+  });
 
   speedSlider?.addEventListener('input', () => {
     applyPlaybackSpeed(Number(speedSlider.value) / 100);
@@ -349,11 +393,7 @@ const bindPopupUiEvents = ({
     const timestamp = `${mins}:${secs}:${ms}`;
 
     navigator.clipboard.writeText(timestamp).then(() => {
-      showPopupToast(`Copied ${timestamp}`);
-      if (popupToast) {
-        popupToast.classList.add('is-copied');
-        registry.addTimeout(setTimeout(() => popupToast.classList.remove('is-copied'), 3700));
-      }
+      showPopupToast(`Copied ${timestamp}`, undefined, 'copied');
     }).catch((err) => {
       addDebugLog(`ui: failed to copy timestamp -> ${err?.message || 'unknown error'}`);
     });
@@ -447,7 +487,7 @@ const bindPopupUiEvents = ({
       setInfoMenuOpen(false);
       return;
     }
-    if (speedPopover.dismiss() || volumePopover.dismiss()) {
+    if (dismissComparePicker() || speedPopover.dismiss() || volumePopover.dismiss() || keysPopover.dismiss()) {
       return;
     }
     // Zooming back out is the step before closing, not instead of it.
@@ -459,4 +499,4 @@ const bindPopupUiEvents = ({
   });
 };
 
-export { bindPopupUiEvents };
+export { bindPopupUiEvents, bindPopover };

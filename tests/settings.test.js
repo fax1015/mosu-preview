@@ -5,12 +5,18 @@ import {
   PREVIEW_SETTING_KEYS,
   DEFAULT_DISABLED_PROVIDERS,
   DEFAULT_HITSOUND_STYLE,
+  DEFAULT_MANIA_KEY_COUNT,
   HITSOUND_STYLES,
+  MANIA_KEY_COUNT_KEY,
+  MANIA_KEY_COUNTS,
+  MANIA_PRIMARY_KEY_COUNTS,
+  PREVIEW_ONLY_SETTING_KEYS,
   applyPreviewSettingChanges,
   hasPreviewSettingChange,
   normalizeAutoFallback,
   normalizeDisabledProviders,
   normalizeHitsoundStyle,
+  normalizeManiaKeyCount,
   normalizePreviewSettings,
   toPreviewSettingsStorage,
 } from '../src/settings.js';
@@ -147,4 +153,62 @@ test('a hitsound style change reaches an open popup, and clearing it restores th
 
   const cleared = applyPreviewSettingChanges(changed, { hitsoundStyle: { oldValue: 'minimal' } });
   assert.equal(cleared.hitsoundStyle, DEFAULT_HITSOUND_STYLE);
+});
+
+test('mania converts keep their own key count until one is chosen', () => {
+  assert.equal(DEFAULT_MANIA_KEY_COUNT, 'auto');
+  assert.equal(normalizePreviewSettings().maniaKeyCount, 'auto');
+  assert.ok(PREVIEW_SETTING_KEYS.includes(MANIA_KEY_COUNT_KEY));
+});
+
+test('a key count is a whole 1K-10K or auto, never the nearest count to junk', () => {
+  for (const keys of MANIA_KEY_COUNTS) {
+    assert.equal(normalizeManiaKeyCount(keys), keys);
+    // The options page's <select> hands its values over as strings.
+    assert.equal(normalizeManiaKeyCount(String(keys)), keys);
+  }
+  for (const value of [0, 11, 18, -4, 4.5, '4.5', '', ' ', 'auto', 'AUTO', '7k', null, undefined, true, {}, [4], NaN]) {
+    assert.equal(normalizeManiaKeyCount(value), 'auto', String(value));
+  }
+});
+
+test('4K and 7K lead the key counts, and every count survives storage', () => {
+  assert.deepEqual([...MANIA_PRIMARY_KEY_COUNTS], [4, 7]);
+  assert.ok(MANIA_PRIMARY_KEY_COUNTS.every((keys) => MANIA_KEY_COUNTS.includes(keys)));
+  for (const keys of [...MANIA_KEY_COUNTS, 'auto']) {
+    const stored = toPreviewSettingsStorage({ maniaKeyCount: keys });
+    assert.equal(stored[MANIA_KEY_COUNT_KEY], keys);
+    assert.equal(normalizePreviewSettings(stored).maniaKeyCount, keys);
+  }
+});
+
+test('a key count picked in one window reaches the others, and clearing it is auto again', () => {
+  const current = normalizePreviewSettings({ maniaScrollSpeed: 20 });
+  assert.ok(hasPreviewSettingChange({ [MANIA_KEY_COUNT_KEY]: { newValue: 4 } }));
+
+  const changed = applyPreviewSettingChanges(current, { [MANIA_KEY_COUNT_KEY]: { oldValue: 'auto', newValue: 7 } });
+  assert.equal(changed.maniaKeyCount, 7);
+  assert.equal(changed.maniaScrollSpeed, 20);
+
+  const cleared = applyPreviewSettingChanges(changed, { [MANIA_KEY_COUNT_KEY]: { oldValue: 7 } });
+  assert.equal(cleared.maniaKeyCount, 'auto');
+});
+
+test('the key count is picked in the preview only, and an options save leaves it alone', () => {
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  assert.ok(!/maniaKeyCount/.test(html), 'the options page has no key count control');
+  assert.ok(PREVIEW_ONLY_SETTING_KEYS.includes(MANIA_KEY_COUNT_KEY));
+
+  // What the options page saves: its form, which has no key count, minus the
+  // preview-only keys. The 4K picked in the preview must not come back as auto.
+  const stored = toPreviewSettingsStorage({ maniaKeyCount: 4 });
+  const formSave = toPreviewSettingsStorage({ ...normalizePreviewSettings(stored), maniaKeyCount: undefined });
+  for (const key of PREVIEW_ONLY_SETTING_KEYS) {
+    delete formSave[key];
+  }
+  const after = normalizePreviewSettings({ ...stored, ...formSave });
+  assert.equal(after.maniaKeyCount, 4);
+
+  const optionsSource = readFileSync(new URL('../src/options.js', import.meta.url), 'utf8');
+  assert.match(optionsSource, /PREVIEW_ONLY_SETTING_KEYS/, 'the options page drops them from its saves');
 });

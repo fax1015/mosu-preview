@@ -274,3 +274,23 @@ export const sendRuntimeMessage = async (message) => {
     });
   });
 };
+
+/**
+ * The key bound to a manifest command: '' when it has none (never set, or taken
+ * by another extension first), null where the browser has no commands at all,
+ * as on Firefox for Android.
+ */
+export const getCommandShortcut = async (name) => {
+  const commandsApi = extensionApi?.commands;
+  if (!commandsApi?.getAll) {
+    return null;
+  }
+
+  const commands = usesPromiseApi
+    ? await commandsApi.getAll()
+    : await new Promise((resolve) => {
+      commandsApi.getAll((list) => resolve(chromeApi?.runtime?.lastError ? [] : (list || [])));
+    });
+  const command = Array.isArray(commands) ? commands.find((entry) => entry?.name === name) : null;
+  return command ? String(command.shortcut || '') : null;
+};

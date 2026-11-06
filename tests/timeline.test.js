@@ -256,3 +256,26 @@ test('the timeline draws on a transparent canvas, so the capsule behind is its b
   timeline.render(1000);
   assert.equal(timeline.canvas.contextOptions?.alpha, true);
 }));
+
+test('a re-converted map swaps its objects without losing the zoom or the song end', () => withWindow(() => {
+  // A mania key count change: the same map, new notes, the playhead unmoved.
+  const timeline = createTimeline();
+  timeline.setSongEnd(58000);
+  timeline.zoomAt(15000, 0.1, 0.5);
+  settle(timeline);
+  const view = timeline.getView();
+
+  const objects = [
+    { kind: 'circle', time: 1000, endTime: 1000, column: 0 },
+    { kind: 'hold', time: 2000, endTime: 9000, column: 3 },
+  ];
+  timeline.setObjects(objects);
+
+  assert.equal(timeline.isZoomed(), true);
+  assert.deepEqual(timeline.getView(), view);
+  assert.equal(timeline.getEndMs(), 58000);
+  assert.equal(timeline.durationMs, 60000);
+  assert.equal(timeline.objects, objects);
+  assert.equal(timeline.maxObjectDurationMs, 7000, 'the longest object is the new hold');
+  assert.equal(timeline.fullDensity, null, 'density is counted again from the new notes');
+}));

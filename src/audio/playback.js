@@ -1,6 +1,6 @@
 import { seekAudioElementToMapTime } from './seek.js';
 
-// Owns the playback mode, the animation frame loop and every seek. Nothing
+// Owns the playback mode, the frame loop and every seek. Nothing
 // outside this module should assign `state.rafId` or `state.playbackMode`.
 //
 // While audio plays, the media element is the only clock: each frame reads
@@ -28,6 +28,13 @@ const AUDIO_SEEK_LANDING_TOLERANCE_MS = 150;
 // on -- and taking its position would teleport the playhead.
 const AUDIO_STALL_RECOVERY_TOLERANCE_MS = 1000;
 
+// A window the browser hides -- minimised, or covered by another one -- gets no
+// animation frames, but the music plays on and the hitsounds are placed from the
+// frame loop. So while hidden the loop runs off a timer instead, which keeps the
+// clock and the hitsounds going with nothing to draw. It ticks about as often
+// as frames come, so the media clock still evens out Firefox's 40ms steps.
+const HIDDEN_TICK_MS = 25;
+
 const createPlaybackController = ({
   state,
   helpers,
@@ -45,6 +52,9 @@ const createPlaybackController = ({
     waitForAudioSeek = async () => true,
     requestFrame = (callback) => requestAnimationFrame(callback),
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
+    isHidden = () => globalThis.document?.visibilityState === 'hidden',
+    requestTick = (callback) => setTimeout(() => callback(performance.now()), HIDDEN_TICK_MS),
+    cancelTick = (tickId) => clearTimeout(tickId),
     // Moves the audio to a time on its own timeline. The default asks the
     // element to seek; a source the browser cannot seek accurately supplies its
     // own (see audio/fullAudioController.js).
@@ -107,16 +117,46 @@ const createPlaybackController = ({
     }
   };
 
+  // Whether the pending `state.rafId` is a hidden-window tick rather than a frame.
+  let loopIsOnTimer = false;
+
   const clearCurrentRaf = () => {
     if (state.rafId !== null) {
-      cancelFrame(state.rafId);
+      if (loopIsOnTimer) {
+        cancelTick(state.rafId);
+      } else {
+        cancelFrame(state.rafId);
+      }
       state.rafId = null;
     }
   };
 
+  const requestLoop = () => {
+    loopIsOnTimer = isHidden();
+    state.rafId = loopIsOnTimer ? requestTick(playbackTick) : requestFrame(playbackTick);
+  };
+
   const ensurePlaybackLoop = () => {
     if (state.rafId === null) {
-      state.rafId = requestFrame(playbackTick);
+      requestLoop();
+    }
+  };
+
+  /**
+   * Call when the page is hidden or shown. A frame asked for before the window
+   * was hidden never comes, so the loop moves to the timer, and takes a tick
+   * straight away: the hitsounds already placed only reach a frame's lookahead
+   * ahead, and a throttled first tick could leave a gap after them.
+   */
+  const refreshPlaybackLoop = () => {
+    if (state.rafId === null || loopIsOnTimer === isHidden()) {
+      return;
+    }
+    clearCurrentRaf();
+    if (isHidden()) {
+      playbackTick(performance.now());
+    } else {
+      requestLoop();
     }
   };
 
@@ -218,7 +258,7 @@ const createPlaybackController = ({
     if (state.playbackMode === 'seeking') {
       // Held on the pending target. The seek's continuation restarts the clock.
       renderFrame();
-      state.rafId = requestFrame(playbackTick);
+      requestLoop();
       return;
     }
 
@@ -248,7 +288,7 @@ const createPlaybackController = ({
 
     renderFrame();
     if (state.rafId === null) {
-      state.rafId = requestFrame(playbackTick);
+      requestLoop();
     }
   };
 
@@ -507,6 +547,7 @@ const createPlaybackController = ({
     releaseAudioClock,
     resumeAudioClockAfterStall,
     ensurePlaybackLoop,
+    refreshPlaybackLoop,
     stopPlayback,
     togglePlayback,
     seekTo,

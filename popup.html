@@ -68,11 +68,14 @@
        preview or the unsupported view, so neither is shown and then swapped. -->
   <div class="map-preview-popup" id="mapPreviewPopup">
     <div class="map-preview-header">
+      <!-- The song's title gets a line to itself; artist and difficulty share the
+           one under it, which is hidden while there is no map. -->
       <div class="map-preview-headings">
-        <div class="map-preview-title-row">
-          <p class="map-preview-title" id="mapPreviewTitle">Map Preview</p>
-          <span class="map-preview-version" id="mapPreviewVersion"></span>
-        </div>
+        <p class="map-preview-title" id="mapPreviewTitle">Map Preview</p>
+        <p class="map-preview-subtitle" id="mapPreviewSubtitle" hidden>
+          <span class="map-preview-artist" id="mapPreviewArtist"></span><span class="map-preview-version"
+            id="mapPreviewVersion"></span>
+        </p>
       </div>
       <div class="map-preview-header-actions">
         <button type="button" class="map-preview-info-btn map-preview-follow-btn is-following" id="mapPreviewFollowBtn"
@@ -89,6 +92,24 @@
               d="M32 32C32 14.3 46.3 0 64 0L320 0c17.7 0 32 14.3 32 32s-14.3 32-32 32l-29.5 0 10.3 134.1c37.1 21.2 65.8 56.4 78.2 99.7l3.8 13.4c2.8 9.7 .8 20-5.2 28.1S362 352 352 352L32 352c-10 0-19.5-4.7-25.5-12.7s-8-18.4-5.2-28.1L5 297.8c12.4-43.3 41-78.5 78.2-99.7L93.5 64 64 64C46.3 64 32 49.7 32 32zM160 400l64 0 0 112c0 17.7-14.3 32-32 32s-32-14.3-32-32l0-112z" />
           </svg>
         </button>
+        <!-- Other difficulties of this set, shown beside this one. -->
+        <div class="map-preview-compare-control" id="mapPreviewCompareControl" hidden>
+          <button type="button" class="map-preview-info-btn map-preview-compare-btn" id="mapPreviewCompareBtn"
+            aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewComparePopover"
+            title="Compare difficulties" aria-label="Compare difficulties" disabled>
+            <svg class="map-preview-compare-icon" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+              <rect x="1.25" y="2.25" width="5.75" height="11.5" rx="1.6" />
+              <rect x="9" y="2.25" width="5.75" height="11.5" rx="1.6" />
+            </svg>
+          </button>
+          <div class="map-preview-compare-popover" id="mapPreviewComparePopover">
+            <div class="map-preview-compare-panel" role="group" aria-label="Difficulties to show">
+              <p class="map-preview-compare-heading">Show beside this one</p>
+              <p class="map-preview-compare-status" id="mapPreviewCompareStatus" hidden></p>
+              <div class="map-preview-compare-list" id="mapPreviewCompareList"></div>
+            </div>
+          </div>
+        </div>
         <button type="button" class="map-preview-info-btn map-preview-detach-btn" id="mapPreviewDetachBtn"
           title="Open in a separate window" aria-label="Open in a separate window" disabled>
           <svg viewBox="0 0 512 512" width="12" height="12" fill="currentColor" aria-hidden="true">
@@ -106,8 +127,28 @@
         </button>
       </div>
     </div>
-    <div class="map-preview-canvas-wrap">
-      <canvas id="mapPreviewCanvas" class="map-preview-canvas" width="1024" height="768"></canvas>
+    <div class="map-preview-canvas-wrap" id="mapPreviewCanvasWrap">
+      <!-- One panel per difficulty; the first is the map you opened. Labels show
+           only once there is more than one. -->
+      <div class="map-preview-panels" id="mapPreviewPanels">
+        <div class="map-preview-panel is-lead">
+          <canvas id="mapPreviewCanvas" class="map-preview-canvas" width="1024" height="768"></canvas>
+          <span class="map-preview-panel-label is-sound-source" id="mapPreviewLeadLabel">
+            <button type="button" class="map-preview-panel-select" aria-pressed="true">
+              <span class="map-preview-panel-sound" aria-hidden="true">
+                <svg viewBox="0 0 20 16" width="11" height="9" aria-hidden="true">
+                  <path class="map-preview-panel-sound-body" d="M1.5 5.5h3L8.5 2v12l-4-3.5h-3z" />
+                  <path class="map-preview-panel-sound-wave" d="M11.3 5.7a3.2 3.2 0 0 1 0 4.6" />
+                  <path class="map-preview-panel-sound-wave" d="M13.9 3.2a6.6 6.6 0 0 1 0 9.6" />
+                </svg>
+              </span>
+              <span class="map-preview-panel-stars" hidden></span>
+              <span class="map-preview-panel-name"></span>
+              <span class="map-preview-panel-keys" hidden></span>
+            </button>
+          </span>
+        </div>
+      </div>
       <button type="button" class="map-preview-audio-badge is-preview" id="mapPreviewAudioBadge">Preview audio</button>
       <div class="map-preview-toast" id="mapPreviewToast" role="status" aria-live="polite"></div>
       <div class="map-preview-toggle-indicator" id="mapPreviewToggleIndicator" aria-hidden="true">
@@ -147,6 +188,58 @@
       <div class="map-preview-timeline-tooltip" id="mapPreviewTimelineTooltip" aria-hidden="true" hidden></div>
       <span class="map-preview-time-label" id="mapPreviewTimeLabel">0:00 / 0:00</span>
       <span class="map-preview-control-divider" aria-hidden="true"></span>
+      <!-- Mania only. Shows the column count; on a convert it opens the key mod
+           picker, on a native mania map it is the map's own count, locked. -->
+      <div class="map-preview-keys-control" id="mapPreviewKeysControl" hidden>
+        <button type="button" class="secondary-button map-preview-keys-btn" id="mapPreviewKeysBtn"
+          aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewKeysPopover">4K</button>
+        <div class="map-preview-keys-popover" id="mapPreviewKeysPopover">
+          <div class="map-preview-keys-panel" role="group" aria-label="Key count">
+            <!-- First, so opening it grows the panel upwards and leaves the
+                 common choices where they were, next to the button. Folded to
+                 no height while closed, and inert, so its buttons are out of
+                 the tab order too. -->
+            <div class="map-preview-keys-more" id="mapPreviewKeysMore" inert>
+              <div class="map-preview-keys-more-clip">
+                <div class="map-preview-keys-more-grid">
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="1"
+                    aria-pressed="false">1K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="2"
+                    aria-pressed="false">2K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="3"
+                    aria-pressed="false">3K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="5"
+                    aria-pressed="false">5K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="6"
+                    aria-pressed="false">6K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="8"
+                    aria-pressed="false">8K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="9"
+                    aria-pressed="false">9K</button>
+                  <button type="button" class="map-preview-keys-option map-preview-keys-option--minor" data-keys="10"
+                    aria-pressed="false">10K</button>
+                </div>
+              </div>
+            </div>
+            <div class="map-preview-keys-main">
+              <button type="button" class="map-preview-keys-option map-preview-keys-option--auto" data-keys="auto"
+                aria-pressed="true" title="The key count the map works out for itself">Auto<span
+                  class="map-preview-keys-auto-count" id="mapPreviewKeysAutoCount"></span></button>
+              <button type="button" class="map-preview-keys-option" data-keys="4" aria-pressed="false">4K</button>
+              <button type="button" class="map-preview-keys-option" data-keys="7" aria-pressed="false">7K</button>
+              <button type="button" class="map-preview-keys-more-btn" id="mapPreviewKeysMoreBtn" aria-expanded="false"
+                aria-controls="mapPreviewKeysMore" title="Other key counts" aria-label="Other key counts">
+                <svg viewBox="0 0 16 4" aria-hidden="true">
+                  <circle cx="2" cy="2" r="1.6" />
+                  <circle cx="8" cy="2" r="1.6" />
+                  <circle cx="14" cy="2" r="1.6" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <span class="map-preview-control-divider" id="mapPreviewKeysDivider" aria-hidden="true" hidden></span>
       <div class="map-preview-speed-control" id="mapPreviewSpeedControl">
         <button type="button" class="secondary-button map-preview-speed-btn" id="mapPreviewSpeedBtn"
           aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewSpeedPopover" disabled>1x</button>
@@ -259,6 +352,12 @@
             aria-label="Close shortcuts menu">×</button>
         </div>
         <div class="map-preview-shortcuts-list">
+          <!-- Filled from the browser's own binding, which the user can change;
+               hidden where there are no extension shortcuts. -->
+          <div class="map-preview-shortcut-item" id="mapPreviewOpenShortcut" hidden>
+            <span class="map-preview-shortcut-key" id="mapPreviewOpenShortcutKey">Alt + Shift + O</span>
+            <span class="map-preview-shortcut-desc">Open the preview</span>
+          </div>
           <div class="map-preview-shortcut-item">
             <span class="map-preview-shortcut-key">Space</span>
             <span class="map-preview-shortcut-desc">Play / Pause</span>
@@ -278,6 +377,10 @@
           <div class="map-preview-shortcut-item">
             <span class="map-preview-shortcut-key">S</span>
             <span class="map-preview-shortcut-desc">Cycle speed</span>
+          </div>
+          <div class="map-preview-shortcut-item">
+            <span class="map-preview-shortcut-key">K</span>
+            <span class="map-preview-shortcut-desc">Cycle mania keys (Auto, 4K, 7K)</span>
           </div>
           <div class="map-preview-shortcut-item">
             <span class="map-preview-shortcut-key">M</span>

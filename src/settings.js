@@ -6,6 +6,7 @@ export const MANIA_SCROLL_SPEED_KEY = 'maniaScrollSpeed';
 export const MANIA_SCROLL_SCALE_WITH_BPM_KEY = 'maniaScaleScrollSpeedWithBpm';
 export const MANIA_SCROLL_DIRECTION_KEY = 'maniaScrollDirection';
 export const MANIA_TIMING_NOTE_COLOURS_KEY = 'maniaTimingNoteColours';
+export const MANIA_KEY_COUNT_KEY = 'maniaKeyCount';
 export const STANDARD_SNAKING_SLIDERS_KEY = 'standardSnakingSliders';
 export const STANDARD_SLIDER_SNAKE_OUT_KEY = 'standardSliderSnakeOut';
 export const STANDARD_SLIDER_END_CIRCLES_KEY = 'standardSliderEndCircles';
@@ -24,6 +25,9 @@ export const DEFAULT_MANIA_SCROLL_SPEED = 28;
 export const DEFAULT_MANIA_SCROLL_SCALE_WITH_BPM = false;
 export const DEFAULT_MANIA_SCROLL_DIRECTION = 'down';
 export const DEFAULT_MANIA_TIMING_NOTE_COLOURS = false;
+// 'auto' leaves a convert at the column count the map itself works out, as
+// osu!lazer does without a key mod.
+export const DEFAULT_MANIA_KEY_COUNT = 'auto';
 export const DEFAULT_STANDARD_SNAKING_SLIDERS = false;
 export const DEFAULT_STANDARD_SLIDER_SNAKE_OUT = false;
 export const DEFAULT_STANDARD_SLIDER_END_CIRCLES = true;
@@ -38,6 +42,12 @@ export const DEFAULT_HITSOUND_STYLE = 'argon';
 // a stored choice is checked against, so the options page does not have to load
 // the synthesiser to validate a dropdown.
 export const HITSOUND_STYLES = Object.freeze(['argon', 'lazer', 'minimal']);
+
+// The key counts a mania convert can be forced to: osu!lazer's 1K-10K mods.
+// 4K and 7K are what nearly every mania player plays, so they get the front of
+// the picker and the rest sit behind it.
+export const MANIA_KEY_COUNTS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+export const MANIA_PRIMARY_KEY_COUNTS = Object.freeze([4, 7]);
 
 export const PROVIDER_PRIORITY_TIERS = Object.freeze({
   PRIMARY: 'primary',
@@ -129,6 +139,7 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   MANIA_SCROLL_SCALE_WITH_BPM_KEY,
   MANIA_SCROLL_DIRECTION_KEY,
   MANIA_TIMING_NOTE_COLOURS_KEY,
+  MANIA_KEY_COUNT_KEY,
   STANDARD_SNAKING_SLIDERS_KEY,
   STANDARD_SLIDER_SNAKE_OUT_KEY,
   STANDARD_SLIDER_END_CIRCLES_KEY,
@@ -140,6 +151,11 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   HITSOUND_VOLUME_KEY,
   HITSOUND_STYLE_KEY,
 ]);
+
+// Settings changed only from the preview itself, with no control on the
+// options page. That page writes its whole form on every save, so it leaves
+// these out; writing the form's default instead would reset them each time.
+export const PREVIEW_ONLY_SETTING_KEYS = Object.freeze([MANIA_KEY_COUNT_KEY]);
 
 export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
   staticWeight: 0.10,
@@ -229,6 +245,14 @@ export const normalizeManiaTimingNoteColours = (value) => (
   normalizeBooleanSetting(value, DEFAULT_MANIA_TIMING_NOTE_COLOURS)
 );
 
+// A whole number of keys from 1 to 10, or 'auto'. Anything else -- a key count
+// lazer has no mod for, a fraction, a hand-edited string -- is 'auto' rather
+// than the nearest count: the map's own layout is the safer guess.
+export const normalizeManiaKeyCount = (value) => {
+  const numeric = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  return Number.isInteger(numeric) && MANIA_KEY_COUNTS.includes(numeric) ? numeric : DEFAULT_MANIA_KEY_COUNT;
+};
+
 export const normalizeStandardSnakingSliders = (value) => (
   normalizeBooleanSetting(value, DEFAULT_STANDARD_SNAKING_SLIDERS)
 );
@@ -300,6 +324,7 @@ export const normalizePreviewSettings = (items = {}) => ({
   maniaTimingNoteColours: normalizeManiaTimingNoteColours(
     items?.[MANIA_TIMING_NOTE_COLOURS_KEY] ?? items?.maniaTimingNoteColours,
   ),
+  maniaKeyCount: normalizeManiaKeyCount(items?.[MANIA_KEY_COUNT_KEY] ?? items?.maniaKeyCount),
   standardSnakingSliders: normalizeStandardSnakingSliders(
     items?.[STANDARD_SNAKING_SLIDERS_KEY] ?? items?.standardSnakingSliders,
   ),
@@ -329,6 +354,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [MANIA_SCROLL_SCALE_WITH_BPM_KEY]: normalized.maniaScaleScrollSpeedWithBpm,
     [MANIA_SCROLL_DIRECTION_KEY]: normalized.maniaScrollDirection,
     [MANIA_TIMING_NOTE_COLOURS_KEY]: normalized.maniaTimingNoteColours,
+    [MANIA_KEY_COUNT_KEY]: normalized.maniaKeyCount,
     [STANDARD_SNAKING_SLIDERS_KEY]: normalized.standardSnakingSliders,
     [STANDARD_SLIDER_SNAKE_OUT_KEY]: normalized.standardSliderSnakeOut,
     [STANDARD_SLIDER_END_CIRCLES_KEY]: normalized.standardSliderEndCircles,
@@ -353,7 +379,7 @@ export const hasPreviewSettingChange = (changes = {}) => (
  * than silently keeping whatever the page had before.
  *
  * Driven by PREVIEW_SETTING_KEYS for the same reason the readers are: the
- * listener used to spell all thirteen keys out by hand, which is how a setting
+ * listener used to spell every key out by hand, which is how a setting
  * added in one place goes missing in another.
  */
 export const applyPreviewSettingChanges = (currentSettings = {}, changes = {}) => {

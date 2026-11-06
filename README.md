@@ -29,7 +29,21 @@ the detached window cannot read the active tab, so the popup passes the beatmap 
 
 hitsounds are available as an experimental option, off by default. every node of a slider sounds, not just its head: the tail and each reverse use their own `edgeSounds` entry from the beatmap, and spinners sound when they finish. the sounds themselves are generated in the browser rather than read from the beatmap's own samples, so custom hitsounds are not reproduced; volume is adjustable in settings, and so is the style: argon (the default), lazer or minimal, modelled on the argon skin, osu!lazer's default hitsounds and the Wintherest skin. none of those skins' samples are shipped; each style is re-made from synthesised layers.
 
+taiko maps play the taiko drum instead, whichever style is chosen: a centre hit for a don, the rim for a kat, the big versions for finishes, and a flourish on runs of big kats, the way osu!lazer's default (argon) skin plays them. like lazer, the drum takes its softer or harder voice from the hit's volume rather than its sample bank, and a big note stops what that half of the drum is still ringing. each hit is about as loud as the same note in osu! mode with the chosen style (a kat as a hitnormal with its clap, a big note with its finish), so switching a map between osu! and taiko does not jump the volume; kats sit a little under that and dons a little over, for more thump. drumrolls are struck at every tick and swells as many times as they need, as lazer's autoplay strikes them. the drum is synthesised too, fitted to lazer's taiko samples, which are not shipped.
+
+mania previews show the key count in the controls row. for a standard map converted to mania it opens a picker, like osu!lazer's key mods: auto (the count the map works out for itself), 4k and 7k up front and every other count from 1k to 10k one click further, also on `k`. the choice is remembered for every convert. mania maps keep their own key count, as they do in lazer.
+
 the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open.
+
+### several difficulties at once
+
+the two-panel button in the header shows other difficulties of the set beside the one you opened, up to four in all, on one clock and one timeline. the list comes from the set's osu.ppy.sh page, with star ratings, and offers what the site lists under that ruleset's tab: its own difficulties and, for taiko, catch and mania, the converts of the standard ones. the preview keeps its size, in the toolbar popup, the detached window and on a phone alike: the difficulties share it, in whichever grid gives each the most room for its shape (in the popup, two side by side and three or four in a 2x2 grid; a tall window stacks them, a wide one lines them up), and every playfield keeps its proportions. the map you opened leads: its hitsounds play, its density fills the timeline, and the added ones are drawn only. a mania convert's key count applies to every convert shown.
+
+what is shown is remembered per set until the browser closes, so reopening the popup, detaching it or following on to another difficulty of the set keeps the same panels; following on to one that is already shown swaps it into the lead. another set or ruleset starts with none.
+
+### media keys
+
+the preview reports to the browser's media controls, with the map's title, artist, difficulty and cover: hardware media keys, the windows media flyout and the android media notification can play, pause and seek it, which is the easy way to pause a detached window that is playing out of sight.
 
 ### shortcuts
 
@@ -41,8 +55,10 @@ the cached mapsets list is reachable from the menu on any page, not just when no
 - `,` / `.` pause and step one frame
 - `[` / `]` nudge playback speed
 - `s` cycle speed, `m` mute, `r` restart
+- `k` cycle a mania convert's key count: auto, 4k, 7k
 - `+` / `-` zoom the timeline in and out around the playhead, `esc` zooms back out
 - hovering the timeline shows the timestamp under the cursor, to the millisecond once zoomed in
+- `alt` + `shift` + `o` opens the preview from any tab. the browser owns this one: change or clear it at `chrome://extensions/shortcuts` (firefox: `about:addons`, manage extension shortcuts). the shortcuts list shows whatever it is set to
 
 ### timeline
 

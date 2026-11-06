@@ -276,7 +276,6 @@ class TimelineRenderer {
   }
 
   setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
-    this.objects = Array.isArray(mapData?.objects) ? mapData.objects : [];
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     this.visualDurationMs = this.durationMs;
     this.durationAnimation = null;
@@ -284,6 +283,19 @@ class TimelineRenderer {
     this.kiaiSections = buildKiaiSections(mapData?.timingControlPoints);
     this.breaks = normaliseBreaks(mapData?.breaks);
     this.timingSections = buildTimingSections(mapData?.timingControlPoints);
+    this.setObjects(mapData?.objects);
+    this.songEndMs = null;
+    this.isFollowSuspended = false;
+    this.resetZoom({ animate: false });
+    this.overviewReveal = 0;
+  }
+
+  /**
+   * The objects alone, for the same map converted again (a mania key count
+   * change): the view, the zoom and the song's end all stay where they are.
+   */
+  setObjects(objects) {
+    this.objects = Array.isArray(objects) ? objects : [];
     // Objects are sorted by start time but may overlap, so finding the ones on
     // screen has to look back by the longest of them.
     this.maxObjectDurationMs = 0;
@@ -294,12 +306,8 @@ class TimelineRenderer {
       this.maxObjectDurationMs = Math.max(this.maxObjectDurationMs, endTime - time);
       this.lastObjectEndMs = Math.max(this.lastObjectEndMs, endTime);
     }
-    this.songEndMs = null;
     this.fullDensity = null;
     this.viewDensityCache = null;
-    this.isFollowSuspended = false;
-    this.resetZoom({ animate: false });
-    this.overviewReveal = 0;
   }
 
   getVisualDuration(now = performance.now()) {

@@ -46,16 +46,16 @@ const createMediaClockSmoother = ({ now = () => performance.now() } = {}) => {
   const read = (audio, rate = 1) => {
     const rawMs = (Number(audio?.currentTime) || 0) * 1000;
     const atMs = now();
-    if (lastReadAtMs !== null) {
-      const gapMs = atMs - lastReadAtMs;
-      if (gapMs >= SAME_TASK_MS && gapMs <= MAX_FRAME_MS) {
-        frameMs = frameMs > 0 ? (frameMs * 0.8) + (gapMs * 0.2) : gapMs;
-      }
+    const gapMs = lastReadAtMs === null ? 0 : atMs - lastReadAtMs;
+    if (gapMs >= SAME_TASK_MS && gapMs <= MAX_FRAME_MS) {
+      frameMs = frameMs > 0 ? (frameMs * 0.8) + (gapMs * 0.2) : gapMs;
     }
     lastReadAtMs = atMs;
     const speed = Number.isFinite(rate) && rate > 0 ? rate : 1;
     const nextIdentity = `${audio?.src ?? ''}|${speed}`;
-    if (!audio || audio.paused || nextIdentity !== identity || lastRawMs === null) {
+    // Across a stall the step it saw is mostly the stall, and carrying that
+    // forward held the clock up to half of it behind -- 50ms, read every 100ms.
+    if (!audio || audio.paused || nextIdentity !== identity || lastRawMs === null || gapMs > MAX_FRAME_MS) {
       return restart(rawMs, atMs, nextIdentity);
     }
 

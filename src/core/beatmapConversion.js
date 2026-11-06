@@ -7,6 +7,8 @@ import { parseModeToken } from './beatmapUrl.js';
 const OSU_WIDTH = 512;
 const TAIKO_VELOCITY_MULTIPLIER = 1.4;
 const SWELL_HIT_MULTIPLIER = 1.65;
+// Below this a drumroll's tick spacing is a corrupt beat length, not a roll.
+const MIN_DRUMROLL_TICK_MS = 10;
 // A dense slider-heavy map can generate a droplet every ~45ms across every
 // slider span. Without a ceiling the converted object list (and the per-frame
 // render scan over it) grows without bound.
@@ -148,26 +150,52 @@ const getManiaConversionSeed = (mapData) => (
     + roundToEven(numberOr(mapData?.approachRate, 5))) | 0
 );
 
-const getManiaKeyCount = (mapData) => {
-  const circleSize = Math.round(numberOr(mapData?.circleSize, 5));
-  const overallDifficulty = Math.round(numberOr(mapData?.overallDifficulty, 5));
-  const objects = Array.isArray(mapData?.objects) ? mapData.objects : [];
-  const endTimeObjects = objects.filter((object) => object.kind === 'slider' || object.kind === 'spinner').length;
-  const specialObjectRatio = objects.length > 0 ? endTimeObjects / objects.length : 0;
+// osu!lazer's 1K-10K mods. Any other forced count is ignored.
+const MIN_MANIA_KEY_MOD = 1;
+const MAX_MANIA_KEY_MOD = 10;
 
-  if (normalizeMode(mapData?.mode) === 3) {
-    return Math.max(1, circleSize);
-  }
-  if (specialObjectRatio < 0.2) {
-    return 7;
-  }
-  if (specialObjectRatio < 0.3 || circleSize >= 5) {
-    return overallDifficulty > 5 ? 7 : 6;
-  }
-  if (specialObjectRatio > 0.6) {
-    return overallDifficulty > 4 ? 5 : 4;
+const isManiaKeyMod = (keyCount) => (
+  Number.isInteger(keyCount) && keyCount >= MIN_MANIA_KEY_MOD && keyCount <= MAX_MANIA_KEY_MOD
+);
+
+const getNativeManiaKeyCount = (mapData) => Math.max(1, roundToEven(Number(mapData?.circleSize) || 4));
+
+/**
+ * The column count osu!lazer's ManiaBeatmapConverter gives a convert with no key
+ * mod. Both roundings are .NET's Math.Round, midpoint-to-even, so CS 4.5 counts
+ * as 4 and OD 4.5 as 4; a map with no objects skips the ratio tests entirely.
+ */
+const getAutoManiaKeyCount = (mapData) => {
+  const circleSize = roundToEven(numberOr(mapData?.circleSize, 5));
+  const overallDifficulty = roundToEven(numberOr(mapData?.overallDifficulty, 5));
+  const objects = Array.isArray(mapData?.objects) ? mapData.objects : [];
+
+  if (objects.length > 0) {
+    const endTimeObjects = objects.filter((object) => object.kind === 'slider' || object.kind === 'spinner').length;
+    const specialObjectRatio = endTimeObjects / objects.length;
+    if (specialObjectRatio < 0.2) {
+      return 7;
+    }
+    if (specialObjectRatio < 0.3 || circleSize >= 5) {
+      return overallDifficulty > 5 ? 7 : 6;
+    }
+    if (specialObjectRatio > 0.6) {
+      return overallDifficulty > 4 ? 5 : 4;
+    }
   }
   return clamp(overallDifficulty + 1, 4, 7);
+};
+
+/**
+ * Columns a map plays in as mania. A native mania map always keeps its own:
+ * lazer's ManiaKeyMod returns early for them, so `keyCount` only reaches
+ * converts, where it replaces the count the converter would have chosen.
+ */
+const getManiaKeyCount = (mapData, { keyCount } = {}) => {
+  if (normalizeMode(mapData?.mode) === 3) {
+    return getNativeManiaKeyCount(mapData);
+  }
+  return isManiaKeyMod(keyCount) ? keyCount : getAutoManiaKeyCount(mapData);
 };
 
 const getManiaStageLayout = (mapData, keys) => {
@@ -353,6 +381,39 @@ const createManiaPatternGenerator = (mapData, keys, random) => {
   return { chooseColumns };
 };
 
+// osu!lazer's DrumRoll: a tick every quarter beat of the timing point the roll
+// starts in, or every third of one when the map's slider tick rate is 3. This
+// is the roll's own, apart from the spacing the converter splits short sliders
+// into hits by.
+const getDrumrollTickMs = (mapData, time) => {
+  const beatLength = Number(getTimingState(mapData, time).beatLength);
+  const tickMs = beatLength / (Number(mapData?.sliderTickRate) === 3 ? 3 : 4);
+  return Number.isFinite(tickMs) && tickMs >= MIN_DRUMROLL_TICK_MS ? tickMs : 0;
+};
+
+const getRequiredSwellHits = (mapData, durationMs) => {
+  const hitsPerSecond = difficultyRange(mapData?.overallDifficulty, 3, 5, 7.5) * SWELL_HIT_MULTIPLIER;
+  return Math.max(1, Math.floor((durationMs / 1000) * hitsPerSecond));
+};
+
+// A native taiko map keeps its own objects, but its drumrolls and swells still
+// need lazer's tick spacing and hit count for the drum to strike them.
+const annotateNativeTaiko = (mapData) => ({
+  ...mapData,
+  objects: (mapData.objects || []).map((object) => {
+    if (object.kind === 'slider') {
+      return { ...object, taikoDrumrollTickMs: getDrumrollTickMs(mapData, object.time) };
+    }
+    if (object.kind === 'spinner') {
+      return {
+        ...object,
+        taikoRequiredHits: getRequiredSwellHits(mapData, Math.max(1, object.endTime - object.time)),
+      };
+    }
+    return object;
+  }),
+});
+
 const convertToTaiko = (mapData) => {
   const convertedObjects = [];
 
@@ -407,6 +468,7 @@ const convertToTaiko = (mapData) => {
           taikoType: 'drumroll',
           taikoTickSpacing: tickSpacing,
           taikoRequiredHits: Math.max(1, Math.ceil(conversionDuration / Math.max(1, tickSpacing))),
+          taikoDrumrollTickMs: getDrumrollTickMs(mapData, source.time),
           hitSound: getSliderEdgeSound(source, 0),
           ...getSliderEdgeSampleSets(source, 0),
         }));
@@ -416,12 +478,10 @@ const convertToTaiko = (mapData) => {
 
     if (source.kind === 'spinner' || source.kind === 'hold') {
       const duration = Math.max(1, source.endTime - source.time);
-      const requiredHitsPerSecond = difficultyRange(mapData.overallDifficulty, 3, 5, 7.5)
-        * SWELL_HIT_MULTIPLIER;
       convertedObjects.push(createConvertedObject(source, {
         kind: 'spinner',
         taikoType: 'swell',
-        taikoRequiredHits: Math.max(1, Math.floor((duration / 1000) * requiredHitsPerSecond)),
+        taikoRequiredHits: getRequiredSwellHits(mapData, duration),
       }));
       continue;
     }
@@ -626,7 +686,7 @@ const buildCatchObjects = (mapData) => {
 };
 
 const normalizeNativeMania = (mapData) => {
-  const keys = Math.max(1, Math.round(Number(mapData.circleSize) || 4));
+  const keys = getNativeManiaKeyCount(mapData);
   const layout = getManiaStageLayout(mapData, keys);
   const normalizedObjects = [];
   for (const source of mapData.objects || []) {
@@ -652,8 +712,9 @@ const normalizeNativeMania = (mapData) => {
   };
 };
 
-const convertToMania = (mapData) => {
-  const keys = getManiaKeyCount(mapData);
+const convertToMania = (mapData, { keyCount } = {}) => {
+  const autoKeys = getAutoManiaKeyCount(mapData);
+  const keys = isManiaKeyMod(keyCount) ? keyCount : autoKeys;
   const random = createLegacyRandom(getManiaConversionSeed(mapData));
   const pattern = createManiaPatternGenerator(mapData, keys, random);
   const convertedObjects = [];
@@ -762,6 +823,10 @@ const convertToMania = (mapData) => {
       sourceMode: 0,
       targetMode: 3,
       keys,
+      // What Auto would give, and the key mod in force if any, so the picker
+      // can show both without converting the map a second time.
+      autoKeys,
+      keyMod: isManiaKeyMod(keyCount) ? keyCount : null,
       stageCount: 1,
       columnsPerStage: keys,
       randomSeed: getManiaConversionSeed(mapData),
@@ -776,7 +841,12 @@ const convertToCatch = (mapData) => ({
   conversion: { sourceMode: 0, targetMode: 2 },
 });
 
-const convertMapForMode = (mapData, requestedMode) => {
+/**
+ * `maniaKeyCount` is a key mod (1-10) for a standard map converted to mania;
+ * anything else, 'auto' included, leaves the converter's own choice. It does
+ * nothing to a native mania map or to any other ruleset.
+ */
+const convertMapForMode = (mapData, requestedMode, { maniaKeyCount } = {}) => {
   const source = cloneMapData(mapData || { objects: [], mode: 0 });
   const targetMode = normalizeMode(requestedMode);
   const sourceMode = normalizeMode(source.mode) ?? 0;
@@ -784,6 +854,7 @@ const convertMapForMode = (mapData, requestedMode) => {
   if (targetMode === null || targetMode === sourceMode) {
     if (sourceMode === 3) return normalizeNativeMania(source);
     if (sourceMode === 2) return { ...source, catchObjects: source.catchObjects || buildCatchObjects(source) };
+    if (sourceMode === 1) return annotateNativeTaiko(source);
     return source;
   }
 
@@ -793,12 +864,13 @@ const convertMapForMode = (mapData, requestedMode) => {
   if (sourceMode !== 0) {
     if (sourceMode === 3) return normalizeNativeMania(source);
     if (sourceMode === 2) return { ...source, catchObjects: source.catchObjects || buildCatchObjects(source) };
+    if (sourceMode === 1) return annotateNativeTaiko(source);
     return source;
   }
 
   if (targetMode === 1) return convertToTaiko(source);
   if (targetMode === 2) return convertToCatch(source);
-  if (targetMode === 3) return convertToMania(source);
+  if (targetMode === 3) return convertToMania(source, { keyCount: maniaKeyCount });
   return source;
 };
 
@@ -806,6 +878,7 @@ export {
   convertMapForMode,
   createLegacyRandom,
   difficultyRange,
+  getAutoManiaKeyCount,
   getConversionDifficulty,
   getManiaConversionSeed,
   getManiaKeyCount,

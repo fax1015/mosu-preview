@@ -1,5 +1,6 @@
 import {
   PROVIDER_OVERRIDE_KEY,
+  PREVIEW_ONLY_SETTING_KEYS,
   PREVIEW_SETTING_KEYS,
   MIN_MANIA_SCROLL_SPEED,
   MAX_MANIA_SCROLL_SPEED,
@@ -57,6 +58,12 @@ const writeSettings = async (settings) => {
     // toPreviewSettingsStorage, so they must not be written separately here —
     // the spread would overwrite them anyway.
     const payload = toPreviewSettingsStorage(settings);
+    // Settings picked in the preview, like the mania key count, have no control
+    // here. Writing the form's default for them would undo the pick on every
+    // save.
+    for (const key of PREVIEW_ONLY_SETTING_KEYS) {
+      delete payload[key];
+    }
 
     // This page has no provider-override control. Only write the key when a
     // caller actually supplied one; otherwise writing a normalized `undefined`

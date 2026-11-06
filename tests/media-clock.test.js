@@ -108,6 +108,19 @@ test('a seek, a new source, a pause or a new speed goes straight to the new read
   assert.equal(rig.read(), rig.audio.currentTime * 1000, 'new speed');
 });
 
+test('reads further apart than frames take the reading as it is', () => {
+  // A hidden window's timer, throttled or late: the step seen across the gap
+  // is the gap, and treating it as a 40ms clock held the estimate ~50ms back.
+  for (const report of [(ms) => ms, fortyMsSteps]) {
+    const rig = createRig({ report });
+    for (let i = 0; i < 100; i += 1) { rig.frame(); rig.read(); }
+    for (let i = 0; i < 20; i += 1) {
+      rig.frame(105 + (i % 3) * 20);
+      assert.equal(rig.read(), rig.audio.currentTime * 1000);
+    }
+  }
+});
+
 test('a reading that lands early holds the clock rather than pulling it back', () => {
   const readings = [0, 40, 80, 100, 160, 200];
   let index = 0;

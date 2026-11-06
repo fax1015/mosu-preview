@@ -205,14 +205,15 @@ test('standard playfield keeps horizontal fit and expands by the full CS radius'
 
   assert.ok(Math.abs(cs5.scale - (Math.min(canvasWidth / 640, canvasHeight / 480))) < 1e-6);
   assert.equal(cs5.scale, highCs.scale, 'CS does not change horizontal zoom');
-  assert.equal(cs5.scaleY, highCs.scaleY, 'the vertical crop uses the reference slider');
+  assert.equal(cs5.scaleY, cs5.scale, 'no vertical stretch');
+  assert.equal(highCs.scaleY, highCs.scale);
   assert.ok(Math.abs(centerX - (canvasWidth / 2)) < 1e-6);
   assert.ok(Math.abs(centerY - ((canvasHeight / 2) + (8 * highCs.scaleY))) < 1e-6);
   assert.equal(cs5.edgePadding, getCircleRadius(5) * cs5.scale);
   assert.equal(highCs.edgePadding, getCircleRadius(10) * highCs.scale);
 });
 
-test('beatmap 5337582 edge-loop slider body leaves four pixels at the top and bottom', () => {
+test('beatmap 5337582 edge-loop slider body stays inside the canvas, top and bottom', () => {
   const canvasWidth = 359;
   const canvasHeight = 280;
   const circleSize = 5.1;
@@ -222,8 +223,8 @@ test('beatmap 5337582 edge-loop slider body leaves four pixels at the top and bo
   const sliderTop = layout.playfieldY + ((-24 / 384) * layout.playfieldHeight) - sliderBodyRadius;
   const sliderBottom = layout.playfieldY + ((392 / 384) * layout.playfieldHeight) + sliderBodyRadius;
 
-  assert.ok(Math.abs(sliderTop - 4) < 0.5);
-  assert.ok(Math.abs(sliderBottom - (canvasHeight - 4)) < 0.5);
+  assert.ok(sliderTop >= 0, `top ${sliderTop}`);
+  assert.ok(sliderBottom <= canvasHeight, `bottom ${sliderBottom}`);
 });
 
 test('standard playfield border expansion shrinks with smaller object radius', () => {
@@ -482,15 +483,20 @@ const withRepeatSlider = (run) => {
     const map = convertMapForMode(parseMapPreviewData(REPEAT_SLIDER_MAP), 0);
     const renderer = new PreviewRenderer(canvas, canvas);
     renderer.setBeatmap(map, 5000);
+    const drawAt = (timeMs) => {
+      log.length = 0;
+      renderer.setTime(timeMs);
+      renderer.renderPlayfield();
+    };
+    const layout = getStandardPlayfieldLayout(512, 384, 4, 0);
+    const toCanvasX = (x) => layout.playfieldX + ((x / 512) * layout.playfieldWidth);
     run({
       renderer,
       slider: map.objects[0],
       // drawReverseIndicator is the only path stroked with exactly two lineTo
       // calls: circles are arcs, and a linear slider body has one.
       reverseArrowsAt: (timeMs) => {
-        log.length = 0;
-        renderer.setTime(timeMs);
-        renderer.renderPlayfield();
+        drawAt(timeMs);
         let arrows = 0;
         let lineTos = 0;
         for (const entry of log) {
@@ -499,6 +505,22 @@ const withRepeatSlider = (run) => {
           else if (entry.call === 'stroke' && lineTos === 2) arrows += 1;
         }
         return arrows;
+      },
+      // Every circle ends on its outline: one stroked arc at each end of the
+      // path per circle drawn there.
+      endCirclesAt: (timeMs) => {
+        drawAt(timeMs);
+        const circles = { atHead: 0, atTail: 0 };
+        let arcX = null;
+        for (const entry of log) {
+          if (entry.call === 'beginPath') arcX = null;
+          else if (entry.call === 'arc') [arcX] = entry.args;
+          else if (entry.call === 'stroke' && arcX !== null) {
+            if (Math.abs(arcX - toCanvasX(64)) < 1e-6) circles.atHead += 1;
+            else if (Math.abs(arcX - toCanvasX(204)) < 1e-6) circles.atTail += 1;
+          }
+        }
+        return circles;
       },
     });
   } finally {
@@ -543,6 +565,36 @@ test('reverse arrows follow lazer SliderEndCircle preempts, not the approach rat
     assert.equal(reverseArrowsAt(2100), 3, 'never more than three at once');
     assert.equal(reverseArrowsAt(2600), 2);
     assert.equal(reverseArrowsAt(3200), 1, 'the last one lingers 300ms past its reverse at 3000');
+  });
+});
+
+test('every reverse sits on an end circle, and the tail waits for its own turn', () => {
+  withRepeatSlider(({ endCirclesAt }) => {
+    // Reverses at 1500 (tail end), 2000 (head end), 2500 and 3000, then the
+    // tail itself at 3500, which counts as a repeat and shows from 2500.
+    assert.equal(endCirclesAt(900).atTail, 1, 'the first reverse alone, not the tail under it');
+    assert.deepEqual(endCirclesAt(1300), { atHead: 1, atTail: 1 });
+    assert.deepEqual(endCirclesAt(1600), { atHead: 1, atTail: 2 }, 'the next one is behind the one just hit');
+    assert.deepEqual(endCirclesAt(2100), { atHead: 2, atTail: 1 });
+    assert.deepEqual(endCirclesAt(2600), { atHead: 1, atTail: 2 }, 'the tail takes over from the last reverse there');
+    assert.deepEqual(endCirclesAt(3400), { atHead: 0, atTail: 1 });
+  });
+});
+
+test('turning slider end circles off leaves the reverse arrows on their own', () => {
+  withRepeatSlider(({ renderer, reverseArrowsAt, endCirclesAt }) => {
+    renderer.setPreviewSettings({ standardSliderEndCircles: false });
+    assert.deepEqual(endCirclesAt(1300), { atHead: 0, atTail: 0 });
+    assert.equal(reverseArrowsAt(1300), 2);
+  });
+});
+
+test('a hit reverse stays where it was while the slider snakes away from it', () => {
+  withRepeatSlider(({ renderer, endCirclesAt }) => {
+    // The last reverse is at the head end at 3000, and the last span then
+    // trims the path from that end.
+    renderer.setPreviewSettings({ standardSliderSnakeOut: true });
+    assert.equal(endCirclesAt(3100).atHead, 1);
   });
 });
 
@@ -619,4 +671,20 @@ Combo2 : 18,124,255
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+test('the standard field keeps its own proportions in any shape of canvas, centred in it', () => {
+  // The preview's own shape, a wide one, a difficulty stacked in the popup,
+  // one beside another in a tall window. A tall canvas used to stretch the
+  // field to 1.9 times its height, a short one squash it a few percent.
+  for (const [width, height] of [[359, 280], [438, 328], [355, 137], [377, 500], [1461, 104]]) {
+    const layout = getStandardPlayfieldLayout(width, height, 4);
+    assert.equal(layout.scaleY, layout.scale, `${width}x${height}`);
+    assert.ok(Math.abs((layout.playfieldWidth / layout.playfieldHeight) - (512 / 384)) < 1e-9);
+    assert.ok(layout.playfieldX >= 0 && layout.playfieldX + layout.playfieldWidth <= width);
+    const viewportHeight = 480 * layout.scale;
+    assert.ok(viewportHeight <= height + 1e-9, 'the 640x480 view fits the height');
+  }
+  const tall = getStandardPlayfieldLayout(377, 500, 4);
+  assert.ok((500 - (480 * tall.scale)) / 2 > 50, 'a tall canvas leaves room above and below');
 });

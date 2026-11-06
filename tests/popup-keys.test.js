@@ -64,6 +64,7 @@ const setup = ({ infoMenuOpen = false, shortcutsMenuOpen = false, renderer = {} 
       seekTo: record('seekTo'),
       restartPreview: record('restartPreview'),
       cyclePlaybackSpeed: record('cyclePlaybackSpeed'),
+      cycleManiaKeyCount: record('cycleManiaKeyCount'),
       applyPlaybackSpeed: record('applyPlaybackSpeed'),
       applyAudioVolume: record('applyAudioVolume'),
       toggleMute: record('toggleMute'),
@@ -110,6 +111,18 @@ test('a plain shortcut still drives the preview', async () => {
     await press(' ');
     await press('r');
     assert.deepEqual(names(calls).filter((name) => name !== 'showCanvasToggleFeedback'), ['togglePlayback', 'restartPreview']);
+  } finally {
+    restore();
+  }
+});
+
+test('K steps the mania key count, and Ctrl+K is left to the browser', async () => {
+  const { calls, press, restore } = setup();
+  try {
+    await press('k');
+    await press('K', { shiftKey: true });
+    await press('k', { ctrlKey: true });
+    assert.deepEqual(names(calls), ['cycleManiaKeyCount', 'cycleManiaKeyCount']);
   } finally {
     restore();
   }

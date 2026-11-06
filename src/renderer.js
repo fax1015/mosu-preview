@@ -29,11 +29,6 @@ const OSU_FIELD_OFFSET_X = (OSU_VIEW_WIDTH - OSU_WIDTH) / 2;
 const OSU_FIELD_OFFSET_Y = (OSU_VIEW_HEIGHT - OSU_HEIGHT) / 2;
 // Match the slight downward field placement observed in osu!'s legacy layout.
 const OSU_FIELD_VERTICAL_SHIFT = 8;
-// The CS5.1 edge-loop slider at 02:51 in beatmap 5337582 spans y=-24..392.
-const OSU_CALIBRATION_SLIDER_CS = 5.1;
-const OSU_CALIBRATION_SLIDER_MIN_Y = -24;
-const OSU_CALIBRATION_SLIDER_MAX_Y = 392;
-const OSU_CALIBRATION_EDGE_BREATHING_ROOM_PX = 4;
 const STANDARD_PLAYFIELD_BACKGROUND = 'rgba(19, 21, 26, 0.95)';
 // osu!lazer: StackOffset = StackHeight * Scale * -6.4, with Scale = radius/64,
 // so one stack level is worth radius/10 osu! pixels — 4.5px at CS 2 down to
@@ -111,20 +106,11 @@ const getStandardPlayfieldLayout = (canvasWidth, canvasHeight, circleSize, paddi
     availableWidth / OSU_VIEW_WIDTH,
     availableHeight / OSU_VIEW_HEIGHT,
   );
-  const calibrationCircleRadius = getCircleRadius(OSU_CALIBRATION_SLIDER_CS) * scale;
-  const calibrationCircleDrawRadius = Math.max(
-    0.5,
-    (calibrationCircleRadius * DRAWN_CIRCLE_RADIUS_SCALE) - DRAWN_CIRCLE_INSET_PX,
-  );
-  const calibrationSliderBodyRadius = Math.max(2, calibrationCircleDrawRadius * 0.95);
-  const calibrationHalfSpanY = (OSU_CALIBRATION_SLIDER_MAX_Y - OSU_CALIBRATION_SLIDER_MIN_Y) / 2;
-  // Increase only vertical scale so the reference slider body meets both edges;
-  // horizontal scale and hit-circle size remain at the fixed 640x480 fit.
-  const scaleY = Math.max(
-    0.01,
-    ((availableHeight / 2) - calibrationSliderBodyRadius - OSU_CALIBRATION_EDGE_BREATHING_ROOM_PX)
-      / calibrationHalfSpanY,
-  );
+  // The field is drawn in its own proportions, whatever shape the canvas is,
+  // and sits centred in it. It used to be stretched or squashed vertically so a
+  // reference slider met both edges: a few percent in the preview's own shape,
+  // and nearly double in a tall cell. Kept as a field of its own for callers.
+  const scaleY = scale;
   const playfieldWidth = OSU_WIDTH * scale;
   const playfieldHeight = OSU_HEIGHT * scaleY;
   const viewportWidth = OSU_VIEW_WIDTH * scale;
@@ -176,6 +162,20 @@ const formatTime = (ms) => {
 };
 
 const withAlpha = (rgb, alpha) => `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${clamp(alpha, 0, 1)})`;
+
+// Objects are sorted by start time but may overlap, so the visible-window
+// search has to look back by the longest object in the map to avoid skipping a
+// long slider or spinner that started before the window.
+const getMaxObjectDurationMs = (objects) => {
+  let longest = 0;
+  for (const object of (objects || [])) {
+    const duration = (Number(object?.endTime) || 0) - (Number(object?.time) || 0);
+    if (duration > longest) {
+      longest = duration;
+    }
+  }
+  return longest;
+};
 
 const drawRoundedRect = (ctx, x, y, width, height, radius, stroke = false) => {
   const safeRadius = Math.max(0, Math.min(radius, Math.abs(width) / 2, Math.abs(height) / 2));
@@ -489,7 +489,40 @@ const drawReverseIndicator = (ctx, position, direction, size, alpha = 1) => {
   ctx.stroke();
 };
 
-const drawComboNumber = (ctx, text, x, y, radius, alpha = 1) => {
+// Where a slider's path stops at one end, and which way it runs back from there.
+const getPathEnd = (points, atEnd) => {
+  const last = points.length - 1;
+  const position = atEnd ? points[last] : points[0];
+  const next = atEnd ? points[Math.max(0, last - 1)] : points[Math.min(1, last)];
+  return { position, direction: { x: next.x - position.x, y: next.y - position.y } };
+};
+
+const drawSliderEndCircle = (ctx, position, radius, combo, alpha) => {
+  const outlineWidth = Math.max(1.3, radius * 0.1);
+
+  ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, alpha * STANDARD_OBJECT_SHADOW_ALPHA);
+  ctx.beginPath();
+  ctx.arc(position.x, position.y, radius * STANDARD_OBJECT_SHADOW_SCALE, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, clamp((alpha * 0.8) + 0.012, 0, 0.78));
+  ctx.beginPath();
+  ctx.arc(position.x, position.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = withAlpha(combo, clamp(alpha * 0.56, 0, 1));
+  ctx.beginPath();
+  ctx.arc(position.x, position.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, clamp((alpha * 1.12) + 0.03, 0, 1));
+  ctx.lineWidth = outlineWidth;
+  ctx.beginPath();
+  ctx.arc(position.x, position.y, Math.max(0.5, radius - (outlineWidth * 0.5)), 0, Math.PI * 2);
+  ctx.stroke();
+};
+
+const drawComboNumber =(ctx, text, x, y, radius, alpha = 1) => {
   if (!text) {
     return;
   }
@@ -855,9 +888,13 @@ const composeFollowLineLayers = (target, { lines, objects }) => {
 };
 
 export class PreviewRenderer {
-  constructor(playfieldCanvas, timelineCanvas) {
+  // Without a timeline canvas it draws the playfield only: the difficulties
+  // shown next to the one you opened share that one's timeline, and draw to an
+  // ordinary canvas rather than a low-latency one (see core/canvas.js).
+  constructor(playfieldCanvas, timelineCanvas = null, { lowLatency = true } = {}) {
     this.playfieldCanvas = playfieldCanvas;
-    this.timeline = new TimelineRenderer(timelineCanvas);
+    this.timeline = timelineCanvas ? new TimelineRenderer(timelineCanvas) : null;
+    this.lowLatencyPlayfield = lowLatency;
     this.mapData = null;
     this.durationMs = 0;
     this.currentTimeMs = 0;
@@ -885,21 +922,12 @@ export class PreviewRenderer {
   setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
     this.mapData = mapData;
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
-    this.timeline.setBeatmap(mapData, this.durationMs, { previewTimeMs });
+    this.timeline?.setBeatmap(mapData, this.durationMs, { previewTimeMs });
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours.map(normalizeComboColour)
       : DEFAULT_COLOURS;
 
-    // Objects are sorted by start time but may overlap, so the visible-window
-    // search has to look back by the longest object in the map to avoid
-    // skipping a long slider or spinner that started before the window.
-    this.maxObjectDurationMs = 0;
-    for (const object of (mapData?.objects || [])) {
-      const duration = (Number(object?.endTime) || 0) - (Number(object?.time) || 0);
-      if (duration > this.maxObjectDurationMs) {
-        this.maxObjectDurationMs = duration;
-      }
-    }
+    this.maxObjectDurationMs = getMaxObjectDurationMs(mapData?.objects);
 
     if (Array.isArray(this.mapData?.objects)) {
       assignComboIndices(this.mapData.objects, this.mapData.mode ?? 0);
@@ -932,18 +960,29 @@ export class PreviewRenderer {
     }
   }
 
+  /**
+   * The same mania map converted again at another key count. Only the objects
+   * change, so the timeline keeps its zoom and the full track's length rather
+   * than starting over the way a new map does.
+   */
+  replaceManiaObjects(mapData) {
+    this.mapData = mapData;
+    this.maxObjectDurationMs = getMaxObjectDurationMs(mapData?.objects);
+    this.timeline?.setObjects(mapData?.objects);
+  }
+
   isTimelineDurationAnimating() {
-    return this.timeline.isDurationAnimating();
+    return Boolean(this.timeline?.isDurationAnimating());
   }
 
   setDuration(durationMs, { animate = false } = {}) {
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
-    return this.timeline.setDuration(this.durationMs, { animate });
+    return Boolean(this.timeline?.setDuration(this.durationMs, { animate }));
   }
 
   setTime(ms) {
     this.currentTimeMs = clamp(ms, 0, this.durationMs || 1);
-    this.timeline.setTime(this.currentTimeMs);
+    this.timeline?.setTime(this.currentTimeMs);
   }
 
   setPreviewSettings(settings = {}) {
@@ -1246,7 +1285,7 @@ export class PreviewRenderer {
   }
 
   renderTimeline() {
-    this.timeline.render();
+    this.timeline?.render();
   }
 
   renderTaiko(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight) {
@@ -1808,9 +1847,12 @@ export class PreviewRenderer {
       1,
       20,
     );
-    const laneAreaWidth = playfieldWidth * 0.62;
+    // Four keys and up share the stage width between them. Fewer keep 4K's
+    // lane width and leave the stage narrower, as lazer's fixed-width columns
+    // do: a 1K stage spanning the whole field would be one wall of a note.
+    const laneWidth = (playfieldWidth * 0.62) / Math.max(keys, 4);
+    const laneAreaWidth = laneWidth * keys;
     const laneAreaX = playfieldX + ((playfieldWidth - laneAreaWidth) / 2);
-    const laneWidth = laneAreaWidth / keys;
     const scrollsUp = this.maniaScrollDirection === 'up';
     const receptorY = scrollsUp
       ? playfieldY + (playfieldHeight * 0.12)
@@ -2027,7 +2069,7 @@ export class PreviewRenderer {
   }
 
   renderPlayfield() {
-    const { ctx, width, height } = getCanvasContext(this.playfieldCanvas);
+    const { ctx, width, height } = getCanvasContext(this.playfieldCanvas, { lowLatency: this.lowLatencyPlayfield });
 
     ctx.fillStyle = 'rgba(8, 8, 10, 0.85)';
     ctx.fillRect(0, 0, width, height);
@@ -2333,16 +2375,9 @@ export class PreviewRenderer {
           }
 
           if ((object.slides || 1) > 1) {
-            const startPoint = pathPoints[0];
-            const endPoint = pathPoints[pathPoints.length - 1];
-            const startDir = {
-              x: pathPoints[Math.min(1, pathPoints.length - 1)].x - startPoint.x,
-              y: pathPoints[Math.min(1, pathPoints.length - 1)].y - startPoint.y,
-            };
-            const endDir = {
-              x: pathPoints[Math.max(0, pathPoints.length - 2)].x - endPoint.x,
-              y: pathPoints[Math.max(0, pathPoints.length - 2)].y - endPoint.y,
-            };
+            const fullPathPoints = sliderDrawPointsOsu === sliderRenderPathPoints
+              ? pathPoints
+              : sliderRenderPathPoints.map((p) => toCanvas(p.x, p.y));
             const indicatorSize = Math.max(5, drawnCircleRadius * 0.45);
             const { slides, spanDuration } = getSliderSpanTiming(object);
             // Generate a reverse indicator for each span boundary.
@@ -2368,6 +2403,7 @@ export class PreviewRenderer {
 
               let reverseAlpha = 0;
               let reverseSize = indicatorSize;
+              let reverseCircleRadius = drawnCircleRadius;
 
               if (elapsed >= 0) {
                 // Hit Animation: expand and fade out (lazer uses Math.min(300, spanDuration))
@@ -2378,13 +2414,14 @@ export class PreviewRenderer {
                 const hitProgress = clamp(elapsed / animDuration, 0, 1);
                 const hitEaseOut = 1 - ((1 - hitProgress) * (1 - hitProgress));
 
-                reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * (1 - hitEaseOut);
+                reverseAlpha = OBJECT_VISUAL_MAX_ALPHA * (1 - hitEaseOut);
                 reverseSize = indicatorSize * (1.0 + (0.5 * hitEaseOut)); // Expands 1.0 -> 1.5
+                reverseCircleRadius = drawnCircleRadius * (1 + (SLIDER_HEAD_HIT_SCALE_BOOST * hitEaseOut));
               } else {
                 const fadeInProgress = reverseFadeInMs > 0
                   ? clamp((reversePreempt + elapsed) / reverseFadeInMs, 0, 1)
                   : 1;
-                reverseAlpha = (OBJECT_VISUAL_MAX_ALPHA * 0.95) * fadeInProgress;
+                reverseAlpha = OBJECT_VISUAL_MAX_ALPHA * fadeInProgress;
 
                 // Continuous Heartbeat Pulse Animation
                 // 300ms loop: 0-35ms snaps out to 1.3x, 35-285ms smoothly shrinks back to 1.0x.
@@ -2411,10 +2448,12 @@ export class PreviewRenderer {
                 continue;
               }
 
+              // Lazer leaves a hit repeat where it was: on the last span the
+              // snake pulls away from this end and would drag it along.
               sliderReverseIndicators.push({
-                position: isAtEnd ? endPoint : startPoint,
-                direction: isAtEnd ? endDir : startDir,
+                ...getPathEnd(elapsed >= 0 ? fullPathPoints : pathPoints, isAtEnd),
                 size: reverseSize,
+                circleRadius: reverseCircleRadius,
                 alpha: reverseAlpha,
               });
             }
@@ -2470,41 +2509,27 @@ export class PreviewRenderer {
         || this.currentTimeMs < object.time
         || sliderBallVisible;
       if (object.kind === 'slider' && this.standardSliderEndCircles && sliderTailCanvasPoint) {
-        ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, objectRenderAlpha * STANDARD_OBJECT_SHADOW_ALPHA);
-        ctx.beginPath();
-        ctx.arc(
-          sliderTailCanvasPoint.x,
-          sliderTailCanvasPoint.y,
-          drawnCircleRadius * STANDARD_OBJECT_SHADOW_SCALE,
-          0,
-          Math.PI * 2,
-        );
-        ctx.fill();
-
-        ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectBodyBaseAlpha);
-        ctx.beginPath();
-        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, drawnCircleRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = withAlpha(combo, objectBodyComboAlpha);
-        ctx.beginPath();
-        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, drawnCircleRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, objectOutlineAlpha);
-        ctx.lineWidth = objectOutlineWidth;
-        ctx.beginPath();
-        ctx.arc(sliderTailCanvasPoint.x, sliderTailCanvasPoint.y, objectOutlineRadius, 0, Math.PI * 2);
-        ctx.stroke();
+        // On a repeat slider the tail is one more SliderEndCircle: it appears
+        // two spans ahead like the reverses do, rather than stacking on their
+        // circles from the start.
+        const { slides, spanDuration } = getSliderSpanTiming(object);
+        if (slides === 1 || this.currentTimeMs >= object.endTime - (spanDuration * 2)) {
+          drawSliderEndCircle(ctx, sliderTailCanvasPoint, drawnCircleRadius, combo, objectRenderAlpha);
+        }
       }
 
-      for (const indicator of sliderReverseIndicators) {
+      // Latest first: each repeat comes in behind the one still at its end.
+      for (let i = sliderReverseIndicators.length - 1; i >= 0; i -= 1) {
+        const indicator = sliderReverseIndicators[i];
+        if (this.standardSliderEndCircles) {
+          drawSliderEndCircle(ctx, indicator.position, indicator.circleRadius, combo, indicator.alpha);
+        }
         drawReverseIndicator(
           ctx,
           indicator.position,
           indicator.direction,
           indicator.size,
-          indicator.alpha,
+          indicator.alpha * 0.95,
         );
       }
 

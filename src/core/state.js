@@ -11,6 +11,9 @@ const createInitialState = ({ audio = null } = {}) => {
   return {
     metadata: null,
     mapData: null,
+    // The parsed map before any ruleset conversion, kept so a key count change
+    // can convert it again without fetching or parsing it a second time.
+    sourceMapData: null,
     mappedDurationMs: 0,
     durationMs: 0,
     currentTimeMs: 0,
@@ -81,6 +84,7 @@ const createInitialState = ({ audio = null } = {}) => {
     maniaScaleScrollSpeedWithBpm: normalizedSettings.maniaScaleScrollSpeedWithBpm,
     maniaScrollDirection: normalizedSettings.maniaScrollDirection,
     maniaTimingNoteColours: normalizedSettings.maniaTimingNoteColours,
+    maniaKeyCount: normalizedSettings.maniaKeyCount,
     standardSnakingSliders: normalizedSettings.standardSnakingSliders,
     standardSliderSnakeOut: normalizedSettings.standardSliderSnakeOut,
     standardSliderEndCircles: normalizedSettings.standardSliderEndCircles,

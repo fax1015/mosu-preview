@@ -205,6 +205,24 @@ const renderAll = ({ volume = 100, style } = {}) => {
   return { ...mock, placed, events, player };
 };
 
+test('a longer lookahead places hits that much further ahead', () => {
+  // A hidden window's loop ticks far less often than frames do, so it asks for
+  // two seconds rather than a third of one.
+  const events = [0, 500, 1000, 1500, 2000, 2500].map((time) => buildEvent(time, 0, SAMPLE_SET_NORMAL));
+  const placedWithin = (options) => {
+    const mock = createMockAudioContext();
+    function MockAudioContext() { return mock.context; }
+    const player = createHitsoundPlayer({ getAudioContext: MockAudioContext });
+    player.setEnabled(true);
+    player.syncTo(events, 0);
+    return player.update(events, 0, options);
+  };
+
+  assert.equal(placedWithin({ rate: 1 }), 1, 'a frame only reaches the next third of a second');
+  assert.equal(placedWithin({ rate: 1, lookaheadSec: 2 }), 5);
+  assert.equal(placedWithin({ rate: 2, lookaheadSec: 1 }), 5, 'the window is wall clock, so 2x covers twice the map');
+});
+
 test('every voice in every bank schedules without breaking a Web Audio rule', () => {
   for (const [style] of ALL_STYLES) {
     const { violations, placed, events } = renderAll({ style });

@@ -5,10 +5,13 @@ import {
   PROVIDER_OVERRIDE_KEY,
   AUDIO_VOLUME_KEY,
   DEFAULT_AUDIO_VOLUME,
+  MANIA_KEY_COUNT_KEY,
+  MANIA_PRIMARY_KEY_COUNTS,
   PREVIEW_SETTING_KEYS,
   POPUP_SIZE_PRESETS,
   applyPreviewSettingChanges,
   hasPreviewSettingChange,
+  normalizeManiaKeyCount,
   normalizeProviderOverride,
   normalizePreviewSettings,
 } from './settings.js';
@@ -16,6 +19,7 @@ import {
   addRuntimeMessageListener,
   addStorageChangedListener,
   createTab,
+  getCommandShortcut,
   hasStorageArea,
   openOptionsPage,
   queryTabs,
@@ -53,9 +57,12 @@ import { buildHitsoundEvents, createHitsoundPlayer } from './audio/hitsounds.js'
 import { createAudioBadgeController } from './ui/audioBadge.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
-import { bindPopupUiEvents } from './ui/popupUI.js';
+import { bindPopupUiEvents, bindPopover } from './ui/popupUI.js';
 import { attachOverlayScrollbar } from './ui/overlayScrollbar.js';
 import { createUnsupportedViewController } from './ui/unsupportedView.js';
+import { createMediaSessionController } from './ui/mediaSession.js';
+import { createComparePanels } from './ui/comparePanels.js';
+import { parseBeatmapsetPage } from './core/beatmapsetPage.js';
 import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from './core/playbackSpeed.js';
 
 // Resolved and applied before anything else renders: the detached flag decides
@@ -92,12 +99,41 @@ const IS_MOBILE_VIEW = /android|mobile|tablet|ipad|iphone|ipod/i.test(globalThis
 const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
 const versionLine = document.querySelector('#mapPreviewVersion');
+const artistLine = document.querySelector('#mapPreviewArtist');
+const subtitleLine = document.querySelector('#mapPreviewSubtitle');
+
+// The second header line, artist and difficulty; empty and hidden without a map.
+const setHeaderSubtitle = ({ artist = '', version = '' } = {}) => {
+  if (artistLine) {
+    artistLine.textContent = artist;
+    artistLine.title = artist;
+  }
+  versionLine.textContent = version;
+  versionLine.title = version;
+  if (subtitleLine) {
+    subtitleLine.hidden = !artist && !version;
+  }
+};
 const timeLabel = document.querySelector('#mapPreviewTimeLabel');
 const speedButton = document.querySelector('#mapPreviewSpeedBtn');
 const speedControl = document.querySelector('#mapPreviewSpeedControl');
 const speedSlider = document.querySelector('#mapPreviewSpeedSlider');
 const speedResetButton = document.querySelector('#mapPreviewSpeedResetBtn');
+const keysControl = document.querySelector('#mapPreviewKeysControl');
+const keysButton = document.querySelector('#mapPreviewKeysBtn');
+const keysDivider = document.querySelector('#mapPreviewKeysDivider');
+const keysMore = document.querySelector('#mapPreviewKeysMore');
+const keysMoreButton = document.querySelector('#mapPreviewKeysMoreBtn');
+const keysAutoCount = document.querySelector('#mapPreviewKeysAutoCount');
+const keysOptions = [...document.querySelectorAll('.map-preview-keys-option')];
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
+const canvasWrap = document.querySelector('#mapPreviewCanvasWrap');
+const panelsElement = document.querySelector('#mapPreviewPanels');
+const leadPanelLabel = document.querySelector('#mapPreviewLeadLabel');
+const compareControl = document.querySelector('#mapPreviewCompareControl');
+const compareButton = document.querySelector('#mapPreviewCompareBtn');
+const compareList = document.querySelector('#mapPreviewCompareList');
+const compareStatus = document.querySelector('#mapPreviewCompareStatus');
 const timelineCanvas = document.querySelector('#mapPreviewTimeline');
 const timelineTooltip = document.querySelector('#mapPreviewTimelineTooltip');
 const volumeSlider = document.querySelector('#mapPreviewVolume');
@@ -137,6 +173,20 @@ const shortcutsButton = document.querySelector('#mapPreviewHelpBtn');
 const shortcutsModal = document.querySelector('#mapPreviewShortcutsModal');
 const shortcutsBackdrop = document.querySelector('#mapPreviewShortcutsBackdrop');
 const shortcutsCloseButton = document.querySelector('#mapPreviewShortcutsCloseBtn');
+const openShortcutItem = document.querySelector('#mapPreviewOpenShortcut');
+const openShortcutKey = document.querySelector('#mapPreviewOpenShortcutKey');
+
+// The browser owns this binding and the user can change or clear it, so the row
+// reads it rather than repeating the manifest's suggestion.
+getCommandShortcut('_execute_action').then((shortcut) => {
+  if (shortcut === null || !openShortcutItem || !openShortcutKey) {
+    return;
+  }
+  openShortcutKey.textContent = shortcut
+    ? shortcut.split('+').map((key) => key.trim()).filter(Boolean).join(' + ')
+    : 'Not set';
+  openShortcutItem.hidden = false;
+}).catch(() => {});
 
 const recentPanel = document.querySelector('#mapPreviewRecentPanel');
 const recentList = document.querySelector('#mapPreviewRecentList');
@@ -192,11 +242,24 @@ const setModalShellVisible = (modalShell, isVisible) => {
 };
 
 const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
+// Assigned once the playback controller exists, which its actions need. Until
+// then there is nothing playing for it to report.
+let mediaSessionController = null;
+// The other difficulties shown beside this one; assigned once the loaders it
+// uses are declared. The lead's own length is kept apart from theirs, so the
+// timeline can stretch to the longest of them and back.
+let comparePanels = null;
+let leadMappedDurationMs = 1;
+// What the renderers were last configured with, for a panel made later.
+let lastRendererSettings = null;
 const CACHE_KEY = 'mosuPreviewCacheV1';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
 const DEBUG_LOG_LIMIT = 80;
 // Matches lazer's rate adjust range and precision.
 const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
+// What K steps through: the two counts nearly every mania player plays, and
+// back to the map's own. A count picked from the rest steps on to Auto.
+const MANIA_KEY_COUNT_CYCLE = Object.freeze(['auto', ...MANIA_PRIMARY_KEY_COUNTS]);
 // Marathon maps run well past 12k objects (a 60-minute map is comfortably over
 // 20k). Parsing all of them costs ~40MB and ~300ms, and rendering is windowed,
 // so the old cap only served to cut the timeline short.
@@ -299,7 +362,20 @@ const syncTimeLabelWidth = ({ force = false } = {}) => {
 
 // A map can load before Torus does, and a label measured in the fallback font
 // reserved several pixels too many, all of it showing up as a lopsided gap.
-document.fonts?.addEventListener?.('loadingdone', () => syncTimeLabelWidth({ force: true }));
+//
+// Only a face that has just loaded counts. Chrome fires loadingdone again for
+// faces loaded long ago each time a media query flips, and a toolbar popup
+// widened past its narrow layout (difficulties side by side) flips one on every
+// relayout: re-measuring here caused the next relayout, about 130 a second.
+const measuredFontFaces = new WeakSet();
+document.fonts?.addEventListener?.('loadingdone', (event) => {
+  const faces = Array.from(event?.fontfaces || []);
+  const hasNewFace = faces.some((face) => !measuredFontFaces.has(face));
+  faces.forEach((face) => measuredFontFaces.add(face));
+  if (hasNewFace || faces.length === 0) {
+    syncTimeLabelWidth({ force: true });
+  }
+});
 
 const syncPlaybackDuration = () => {
   const previousDurationMs = state.durationMs;
@@ -311,12 +387,14 @@ const syncPlaybackDuration = () => {
   syncTimeLabelWidth();
   const shouldAnimateTimeline = hasFullAudioSource() && nextDurationMs > previousDurationMs;
   const isAnimatingTimeline = renderer.setDuration(nextDurationMs, { animate: shouldAnimateTimeline });
+  comparePanels?.setDuration(nextDurationMs);
   // The end line marks the song's end once the full track is in; until then the
   // timeline marks the last object instead.
   renderer.timeline.setSongEnd(getFullAudioEndMs() || null);
   if (isAnimatingTimeline) {
     ensureTimelineDurationAnimation();
   }
+  mediaSessionController?.sync();
 };
 
 const stopTimelineDurationAnimation = () => {
@@ -651,7 +729,7 @@ const openExtensionOptions = async () => {
   }
 };
 
-const showPopupToast = (message, hideDelayMs = 3500) => {
+const showPopupToast = (message, hideDelayMs = 3500, tone = '') => {
   if (!popupToast) {
     return;
   }
@@ -659,6 +737,8 @@ const showPopupToast = (message, hideDelayMs = 3500) => {
   state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
 
   popupToast.textContent = message;
+  // Set with the message, so a toast never changes look while it is up.
+  popupToast.classList.toggle('is-copied', tone === 'copied');
   popupToast.classList.add('is-visible');
   state.toastHideTimer = registry.addTimeout(setTimeout(() => {
     popupToast.classList.remove('is-visible');
@@ -833,7 +913,12 @@ const applyPreviewSettings = (settings = {}) => {
     hitsoundPlayer.attachMediaElement(state.audio);
   }
   applyPopupSize(normalized.popupSize);
+  // The speaker on a difficulty's pill dims while hitsounds are off.
+  document.documentElement.classList.toggle('is-hitsounds-off', !normalized.hitsounds);
   renderer.setPreviewSettings(normalized);
+  lastRendererSettings = normalized;
+  comparePanels?.setPreviewSettings(normalized);
+  applyManiaKeyCount(normalized.maniaKeyCount);
 };
 
 const formatPlaybackSpeedLabel = (speed) => {
@@ -933,6 +1018,7 @@ state.audio.play = (...args) => {
 const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs) => {
   syncVisualClockToMapTimeRaw(mapTimeMs, nowPerfMs);
   hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
+  mediaSessionController?.sync();
 };
 
 const applyPlaybackSpeed = (nextSpeed) => {
@@ -972,15 +1058,35 @@ const {
 
 let lastTimeLabelText = '';
 
+// A hidden window's loop runs off a timer, and a browser that throttles it can
+// stretch the ticks to a second apart, so its hitsounds are placed well past that.
+const HIDDEN_HITSOUND_LOOKAHEAD_SEC = 2;
+
+const isPageHidden = () => document.visibilityState === 'hidden';
+
 const renderFrame = () => {
+  // Cheap when nothing changed: it only re-sends a position that has drifted.
+  mediaSessionController?.sync();
   // Only while playing: a paused scrub should show the map, not sound it.
   if (state.isPlaying) {
-    hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs, { rate: state.playbackSpeed });
+    const hidden = isPageHidden();
+    hitsoundPlayer.update(state.hitsoundEvents, state.currentTimeMs, {
+      rate: state.playbackSpeed,
+      lookaheadSec: hidden ? HIDDEN_HITSOUND_LOOKAHEAD_SEC : undefined,
+    });
+    // A hidden window's playback loop runs for the clock and the hitsounds,
+    // and the first frame back draws where it got to. Every other draw still
+    // happens hidden: a popup's page starts out hidden, and a draw put off
+    // until it was shown painted the empty map before the real one loaded.
+    if (hidden) {
+      return;
+    }
   }
   // A zoomed timeline follows the playhead only while it plays.
   renderer.timeline.setPlaying(state.isPlaying);
   renderer.setTime(state.currentTimeMs);
   renderer.render();
+  comparePanels?.render(state.currentTimeMs);
 
   // The label only changes once a second, but writing it every frame dirtied
   // layout, which the next frame's canvas size read then had to resolve.
@@ -991,6 +1097,166 @@ const renderFrame = () => {
   }
 };
 
+// Flattened once per map: sliders contribute a sound per node, so this is
+// longer than the object list and has its own ordering. Taiko plays the drum.
+const buildMapHitsoundEvents = (mapData) => buildHitsoundEvents(mapData.objects, {
+  samplePoints: mapData.timingControlPoints,
+  defaultSampleSet: mapData.defaultSampleSet,
+  mode: mapData.mode,
+});
+
+// The key count only means something once a mania map is in. sourceMapData is
+// cleared as each load starts, so the control is gone while the next map loads,
+// and stays gone if it fails.
+const getLoadedManiaMap = () => (
+  state.sourceMapData && state.mapData?.mode === 3 ? state.mapData : null
+);
+
+const isManiaConvert = (mapData) => mapData?.conversion?.targetMode === 3;
+
+const formatKeyCount = (keys) => `${keys}K`;
+
+// The row folds away rather than leaving the page, so `inert` is what keeps
+// its buttons out of reach while it is closed.
+const isManiaKeysMoreOpen = () => Boolean(keysMore?.classList.contains('is-open'));
+
+const setManiaKeysMoreOpen = (open) => {
+  if (keysMore) {
+    keysMore.classList.toggle('is-open', open);
+    keysMore.inert = !open;
+  }
+  keysMoreButton?.setAttribute('aria-expanded', open ? 'true' : 'false');
+};
+
+const closeManiaKeysPopover = () => {
+  keysControl?.classList.remove('is-keys-open');
+  keysButton?.setAttribute('aria-expanded', 'false');
+};
+
+const syncManiaKeyControls = () => {
+  const mapData = getLoadedManiaMap();
+  if (keysControl) {
+    keysControl.hidden = !mapData;
+  }
+  if (keysDivider) {
+    keysDivider.hidden = !mapData;
+  }
+  if (!mapData || !keysButton) {
+    closeManiaKeysPopover();
+    return;
+  }
+
+  const keys = formatKeyCount(mapData.mania?.totalColumns || mapData.circleSize);
+  keysButton.textContent = keys;
+  const isConvert = isManiaConvert(mapData);
+  keysButton.classList.toggle('is-locked', !isConvert);
+  keysButton.setAttribute('aria-disabled', isConvert ? 'false' : 'true');
+  if (!isConvert) {
+    closeManiaKeysPopover();
+    keysButton.title = `${keys} map: a mania map keeps its own key count`;
+    keysButton.setAttribute('aria-label', `Key count ${keys}, the map's own`);
+    return;
+  }
+
+  const autoKeys = formatKeyCount(mapData.conversion.autoKeys);
+  const isAuto = state.maniaKeyCount === 'auto';
+  keysButton.title = isAuto ? `Key count (${keys}, auto)` : `Key count (${keys}; auto is ${autoKeys})`;
+  keysButton.setAttribute('aria-label', isAuto ? `Key count ${keys}, auto` : `Key count ${keys}`);
+  if (keysAutoCount) {
+    keysAutoCount.textContent = autoKeys;
+  }
+  let isMinorSelected = false;
+  for (const option of keysOptions) {
+    const selected = option.dataset.keys === String(state.maniaKeyCount);
+    option.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    if (selected && keysMore?.contains(option)) {
+      isMinorSelected = true;
+    }
+  }
+  keysMoreButton?.classList.toggle('has-selection', isMinorSelected);
+  // A count from the second row opens with that row showing, so the pick is
+  // in view rather than folded away.
+  if (isMinorSelected) {
+    setManiaKeysMoreOpen(true);
+  }
+};
+
+/**
+ * Converts the loaded map again at the key count in force, keeping the
+ * playhead where it is. Only a convert changes: a native mania map keeps its
+ * own count, as it does under lazer's key mods.
+ */
+const reconvertManiaMap = () => {
+  const current = getLoadedManiaMap();
+  if (!isManiaConvert(current)) {
+    return;
+  }
+
+  const mapData = convertMapForMode(state.sourceMapData, 3, { maniaKeyCount: state.maniaKeyCount });
+  const previousKeys = current.mania?.totalColumns;
+  state.mapData = mapData;
+  renderer.replaceManiaObjects(mapData);
+  comparePanels?.setLeadKeys(mapData.mania?.totalColumns);
+  addDebugLog(
+    `mania: ${formatKeyCount(mapData.mania.totalColumns)}`
+    + (mapData.conversion.keyMod ? ' (key mod)' : ' (auto)'),
+  );
+  // Auto landing on the count that was forced converts to the same notes, so
+  // the hits already queued are still the right ones. Nor are the lead's the
+  // ones playing when another difficulty's hitsounds were picked.
+  if (mapData.mania.totalColumns !== previousKeys && !comparePanels?.getSoundMap()) {
+    state.hitsoundEvents = buildMapHitsoundEvents(mapData);
+    hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
+  }
+  if (!state.isPlaying) {
+    renderFrame();
+  }
+};
+
+// Applies a key count from wherever it came -- the picker, K, or a change in
+// storage from another window or the options page -- converting only when it
+// actually changed.
+const applyManiaKeyCount = (keyCount) => {
+  const normalized = normalizeManiaKeyCount(keyCount);
+  if (normalized !== state.maniaKeyCount) {
+    state.maniaKeyCount = normalized;
+    reconvertManiaMap();
+    comparePanels?.reconvert();
+    if (!state.isPlaying && (comparePanels?.getCount() ?? 1) > 1) {
+      renderFrame();
+    }
+  }
+  syncManiaKeyControls();
+};
+
+// Remembered for every convert, the way a key mod stays selected in lazer.
+const selectManiaKeyCount = (keyCount) => {
+  applyManiaKeyCount(keyCount);
+  void storageSet('sync', { [MANIA_KEY_COUNT_KEY]: state.maniaKeyCount }).catch((error) => {
+    addDebugLog(`mania: could not save the key count -> ${error?.message || 'unknown error'}`);
+  });
+};
+
+const explainLockedManiaKeyCount = () => {
+  const mapData = getLoadedManiaMap();
+  if (mapData && !isManiaConvert(mapData)) {
+    showPopupToast(`${formatKeyCount(mapData.mania?.totalColumns || mapData.circleSize)} map: key count is fixed`);
+  }
+};
+
+const cycleManiaKeyCount = () => {
+  const mapData = getLoadedManiaMap();
+  if (!mapData) {
+    return;
+  }
+  if (!isManiaConvert(mapData)) {
+    explainLockedManiaKeyCount();
+    return;
+  }
+  const index = MANIA_KEY_COUNT_CYCLE.indexOf(state.maniaKeyCount);
+  selectManiaKeyCount(MANIA_KEY_COUNT_CYCLE[(index + 1) % MANIA_KEY_COUNT_CYCLE.length]);
+};
+
 const {
   beginAudioOperation,
   isCurrentAudioOperation,
@@ -999,6 +1265,7 @@ const {
   releaseAudioClock,
   resumeAudioClockAfterStall,
   ensurePlaybackLoop,
+  refreshPlaybackLoop,
   stopPlayback,
   togglePlayback,
   seekTo,
@@ -1019,6 +1286,29 @@ const {
     }),
     // Declared just below; the full-audio controller needs this one first.
     seekAudio: (targetMs, options) => seekAudioToTrackTime(targetMs, options),
+  },
+});
+
+mediaSessionController = createMediaSessionController({
+  getPlayback: () => ({
+    isPlaying: state.isPlaying,
+    positionMs: state.currentTimeMs,
+    durationMs: state.durationMs,
+    rate: state.playbackSpeed,
+  }),
+  actions: {
+    play: () => {
+      if (!state.isPlaying) {
+        void togglePlayback();
+      }
+    },
+    pause: () => {
+      if (state.isPlaying) {
+        stopPlayback();
+      }
+    },
+    seekTo: (mapTimeMs) => seekTo(mapTimeMs),
+    seekBy: (deltaMs) => seekRelative(deltaMs),
   },
 });
 
@@ -1094,13 +1384,12 @@ const toggleMute = () => {
 const setMetadataText = () => {
   if (!state.metadata || !state.mapData) {
     titleLine.textContent = 'Map Preview';
-    versionLine.textContent = '';
+    setHeaderSubtitle();
     return;
   }
 
-  titleLine.textContent = `${state.metadata.artist} - ${state.metadata.title}`;
-  versionLine.textContent = state.metadata.version || '';
-  versionLine.title = state.metadata.version || '';
+  titleLine.textContent = state.metadata.title || 'Untitled';
+  setHeaderSubtitle({ artist: state.metadata.artist || '', version: state.metadata.version || '' });
 
   const objectCount = state.mapData.objects.length;
   const modeLabel = MODE_LABELS[state.mapData.mode] || 'unknown';
@@ -1166,6 +1455,35 @@ const fetchBeatmapFile = async (beatmapId) => {
   }
 };
 
+// The set's page embeds every difficulty, with star ratings, for guests too.
+const fetchBeatmapsetDifficulties = async (setId) => {
+  const controller = registry.createAbortController();
+  const timeout = registry.addTimeout(setTimeout(() => controller.abort(), BEATMAP_FETCH_TIMEOUT_MS));
+  try {
+    const response = await fetch(`https://osu.ppy.sh/beatmapsets/${encodeURIComponent(setId)}`, {
+      method: 'GET',
+      credentials: 'omit',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Beatmap set request failed (${response.status}).`);
+    }
+    const parsed = parseBeatmapsetPage(await response.text());
+    if (!parsed) {
+      throw new Error('The beatmap set page had no difficulty list.');
+    }
+    return parsed.difficulties;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('osu.ppy.sh did not answer in time.');
+    }
+    throw error;
+  } finally {
+    registry.clearTimeout(timeout);
+    registry.releaseAbortController(controller);
+  }
+};
+
 const readCachedPreview = async () => {
   if (!hasStorageArea('session', 'local')) {
     return null;
@@ -1219,6 +1537,8 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   stopTimelineDurationAnimation();
   stopPlayback();
   setPlaybackSpeedControlEnabled(false);
+  state.sourceMapData = null;
+  syncManiaKeyControls();
   setUnsupportedMode(false);
   void pruneFullAudioCache();
   clearDebugLogs();
@@ -1279,8 +1599,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     const info = extractBeatmapInfoFromUrl(sourceUrl);
     if (!info.valid) {
       addDebugLog(`init: invalid tab url (${info.reason})`);
-      versionLine.textContent = '';
-      versionLine.title = '';
+      setHeaderSubtitle();
       configureAudioPreview(null, null);
       if (unsupportedAscii) {
         if (unsupportedPanel && !info.unsupportedSite) {
@@ -1305,11 +1624,24 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
         titleLine.textContent = 'Preview unavailable';
         setStatus(info.reason, true);
       }
+      mediaSessionController?.clearTrack();
+      comparePanels?.clear();
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();
       revealPopup();
       return;
+    }
+
+    // Difficulties remembered beside this one are put up before the popup shows,
+    // when the URL already says which set and ruleset this is, so it opens at
+    // its compared width rather than widening once the map is in. They load
+    // alongside the lead.
+    if (info.setId && Number.isInteger(info.mode) && info.beatmapId) {
+      await comparePanels?.setLead({ setId: info.setId, beatmapId: info.beatmapId, mode: info.mode });
+      if (isStaleLoad()) {
+        return;
+      }
     }
 
     // A beatmap page: the preview is the right view, loading state and all.
@@ -1366,7 +1698,8 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     const requestedMode = Number.isInteger(info.mode) ? info.mode : parsedMapData.mode;
     // Breaks feed the mania converter's drain-time difficulty, so they have to
     // be parsed before the conversion rather than alongside the renderer setup.
-    const mapData = convertMapForMode({ ...parsedMapData, breaks }, requestedMode);
+    const sourceMapData = { ...parsedMapData, breaks };
+    const mapData = convertMapForMode(sourceMapData, requestedMode, { maniaKeyCount: state.maniaKeyCount });
     if (mapData.mode !== parsedMapData.mode) {
       addDebugLog(
         `init: converted ${MODE_LABELS[parsedMapData.mode] || 'unknown'} -> ${MODE_LABELS[mapData.mode] || 'unknown'}`,
@@ -1395,7 +1728,10 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
 
     state.metadata = metadata;
     state.mapData = mapData;
-    state.mappedDurationMs = durationMs;
+    // Only mania converts again (for its key count); other maps need no copy.
+    state.sourceMapData = mapData.mode === 3 ? sourceMapData : null;
+    leadMappedDurationMs = durationMs;
+    state.mappedDurationMs = Math.max(durationMs, comparePanels?.getLongestMappedDurationMs() ?? 0);
     const resume = takePendingResume();
     const startTimeMs = resume
       ? clamp(resume.timeMs, 0, durationMs)
@@ -1411,12 +1747,14 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
 
 
     renderer.setBeatmap(mapData, durationMs, { previewTimeMs: metadata.previewTime });
-    // Flattened once per map: sliders contribute a sound per node, so this is
-    // longer than the object list and has its own ordering.
-    state.hitsoundEvents = buildHitsoundEvents(mapData.objects, {
-      samplePoints: mapData.timingControlPoints,
-      defaultSampleSet: mapData.defaultSampleSet,
-    });
+    syncManiaKeyControls();
+    if (mapData.mode === 3) {
+      addDebugLog(
+        `init: ${mapData.mania?.totalColumns}K`
+        + (isManiaConvert(mapData) ? `, auto ${mapData.conversion.autoKeys}K` : ' (native, fixed)'),
+      );
+    }
+    state.hitsoundEvents = buildMapHitsoundEvents(mapData);
     addDebugLog(
       `hitsounds: ${state.hitsoundEvents.length} events from ${mapData.objects.length} objects, `
       + `${(mapData.timingControlPoints || []).length} sample points`,
@@ -1424,6 +1762,19 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     hitsoundPlayer.syncTo(state.hitsoundEvents, startTimeMs);
     syncPlaybackDuration();
     setMetadataText();
+    mediaSessionController?.setTrack({
+      title: metadata.title,
+      artist: metadata.artist,
+      version: metadata.version,
+      setId: resolvedSetId,
+    });
+    void comparePanels?.setLead({
+      setId: resolvedSetId,
+      beatmapId: info.beatmapId,
+      mode: mapData.mode,
+      version: metadata.version,
+      keys: mapData.mode === 3 ? mapData.mania?.totalColumns : null,
+    });
 
     void addToHistory({
       beatmapId: info.beatmapId || resolvedSetId,
@@ -1486,11 +1837,13 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     stopPlayback();
     setPlaybackSpeedControlEnabled(false);
     titleLine.textContent = 'Preview unavailable';
-    versionLine.textContent = '';
-    versionLine.title = '';
+    setHeaderSubtitle();
     configureAudioPreview(null, null);
     setStatus(error?.message || 'Failed to load beatmap preview.', true);
+    mediaSessionController?.clearTrack();
+    comparePanels?.clear();
     renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
+    leadMappedDurationMs = 1;
     state.mappedDurationMs = 1;
     setTimelineState({ currentTimeMs: 0, durationMs: 1 });
     syncTimeLabelWidth();
@@ -1498,15 +1851,112 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   }
 };
 
+// Parsed and converted the way the lead is, into the lead's ruleset.
+const prepareCompareMap = (osuContent, mode) => {
+  const metadata = parseMetadata(osuContent);
+  const parsedMapData = parseMapPreviewData(osuContent, { maxObjects: MAX_PREVIEW_OBJECTS });
+  const sourceMapData = { ...parsedMapData, breaks: parseBreakPeriods(osuContent) };
+  const mapData = convertMapForMode(sourceMapData, mode, { maniaKeyCount: state.maniaKeyCount });
+  return { metadata, sourceMapData, mapData };
+};
+
+// The hitsounds of whichever difficulty was picked to sound, or the lead's.
+// syncTo picks up at the playhead, so a switch mid-play neither replays nor
+// skips a note.
+const switchHitsoundSource = (sourceMap) => {
+  const map = sourceMap || state.mapData;
+  if (!map) {
+    return;
+  }
+  state.hitsoundEvents = buildMapHitsoundEvents(map);
+  hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
+  addDebugLog(`hitsounds: from ${sourceMap ? 'an added difficulty' : 'the opened map'} (${state.hitsoundEvents.length} events)`);
+};
+
+const togglePlaybackWithFeedback = async () => {
+  const wasPlaying = state.isPlaying;
+  const isPlayingNow = await togglePlayback();
+  if (isPlayingNow || wasPlaying) {
+    showCanvasToggleFeedback(wasPlaying ? 'pause' : 'play');
+  }
+};
+
+comparePanels = createComparePanels({
+  root: document.documentElement,
+  canvasWrap,
+  panelsElement,
+  leadLabel: leadPanelLabel,
+  control: compareControl,
+  button: compareButton,
+  listElement: compareList,
+  statusElement: compareStatus,
+  // Firefox's toolbar popup has no transitions; its detached window does.
+  allowMotion: () => !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    && !(IS_FIREFOX && !IS_DETACHED_WINDOW),
+  bindPopover,
+  fetchDifficulties: fetchBeatmapsetDifficulties,
+  fetchBeatmap: fetchBeatmapFile,
+  prepareMap: prepareCompareMap,
+  convertMap: (sourceMapData, mode) => convertMapForMode(sourceMapData, mode, { maniaKeyCount: state.maniaKeyCount }),
+  onSoundSourceChange: switchHitsoundSource,
+  createRenderer: (canvas) => {
+    const panelRenderer = new PreviewRenderer(canvas, null, { lowLatency: false });
+    if (lastRendererSettings) {
+      panelRenderer.setPreviewSettings(lastRendererSettings);
+    }
+    return panelRenderer;
+  },
+  renderPlayfields: () => {
+    // Before a map is in there is nothing to draw but "no preview".
+    if (!state.mapData) {
+      return;
+    }
+    renderer.setTime(state.currentTimeMs);
+    renderer.renderPlayfield();
+    comparePanels?.render(state.currentTimeMs);
+  },
+  getDurationMs: () => state.durationMs,
+  readSession: async (key) => {
+    if (!hasStorageArea('session', 'local')) {
+      return null;
+    }
+    const items = await storageGet('session', [key], { fallbackAreaName: 'local' });
+    return items?.[key] ?? null;
+  },
+  writeSession: async (key, value) => {
+    if (hasStorageArea('session', 'local')) {
+      await storageSet('session', { [key]: value }, { fallbackAreaName: 'local' });
+    }
+  },
+  onPanelsChanged: () => {
+    state.mappedDurationMs = Math.max(leadMappedDurationMs, comparePanels?.getLongestMappedDurationMs() ?? 0);
+    // Before the first map is in there is nothing to draw but "no preview".
+    if (state.mapData) {
+      syncPlaybackDuration();
+      if (!state.isPlaying) {
+        renderFrame();
+      }
+    }
+  },
+  onCanvasClick: () => {
+    void togglePlaybackWithFeedback();
+  },
+  addDebugLog,
+});
+
 bindPopupUiEvents({
   elements: {
     speedButton,
     speedControl,
     speedSlider,
     speedResetButton,
+    keysButton,
+    keysControl,
+    keysMoreButton,
     playfieldCanvas,
     timelineCanvas,
     audioStatusBadge,
+    compareControl,
     infoButtons,
     infoModal,
     infoBackdrop,
@@ -1538,8 +1988,13 @@ bindPopupUiEvents({
   registry,
   supportLinks: SUPPORT_LINKS,
   actions: {
+    dismissComparePicker: () => Boolean(comparePanels?.dismissPicker()),
     cyclePlaybackSpeed,
     applyPlaybackSpeed,
+    selectManiaKeyCount,
+    cycleManiaKeyCount,
+    explainLockedManiaKeyCount,
+    toggleManiaKeysMore: () => setManiaKeysMoreOpen(!isManiaKeysMoreOpen()),
     togglePlayback,
     showCanvasToggleFeedback,
     toggleDebugPanelOpen,
@@ -1620,6 +2075,10 @@ if (IS_DETACHED_WINDOW) {
     }
   });
 }
+
+// Minimised or covered, a detached window plays on through the playback loop's
+// timer, and back on frames once it is shown again.
+document.addEventListener('visibilitychange', refreshPlaybackLoop);
 
 // Fired before the preview loads so the detached window is gone before this one
 // starts playing, rather than both running for a moment.

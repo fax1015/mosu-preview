@@ -23,7 +23,7 @@ the detached window then follows along as you browse: open another beatmap, or c
 
 if no osu! beatmap page is open, the window keeps showing the last map rather than blanking.
 
-the detached window cannot read the active tab, so the popup passes the beatmap and set ids in the page URL, and following reads tab URLs through the existing `https://osu.ppy.sh/*` host permission. no extra permission is needed. on firefox for android, where there is no window management, the preview opens in a tab instead.
+the detached window cannot read the active tab, so the popup passes the beatmap and set ids in the page URL, and following reads tab URLs through the existing `https://osu.ppy.sh/*` host permission. no extra permission is needed. a phone has no separate windows to open a preview in, so the detach button is left out there.
 
 ## preview
 
@@ -33,7 +33,19 @@ taiko maps play the taiko drum instead, whichever style is chosen: a centre hit 
 
 mania previews show the key count in the controls row. for a standard map converted to mania it opens a picker, like osu!lazer's key mods: auto (the count the map works out for itself), 4k and 7k up front and every other count from 1k to 10k one click further, also on `k`. the choice is remembered for every convert. mania maps keep their own key count, as they do in lazer.
 
-the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open.
+the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open. on firefox for android a set picked from it opens behind the popup, so the popup says to leave it to see the page, as it does for the settings page.
+
+the preview starts playing as soon as it opens. **play on open** in settings turns that off, for whoever would rather it waited for `space`; a detached window still keeps playing, or keeps paused, as the popup left it, whatever the setting says. the music volume is on the settings page as well as the preview's own slider, and setting it either way is remembered.
+
+### preview size
+
+**the preview's height is fixed by a reference slider. do not change it without checking that slider.**
+
+the reference is beatmap [5337582](https://osu.ppy.sh/beatmaps/5337582) (Aphex Twin - Cock/ver10 [7\\]) at 2:50: a CS 5.1 slider that loops around the outside of the playfield, from x -32 to 544 and y -24 to 392. its body should lie just inside the preview, about 3px clear of every edge. that makes the preview 4:3, the shape of osu!'s own 640x480 view. a taller preview leaves a band above and below the slider (at 1.29:1, nearly ten pixels each way), and a shorter one cuts it off.
+
+the playfield is never stretched to fit. it used to be squashed vertically so this slider met both edges, and when that was taken out the preview kept its old 1.29:1 shape, which left the gap. the preview is sized to the field now, not the other way round.
+
+the number lives in the `aspect-ratio` on `.map-preview-canvas-wrap` in `popup.css`, and the compare panels' `PANEL_ASPECT` in `src/core/panelLayout.js` has to match it. `tests/renderer.test.js` draws the slider from its line in the map at every popup size and fails if the body runs past an edge or sits more than 5px inside one, and fails if the two numbers differ.
 
 ### several difficulties at once
 
@@ -52,17 +64,42 @@ the preview reports to the browser's media controls, with the map's title, artis
 - `up` / `down` volume
 - `home` / `end` jump to start / end
 - `0`-`9` jump to 0-90% of the map
+- `n` / `p` jump to the next or previous section the map names for itself
+- `c` copy the playhead as an osu!-editor timestamp; clicking the time readout does the same
 - `,` / `.` pause and step one frame
 - `[` / `]` nudge playback speed
 - `s` cycle speed, `m` mute, `r` restart
 - `k` cycle a mania convert's key count: auto, 4k, 7k
+- `?` show the shortcuts list
 - `+` / `-` zoom the timeline in and out around the playhead, `esc` zooms back out
 - hovering the timeline shows the timestamp under the cursor, to the millisecond once zoomed in
 - `alt` + `shift` + `o` opens the preview from any tab. the browser owns this one: change or clear it at `chrome://extensions/shortcuts` (firefox: `about:addons`, manage extension shortcuts). the shortcuts list shows whatever it is set to
 
+on a phone the list is left out of the menu, there being no keyboard for it to describe.
+
+the list itself groups them and is where they are changed: click a key to rebind it, right-click to put it back, **reset all** to put them all back. every one is a single key, and giving a key to one action takes it from whatever held it — the row that lost it says "unset" rather than two things firing at once. the digits, `esc`, `tab` and `enter` are kept by the preview and its dialogs, so they cannot be bound; `alt` + `shift` + `o` belongs to the browser, as above. the keymap is stored with the rest of the settings, so it follows the detached window and syncs to your other machines.
+
+### sections
+
+`n` and `p` walk the places the map names for itself, earliest first: the mapper's own editor bookmarks, where each kiai section starts, and where each break starts. The preview says which one it landed on, since the timeline draws them but does not name them. A bookmark sitting on a kiai start is one place, not two. A map that marks nothing says so rather than seeking nowhere.
+
+### timestamps
+
+clicking the time readout, or pressing `c`, copies the playhead as `01:23:456` — just the time, ready to paste into a mod or a chat.
+
+to name objects as well, click them on the timeline first. zoomed in far enough to see them, each one can be picked out: click to take one, `ctrl` (or `cmd`) + click to add or drop one, `shift` + click to take everything up to it. picked objects are ringed in amber, and the copy then reads `01:23:456 (1,2,3) - ` the way osu!'s editor writes it, timed from the first of them. mania uses the `time|column` pairs its own editor uses instead of combo numbers. clicking empty track lets them go again, and so does clicking anywhere that is not the preview — the playfield and the timeline are where they are chosen, so anywhere else is a click away from them. the copy button is the one exception, since it reads what is picked out.
+
+at that zoom the objects are also magnetic: the playhead lands on the one you aimed at rather than a few milliseconds off it, and the readout under the cursor names where it will actually land. only their heads pull, so scrubbing through a long slider is not dragged back to its start. hold `alt` to put the playhead down exactly where the pointer is, which also leaves whatever is picked out alone.
+
 ### timeline
 
 the timeline shows the whole map at first: object density in green, kiai sections in amber, breaks hatched, the preview point in purple. scroll on it to zoom in around the cursor; close enough, the bars turn into the objects themselves, with the beat grid behind them. `shift` + scroll (or a sideways swipe) pans. while zoomed, a rail along the bottom shows which part of the map is on screen: drag it to move around, or click beside it to jump there. a zoomed timeline follows the playhead while the preview plays, and dragging the playhead past either end scrolls it along.
+
+the marks along its top edge are the map's own bars, at every zoom: every bar close in, then every two, four, eight as the view widens, each tempo counting from its own downbeat. they used to be round seconds, which share no factor with a map's bpm or its offset and so sat visibly off the notes they were drawn over. a map with no timing points at all falls back to the clock, there being no beat to count from.
+
+### maps with extreme values
+
+a `.osu` file is whatever its uploader typed, so the numbers a map sets for itself are held to the ranges osu!lazer holds them to before anything is built from them: slider multiplier 0.4-3.6, slider tick rate 0.5-8, a tempo of 6-60000ms a beat, positions and slider lengths within 131072 osu!pixels, and times within osu!'s 32-bit timeline. an object outside that timeline is dropped; one that runs past it ends there. a slider lays ticks along its first 100,000 pixels and no more than 20,000 of them, and a single Bezier span too large to subdivide in about a second is drawn as its control polygon. without these a map could ask for billions of slider ticks, or a timeline decades long, and take the popup down with it.
 
 ## permissions
 
@@ -82,6 +119,8 @@ the manifest requests only two extension permissions:
 - prune interval: `30 minutes`
 
 full audio cache eviction removes expired entries first, then removes the oldest remaining entries until the total size is back under the cap.
+
+the settings page reports what the cache is holding against that cap, and clears it; clearing takes the cached mapsets list with it, since that list is named from the cache entries. the same page restores every setting on it to its default. both ask twice: the first click arms the button, the second does it.
 
 each cached audio entry also stores its mapset's title, artist and creator, so the cached mapsets list can name a set for as long as its audio is kept. the view history is a 20-entry recency list and ages out much sooner than the audio does.
 
@@ -110,6 +149,9 @@ the extension does not inject content scripts into arbitrary pages. it runs from
 - `https://osu.ppy.sh/beatmapsets/{setId}#fruits/{beatmapId}`
 - `https://osu.ppy.sh/beatmapsets/{setId}#mania/{beatmapId}`
 - `https://osu.ppy.sh/beatmaps/{beatmapId}`
+- `https://osu.ppy.sh/beatmapsets/{setId}`, and its discussion pages, which name no difficulty
+
+a set URL with no difficulty in it — what a search result, a forum link or the modding queue opens — has nothing to preview yet, so the popup lists the set's difficulties instead: grouped by ruleset where the set has more than one, easiest first, each with its star rating, in the ruleset the link asked for where it asked for one. picking one moves the tab to that difficulty's discussion page and loads its preview. the list is read from the set's own page, so it costs one fetch; if it cannot be read, the cached mapsets list is shown as on any other page. the detached window still follows only URLs that name a difficulty.
 
 ## install locally
 

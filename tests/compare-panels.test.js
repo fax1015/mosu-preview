@@ -314,6 +314,37 @@ test('the picker adds and removes difficulties, up to four in all', async () => 
   assert.deepEqual(session.get(SELECTION_KEY).ids, ['4', '1', '3']);
 });
 
+test('un-ticking a difficulty lets its check leave before the tag changes', async () => {
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  try {
+    const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1'] }]]);
+    const { panels, control, listElement } = makePanels({ session, allowMotion: () => true });
+    await panels.setLead(LEAD);
+    await flush();
+    control.classList.add('is-compare-open');
+    control.children[0].click();
+    await flush();
+
+    const row = listElement.children.find((child) => child.dataset.beatmapId === '1');
+    const tag = row.children[2];
+    const check = tag.children[0];
+    assert.ok(check.classList.contains('map-preview-compare-check'));
+
+    row.click();
+    assert.equal(tag.children[0], check, 'it is still there on the way out');
+    assert.ok(check.classList.contains('is-leaving'));
+
+    await new Promise((resolve) => { setTimeout(resolve, 180); });
+    assert.equal(tag.children.length, 0, 'and the tag is cleared once it has gone');
+  } finally {
+    // Left as no-ops, not removed: the motion's safety timer can still fire
+    // after the test and cancels its frame.
+    globalThis.requestAnimationFrame = () => 0;
+    globalThis.cancelAnimationFrame = () => {};
+  }
+});
+
 test('every panel draws at the lead\'s time', async () => {
   const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1', '2'] }]]);
   const { panels, renderers } = makePanels({ session });
@@ -392,7 +423,7 @@ test('changing the panels again mid-exit finishes the exit at once', async () =>
 
 test('the preview keeps its size: panels share the area, in a grid that suits its shape', async () => {
   const shapes = [
-    { area: { width: 357, height: 276 }, grids: ['2x1', '2x2', '2x2'] },
+    { area: { width: 357, height: 267 }, grids: ['2x1', '2x2', '2x2'] },
     { area: { width: 380, height: 860 }, grids: ['1x2', '1x3', '1x4'] },
     { area: { width: 1400, height: 470 }, grids: ['2x1', '3x1', '4x1'] },
   ];

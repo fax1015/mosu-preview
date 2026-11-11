@@ -28,7 +28,7 @@ const MAX_RESUME_TIME_MS = 24 * 60 * 60 * 1000;
 const DETACHED_WINDOW_ID_KEY = 'mosuDetachedWindowIdV1';
 const DETACHED_WINDOW_BOUNDS_KEY = 'mosuDetachedWindowBoundsV1';
 
-// Sized so the 1.29:1 playfield lands close to the action popup's proportions
+// Sized so the 4:3 playfield lands close to the action popup's proportions
 // while leaving room for the header and transport controls.
 const DEFAULT_DETACHED_BOUNDS = Object.freeze({ width: 640, height: 720 });
 const MIN_DETACHED_WIDTH = 380;

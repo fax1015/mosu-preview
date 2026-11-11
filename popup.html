@@ -186,7 +186,10 @@
       </div>
       <canvas id="mapPreviewTimeline" class="map-preview-timeline" aria-label="Preview timeline"></canvas>
       <div class="map-preview-timeline-tooltip" id="mapPreviewTimelineTooltip" aria-hidden="true" hidden></div>
-      <span class="map-preview-time-label" id="mapPreviewTimeLabel">0:00 / 0:00</span>
+      <!-- A button, not a readout: it copies the playhead as an osu!-editor
+           timestamp, which nothing said when it was a bare span. -->
+      <button type="button" class="map-preview-time-label" id="mapPreviewTimeLabel"
+        title="Copy timestamp (C)" aria-label="Copy the current timestamp">0:00 / 0:00</button>
       <span class="map-preview-control-divider" aria-hidden="true"></span>
       <!-- Mania only. Shows the column count; on a convert it opens the key mod
            picker, on a native mania map it is the map's own count, locked. -->
@@ -351,81 +354,22 @@
           <button type="button" class="map-preview-info-close" id="mapPreviewShortcutsCloseBtn"
             aria-label="Close shortcuts menu">×</button>
         </div>
-        <div class="map-preview-shortcuts-list">
-          <!-- Filled from the browser's own binding, which the user can change;
-               hidden where there are no extension shortcuts. -->
-          <div class="map-preview-shortcut-item" id="mapPreviewOpenShortcut" hidden>
-            <span class="map-preview-shortcut-key" id="mapPreviewOpenShortcutKey">Alt + Shift + O</span>
-            <span class="map-preview-shortcut-desc">Open the preview</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">Space</span>
-            <span class="map-preview-shortcut-desc">Play / Pause</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">← / →</span>
-            <span class="map-preview-shortcut-desc">Seek ±5s</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">Shift + ← / →</span>
-            <span class="map-preview-shortcut-desc">Seek ±15s</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">↑ / ↓</span>
-            <span class="map-preview-shortcut-desc">Volume</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">S</span>
-            <span class="map-preview-shortcut-desc">Cycle speed</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">K</span>
-            <span class="map-preview-shortcut-desc">Cycle mania keys (Auto, 4K, 7K)</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">M</span>
-            <span class="map-preview-shortcut-desc">Mute</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">R</span>
-            <span class="map-preview-shortcut-desc">Restart</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">Home / End</span>
-            <span class="map-preview-shortcut-desc">Jump to start / end</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">0 &ndash; 9</span>
-            <span class="map-preview-shortcut-desc">Jump to 0&ndash;90%</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">, / .</span>
-            <span class="map-preview-shortcut-desc">Pause &amp; step one frame</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">[ / ]</span>
-            <span class="map-preview-shortcut-desc">Nudge speed</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">+ / &minus;</span>
-            <span class="map-preview-shortcut-desc">Zoom timeline</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">Scroll</span>
-            <span class="map-preview-shortcut-desc">Zoom timeline at cursor</span>
-          </div>
-          <div class="map-preview-shortcut-item">
-            <span class="map-preview-shortcut-key">Shift + Scroll</span>
-            <span class="map-preview-shortcut-desc">Pan zoomed timeline</span>
-          </div>
-        </div>
+        <!-- Built in ui/shortcutsPanel.js from the table in
+             core/keybindings.js: the keys on it can be rebound, so the rows
+             have to redraw. -->
+        <div class="map-preview-shortcuts-list" id="mapPreviewShortcutsList"></div>
       </div>
     </div>
     <div class="map-preview-recent-panel" id="mapPreviewRecentPanel" hidden>
       <div class="map-preview-recent-header">
         <p class="map-preview-recent-title">Cached mapsets</p>
         <div class="map-preview-recent-actions">
-          <button type="button" class="map-preview-recent-action-btn js-map-preview-info-btn"
+          <!-- Only there when no map is open: the header that carries the
+               other one is hidden in that view, so this is the only way to the
+               menu. Over a beatmap page the header is right above this panel,
+               where a second one would be the same button twice. -->
+          <button type="button"
+            class="map-preview-recent-action-btn map-preview-recent-menu-btn js-map-preview-info-btn"
             id="mapPreviewRecentInfoBtn" aria-haspopup="dialog" aria-expanded="false"
             aria-controls="mapPreviewInfoModal" title="Menu" aria-label="Open options menu">
             <svg viewBox="0 0 448 512" fill="currentColor">
@@ -454,6 +398,13 @@
     <div class="map-preview-unsupported" id="mapPreviewUnsupported" aria-live="polite">
       <pre class="map-preview-unsupported-ascii" id="mapPreviewUnsupportedAscii" aria-hidden="true"></pre>
       <p class="map-preview-unsupported-title">unsupported webpage :(</p>
+    </div>
+    <!-- Covers the shell while the opened map is fetched and laid out, so the
+         empty playfield and placeholder header are not painted step by step.
+         Shown by src/popup.js adding is-loading to the popup. -->
+    <div class="map-preview-loading" id="mapPreviewLoading" role="status" aria-live="polite">
+      <span class="map-preview-loading-spinner" aria-hidden="true"></span>
+      <span class="map-preview-loading-label">Loading preview…</span>
     </div>
   </div>
 

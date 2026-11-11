@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { assignKeybinding, defaultKeybindings } from '../src/core/keybindings.js';
 import {
   PREVIEW_SETTING_KEYS,
   DEFAULT_DISABLED_PROVIDERS,
@@ -13,7 +14,11 @@ import {
   PREVIEW_ONLY_SETTING_KEYS,
   applyPreviewSettingChanges,
   hasPreviewSettingChange,
+  AUTOPLAY_KEY,
+  DEFAULT_AUTOPLAY,
+  KEYBINDINGS_KEY,
   normalizeAutoFallback,
+  normalizeAutoplay,
   normalizeDisabledProviders,
   normalizeHitsoundStyle,
   normalizeManiaKeyCount,
@@ -211,4 +216,89 @@ test('the key count is picked in the preview only, and an options save leaves it
 
   const optionsSource = readFileSync(new URL('../src/options.js', import.meta.url), 'utf8');
   assert.match(optionsSource, /PREVIEW_ONLY_SETTING_KEYS/, 'the options page drops them from its saves');
+});
+
+test('autoplay is on by default, and reads like every other toggle', () => {
+  assert.equal(DEFAULT_AUTOPLAY, true);
+  assert.equal(normalizePreviewSettings().autoplay, true);
+  assert.ok(PREVIEW_SETTING_KEYS.includes(AUTOPLAY_KEY));
+
+  // Storage holds real booleans, but older builds and hand-edited sync data
+  // have written the string and numeric spellings too -- and a stored 'false'
+  // read as true is exactly the bug that Boolean(value) caused elsewhere.
+  assert.equal(normalizeAutoplay(false), false);
+  assert.equal(normalizeAutoplay('false'), false);
+  assert.equal(normalizeAutoplay(0), false);
+  assert.equal(normalizeAutoplay('0'), false);
+  assert.equal(normalizeAutoplay(true), true);
+  assert.equal(normalizeAutoplay('true'), true);
+  assert.equal(normalizeAutoplay(1), true);
+  assert.equal(normalizeAutoplay(undefined), true);
+  assert.equal(normalizeAutoplay(null), true);
+});
+
+test('autoplay survives storage and reaches an open preview', () => {
+  const stored = toPreviewSettingsStorage({ autoplay: false });
+  assert.equal(stored[AUTOPLAY_KEY], false);
+  assert.equal(normalizePreviewSettings(stored).autoplay, false);
+
+  const current = normalizePreviewSettings({ autoplay: false, maniaScrollSpeed: 20 });
+  const changed = applyPreviewSettingChanges(current, {
+    [AUTOPLAY_KEY]: { oldValue: false, newValue: true },
+  });
+  assert.equal(changed.autoplay, true);
+  assert.equal(changed.maniaScrollSpeed, 20);
+
+  // Removing the key falls back to the default rather than keeping the old value.
+  const cleared = applyPreviewSettingChanges(current, { [AUTOPLAY_KEY]: { oldValue: false } });
+  assert.equal(cleared.autoplay, DEFAULT_AUTOPLAY);
+});
+
+test('the options page controls autoplay, the music volume, the cache and a reset', () => {
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+
+  for (const id of ['autoplay', 'audioVolume', 'cacheUsageValue', 'cacheClearBtn', 'resetDefaultsBtn']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} is on the options page`);
+  }
+
+  // Restoring defaults has to write what the normalizer calls a default, not a
+  // second copy of the list that can drift from it.
+  const optionsSource = readFileSync(new URL('../src/options.js', import.meta.url), 'utf8');
+  assert.match(optionsSource, /normalizePreviewSettings\(\)/);
+});
+
+test('a remapped shortcut survives storage and reaches the other window', () => {
+  const { bindings } = assignKeybinding(defaultKeybindings(), 'mute', 'x');
+  const stored = toPreviewSettingsStorage({ keybindings: bindings });
+
+  // Sparse on the way out, whole on the way back.
+  assert.deepEqual(stored[KEYBINDINGS_KEY], { mute: ['x'] });
+  assert.deepEqual(normalizePreviewSettings(stored).keybindings, bindings);
+  assert.ok(PREVIEW_SETTING_KEYS.includes(KEYBINDINGS_KEY));
+  assert.ok(hasPreviewSettingChange({ [KEYBINDINGS_KEY]: { newValue: {} } }));
+
+  const changed = applyPreviewSettingChanges(
+    normalizePreviewSettings(),
+    { [KEYBINDINGS_KEY]: { newValue: { mute: ['x'] } } },
+  );
+  assert.deepEqual(changed.keybindings.mute, ['x']);
+});
+
+test('saving the options form leaves a remapped shortcut alone', () => {
+  // The page writes its whole form on every save and has no keymap control, so
+  // without this the first options change would put every key back.
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  assert.ok(!/keybinding/i.test(html), 'the options page has no keymap control');
+  assert.ok(PREVIEW_ONLY_SETTING_KEYS.includes(KEYBINDINGS_KEY));
+
+  const { bindings } = assignKeybinding(defaultKeybindings(), 'mute', 'x');
+  const stored = toPreviewSettingsStorage({ keybindings: bindings });
+  const formSave = toPreviewSettingsStorage(normalizePreviewSettings({ hitsounds: true }));
+  for (const key of PREVIEW_ONLY_SETTING_KEYS) {
+    delete formSave[key];
+  }
+
+  const after = normalizePreviewSettings({ ...stored, ...formSave });
+  assert.deepEqual(after.keybindings.mute, ['x']);
+  assert.equal(after.hitsounds, true);
 });

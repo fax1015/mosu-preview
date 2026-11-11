@@ -115,7 +115,9 @@ const listDifficultiesForRuleset = (difficulties, mode) => {
 
 const formatStars = (stars) => (Number.isFinite(stars) ? stars.toFixed(2) : '');
 
-export { parseBeatmapsetPage, listDifficultiesForRuleset, formatStars };
+export {
+  parseBeatmapsetPage, listDifficultiesForRuleset, formatStars,
+};
 
 // osu-web's difficulty spectrum (its getDiffColour), interpolated the same way:
 // in RGB with a 2.2 gamma, clamped at both ends.

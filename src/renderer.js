@@ -30,6 +30,8 @@ const OSU_FIELD_OFFSET_Y = (OSU_VIEW_HEIGHT - OSU_HEIGHT) / 2;
 // Match the slight downward field placement observed in osu!'s legacy layout.
 const OSU_FIELD_VERTICAL_SHIFT = 8;
 const STANDARD_PLAYFIELD_BACKGROUND = 'rgba(19, 21, 26, 0.95)';
+// The same amber the timeline rings a picked object in.
+const SELECTION_RING_COLOUR = 'rgb(255, 222, 123)';
 // osu!lazer: StackOffset = StackHeight * Scale * -6.4, with Scale = radius/64,
 // so one stack level is worth radius/10 osu! pixels — 4.5px at CS 2 down to
 // 2.3px at CS 7. This constant is only the CS 5 value, used as a fallback when
@@ -89,6 +91,15 @@ const sliderRenderPathLengthCache = new WeakMap();
 // stacking algorithm has not decided yet when it asks for these.
 const rawSliderEndCache = new WeakMap();
 const standardSliderTickCache = new WeakMap();
+// osu!lazer's SliderEventGenerator stops laying ticks 100,000 osu!pixels along
+// a slider, and this stops at a count as well: ticks are spaced by the map's own
+// numbers, and a slider with a thousand repeats could otherwise still ask for
+// hundreds of millions of them -- every one an object, built on the first frame
+// the slider is on screen.
+const MAX_SLIDER_TICK_PATH_LENGTH = 100000;
+const MAX_SLIDER_TICKS = 20000;
+// The most bar lines one frame will draw. A visible window holds a few dozen.
+const MAX_MEASURE_LINES = 4096;
 
 const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(cs, 0, 10));
 
@@ -110,6 +121,7 @@ const getStandardPlayfieldLayout = (canvasWidth, canvasHeight, circleSize, paddi
   // and sits centred in it. It used to be stretched or squashed vertically so a
   // reference slider met both edges: a few percent in the preview's own shape,
   // and nearly double in a tall cell. Kept as a field of its own for callers.
+  // That slider now sets the preview's height instead: see popup.css.
   const scaleY = scale;
   const playfieldWidth = OSU_WIDTH * scale;
   const playfieldHeight = OSU_HEIGHT * scaleY;
@@ -1123,9 +1135,11 @@ export class PreviewRenderer {
         measureIndex += 1;
       }
 
-      for (; ; measureIndex += 1) {
+      for (; lines.length < MAX_MEASURE_LINES; measureIndex += 1) {
         const measureTime = sectionStart + (measureIndex * measureLength);
-        if (measureTime > sectionVisibleEnd) {
+        // Not "> end": a time too large to tell one bar from the next compares
+        // false both ways, and the loop has to end on that as well.
+        if (!(measureTime <= sectionVisibleEnd)) {
           break;
         }
         if (measureIndex === 0 && point.omitFirstBarLine) {
@@ -1164,7 +1178,9 @@ export class PreviewRenderer {
     }
 
     const { slides, spanDuration } = getSliderSpanTiming(object);
-    const pathLength = Number.isFinite(object.length) && object.length > 0 ? object.length : 0;
+    const pathLength = Number.isFinite(object.length) && object.length > 0
+      ? Math.min(object.length, MAX_SLIDER_TICK_PATH_LENGTH)
+      : 0;
     const ticks = [];
     const cacheTicks = () => {
       standardSliderTickCache.set(object, {
@@ -1193,12 +1209,17 @@ export class PreviewRenderer {
       return cacheTicks();
     }
 
-    for (let spanIndex = 0; spanIndex < slides; spanIndex += 1) {
+    // Counted rather than accumulated: adding a tick distance far smaller than
+    // the running total stops changing it, and a loop on that sum never ends.
+    const ticksPerSpan = Math.floor(pathLength / tickDistance);
+
+    for (let spanIndex = 0; spanIndex < slides && ticks.length < MAX_SLIDER_TICKS; spanIndex += 1) {
       const spanStart = object.time + (spanIndex * spanDuration);
       const reversed = (spanIndex % 2) === 1;
 
-      for (let d = tickDistance; d <= pathLength; d += tickDistance) {
-        if (d >= pathLength - minDistanceFromEnd) {
+      for (let tickIndex = 1; tickIndex <= ticksPerSpan; tickIndex += 1) {
+        const d = tickIndex * tickDistance;
+        if (d >= pathLength - minDistanceFromEnd || ticks.length >= MAX_SLIDER_TICKS) {
           break;
         }
 
@@ -1286,6 +1307,64 @@ export class PreviewRenderer {
 
   renderTimeline() {
     this.timeline?.render();
+  }
+
+  /**
+   * The object under a point on the playfield, as an index into the map's
+   * objects, or -1.
+   *
+   * osu!standard only. There an object sits at a fixed place on the field for
+   * as long as it is on screen, which is what makes it something to point at;
+   * the other rulesets scroll their notes past a judgement line, so what is
+   * under the pointer depends on the moment you look rather than on the note.
+   *
+   * Tested against the objects the last frame actually drew, so the answer can
+   * never name something that is not on screen.
+   */
+  objectIndexAtPoint(canvasX, canvasY) {
+    const objects = this.mapData?.objects;
+    if ((this.mapData?.mode ?? 0) !== 0 || !Array.isArray(objects) || objects.length === 0) {
+      return -1;
+    }
+
+    const width = Math.max(1, this.playfieldCanvas?.clientWidth || 0);
+    const height = Math.max(1, this.playfieldCanvas?.clientHeight || 0);
+    const layout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
+    if (!(layout.scale > 0) || !(layout.scaleY > 0)) {
+      return -1;
+    }
+
+    // Back into the map's own coordinates, where a circle's radius is one
+    // number whatever the canvas is doing.
+    const osuX = (canvasX - layout.playfieldX) / layout.scale;
+    const osuY = (canvasY - layout.playfieldY) / layout.scaleY;
+    const radiusOsu = getCircleRadius(clamp(Number(this.mapData.circleSize) || 5, 0, 10));
+    const radiusSq = radiusOsu * radiusOsu;
+
+    // The scratch list reaches a little further ahead than the objects are
+    // actually drawn, so that sliders already under way are laid out. An
+    // object still before its approach circle has not appeared yet and must
+    // not be clickable through empty field.
+    const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
+
+    let picked = null;
+    for (const object of this.visibleObjectsScratch) {
+      if (this.currentTimeMs < object.time - preemptMs) {
+        continue;
+      }
+      const head = getObjectStartPositionOsu(object);
+      const dx = head.x - osuX;
+      const dy = head.y - osuY;
+      if ((dx * dx) + (dy * dy) > radiusSq) {
+        continue;
+      }
+      // A stack is drawn earliest on top, so that is the one being pointed at.
+      if (!picked || object.time < picked.time) {
+        picked = object;
+      }
+    }
+
+    return picked ? objects.indexOf(picked) : -1;
   }
 
   renderTaiko(ctx, playfieldX, playfieldY, playfieldWidth, playfieldHeight) {
@@ -2116,7 +2195,8 @@ export class PreviewRenderer {
   }
 
   // osu!standard uses 640×480 game coordinates with a 512×384 field centered
-  // inside them. The preview crops only the vertical view to the calibrated slider bounds.
+  // inside them. The preview is 4:3 to match, sized so a reference slider just
+  // fits (see .map-preview-canvas-wrap in popup.css); the view is not cropped.
   renderStandard(playfieldCtx, width, height) {
     const standardLayout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
     const {
@@ -2629,6 +2709,46 @@ export class PreviewRenderer {
     if (layered) {
       composeFollowLineLayers(playfieldCtx, layers);
     }
+
+    // Rings over everything, on the canvas itself rather than the object
+    // layer: what is picked out has to stay visible through a follow line or a
+    // slider drawn after it.
+    this.drawStandardSelection(playfieldCtx, toCanvas, drawnCircleRadius);
+  }
+
+  /**
+   * A ring around each picked object that is on screen, matching the one the
+   * timeline draws: the two are one selection, and it is what a copied
+   * timestamp will name.
+   */
+  drawStandardSelection(ctx, toCanvas, circleRadius) {
+    const selected = this.timeline?.selection;
+    if (!selected || selected.size === 0) {
+      return;
+    }
+
+    const objects = this.mapData?.objects;
+    let traced = 0;
+    ctx.save();
+    ctx.beginPath();
+    for (const object of this.visibleObjectsScratch) {
+      const index = objects.indexOf(object);
+      if (index < 0 || !selected.has(index)) {
+        continue;
+      }
+      const position = getObjectStartPositionOsu(object);
+      const point = toCanvas(position.x, position.y);
+      const radius = circleRadius + 2.5;
+      ctx.moveTo(point.x + radius, point.y);
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      traced += 1;
+    }
+    if (traced > 0) {
+      ctx.strokeStyle = SELECTION_RING_COLOUR;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // Two offscreen layers matched to the playfield canvas and cleared, or null

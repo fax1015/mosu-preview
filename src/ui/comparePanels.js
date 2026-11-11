@@ -123,6 +123,9 @@ const createSoundMark = () => {
 };
 // Centred on the grid: its box runs 2.5-7.6 across and 3.2-7.0 down.
 const CHECK_PATH = 'M2.5 5.2l1.8 1.8 3.3-3.8';
+// Matches map-preview-compare-check-out in popup.css: how long the check fades
+// and shrinks before its row's tag is rewritten.
+const CHECK_EXIT_MS = 130;
 
 const fillStarPill = (pill, stars) => {
   if (!pill) {
@@ -682,12 +685,15 @@ const createComparePanels = ({
 
   // --- the picker -----------------------------------------------------------
 
-  const setStatus = (text, { retry = false } = {}) => {
+  const setStatus = (text, { retry = false, loading = false } = {}) => {
     if (!statusElement) {
       return;
     }
     statusElement.replaceChildren();
     statusElement.hidden = !text;
+    // Drives the picker's throbber: this row is the only place its wait is
+    // reported, so the spinner belongs to the row rather than the list.
+    statusElement.classList.toggle('is-loading', Boolean(text) && loading);
     if (!text) {
       return;
     }
@@ -705,6 +711,32 @@ const createComparePanels = ({
     }
   };
 
+  // A row's tag is one of: "Opened" for the lead, the green check for a shown
+  // difficulty, or nothing. Leaving the check stops any exit still playing.
+  const cancelCheckExit = (row) => {
+    if (row.leaveTimer !== null) {
+      globalThis.clearTimeout(row.leaveTimer);
+      row.leaveTimer = null;
+    }
+    row.check.classList.remove('is-leaving');
+  };
+
+  // The check leaves rather than blinking out; the tag is rewritten once it has
+  // gone. Reducing motion (or a row whose check is already detached) settles it
+  // at once.
+  const leaveCheck = (row, done) => {
+    if (!allowMotion()) {
+      done();
+      return;
+    }
+    row.check.classList.add('is-leaving');
+    row.leaveTimer = globalThis.setTimeout(() => {
+      row.leaveTimer = null;
+      row.check.classList.remove('is-leaving');
+      done();
+    }, CHECK_EXIT_MS);
+  };
+
   function renderPicker() {
     if (!listElement || !isPickerOpen() || !lead?.setId) {
       return;
@@ -712,7 +744,7 @@ const createComparePanels = ({
     const entry = lists.get(lead.setId);
     if (!entry || entry.pending) {
       listElement.replaceChildren();
-      setStatus('Loading difficulties…');
+      setStatus('Loading difficulties…', { loading: true });
       return;
     }
     if (entry.error) {
@@ -722,6 +754,7 @@ const createComparePanels = ({
     }
 
     if (pickerRowsSetId !== lead.setId) {
+      pickerRows.forEach(cancelCheckExit);
       pickerRows.clear();
       pickerRowsSetId = lead.setId;
     }
@@ -750,15 +783,24 @@ const createComparePanels = ({
       row.element.disabled = isLead || (!isShown && isFull);
       const tagState = isLead ? 'lead' : (isShown ? 'shown' : '');
       if (row.tagState !== tagState) {
+        const wasShown = row.tagState === 'shown';
         row.tagState = tagState;
-        if (tagState === 'lead') {
-          row.tag.replaceChildren();
-          row.tag.textContent = 'Opened';
-        } else if (tagState === 'shown') {
+        cancelCheckExit(row);
+        if (tagState === 'shown') {
           // Put back each time it is shown, so its little arrival plays.
           row.tag.replaceChildren(row.check);
         } else {
-          row.tag.replaceChildren();
+          const settleTag = () => {
+            row.tag.replaceChildren();
+            if (tagState === 'lead') {
+              row.tag.textContent = 'Opened';
+            }
+          };
+          if (wasShown && row.tag.contains(row.check)) {
+            leaveCheck(row, settleTag);
+          } else {
+            settleTag();
+          }
         }
       }
       return row.element;
@@ -795,7 +837,7 @@ const createComparePanels = ({
         toggleDifficulty(difficulty.beatmapId);
       }
     });
-    return { element, tag, check, tagState: null };
+    return { element, tag, check, tagState: null, leaveTimer: null };
   }
 
   button?.addEventListener('click', () => {

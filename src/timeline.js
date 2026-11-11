@@ -29,6 +29,13 @@ const DENSITY_BAR_PX = 2;
 // first, a 1/4 stream at 180 BPM is about 5px apart.
 const OBJECTS_SHOWN_MS_PER_PX = 15;
 const DENSITY_SHOWN_MS_PER_PX = 40;
+// How near the pointer has to be to an object's head for it to count as being
+// on it: a little past the mark's own radius, so the aim does not have to be
+// exact. Used both for snapping the playhead and for picking one to select.
+const OBJECT_GRAB_PX = 7;
+// Objects only pull on the pointer once they are properly on screen. Snapping
+// to marks that are still ghosting in reads as the timeline sticking.
+const OBJECTS_GRABBABLE_MIX = 0.5;
 const MIN_BEAT_SPACING_PX = 6;
 const MIN_BAR_SPACING_PX = 10;
 
@@ -58,6 +65,8 @@ const COLOURS = Object.freeze({
   playhead: 'rgb(255, 255, 255)',
   playheadHalo: 'rgba(0, 0, 0, 0.4)',
   hover: 'rgba(255, 255, 255, 0.32)',
+  selected: 'rgb(255, 222, 123)',
+  selectedHalo: 'rgba(255, 222, 123, 0.28)',
   rail: 'rgba(255, 255, 255, 0.08)',
   bracket: 'rgba(255, 255, 255, 0.42)',
   // Deliberately faint: there to find, not to look at.
@@ -273,6 +282,9 @@ class TimelineRenderer {
     this.layout = computeLayout(1, 1, 0);
     this.fullDensity = null;
     this.viewDensityCache = null;
+    // Indices into `objects`, as a set for drawing and sorted for reading.
+    // Objects are in time order, so index order is time order.
+    this.selection = new Set();
   }
 
   setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
@@ -296,6 +308,9 @@ class TimelineRenderer {
    */
   setObjects(objects) {
     this.objects = Array.isArray(objects) ? objects : [];
+    // The indices pointed into the old array; a mania key count change can
+    // even give a different number of notes.
+    this.selection.clear();
     // Objects are sorted by start time but may overlap, so finding the ones on
     // screen has to look back by the longest of them.
     this.maxObjectDurationMs = 0;
@@ -524,6 +539,108 @@ class TimelineRenderer {
     return clamp(startMs + (clamp(x / Math.max(1, this.width), 0, 1) * durationMs), 0, this.durationMs);
   }
 
+  /** How solidly the objects are drawn at this zoom, 0 to 1. */
+  getObjectMix() {
+    return 1 - smoothstep(OBJECTS_SHOWN_MS_PER_PX, DENSITY_SHOWN_MS_PER_PX, this.getMsPerPx());
+  }
+
+  /** Whether the objects are on screen enough to be aimed at. */
+  areObjectsGrabbable() {
+    return this.objects.length > 0 && this.getObjectMix() >= OBJECTS_GRABBABLE_MIX;
+  }
+
+  /**
+   * The object under `x`, or -1.
+   *
+   * The head is what is being aimed at, so the nearest one within the grab
+   * radius wins. `includeBodies` also accepts a hit anywhere along a slider,
+   * hold or spinner, which is right for picking one out but not for snapping:
+   * dragging the middle of a ten-second spinner should not fling the playhead
+   * back to its start.
+   */
+  objectIndexAtX(x, { includeBodies = false } = {}) {
+    if (!this.areObjectsGrabbable()) {
+      return -1;
+    }
+
+    const objects = this.objects;
+    const timeMs = this.timeAtX(x);
+    const toleranceMs = OBJECT_GRAB_PX * this.getMsPerPx();
+    let nearest = -1;
+    let nearestDistanceMs = Infinity;
+    let covering = -1;
+
+    // Long objects start before the window the heads are searched in, so the
+    // walk begins as far back as the longest of them.
+    const from = findFirstIndexAtOrAfter(objects, timeMs - toleranceMs - this.maxObjectDurationMs);
+    for (let index = from; index < objects.length; index += 1) {
+      const time = Number(objects[index]?.time);
+      if (!Number.isFinite(time)) {
+        continue;
+      }
+      if (time > timeMs + toleranceMs) {
+        break;
+      }
+      const distanceMs = Math.abs(time - timeMs);
+      if (distanceMs <= toleranceMs && distanceMs < nearestDistanceMs) {
+        nearest = index;
+        nearestDistanceMs = distanceMs;
+      }
+      if (includeBodies && time <= timeMs) {
+        const endTime = Number(objects[index].endTime);
+        // The latest one that is still running wins, which is the one drawn
+        // on top of any it overlaps.
+        if (Number.isFinite(endTime) && endTime >= timeMs) {
+          covering = index;
+        }
+      }
+    }
+
+    return nearest >= 0 ? nearest : covering;
+  }
+
+  /**
+   * The time at `x`, pulled onto a nearby object once they are drawn: at that
+   * zoom the marks are what the pointer is aiming at, and landing a frame off
+   * one is never what was meant.
+   */
+  snapTimeAtX(x) {
+    const index = this.objectIndexAtX(x);
+    const timeMs = this.timeAtX(x);
+    if (index < 0) {
+      return timeMs;
+    }
+    return clamp(Number(this.objects[index].time), 0, this.durationMs);
+  }
+
+  /** @param indices anything iterable of indices into `objects`. */
+  setSelection(indices) {
+    const next = new Set();
+    for (const index of indices || []) {
+      if (Number.isInteger(index) && index >= 0 && index < this.objects.length) {
+        next.add(index);
+      }
+    }
+    this.selection = next;
+  }
+
+  clearSelection() {
+    this.selection.clear();
+  }
+
+  hasSelection() {
+    return this.selection.size > 0;
+  }
+
+  getSelectedIndices() {
+    return [...this.selection].sort((a, b) => a - b);
+  }
+
+  /** The selected objects in time order, which is the order a timestamp lists them. */
+  getSelectedObjects() {
+    return this.getSelectedIndices().map((index) => this.objects[index]).filter(Boolean);
+  }
+
   overviewTimeAtX(x) {
     return clamp(x / Math.max(1, this.width), 0, 1) * this.getVisualDuration();
   }
@@ -548,7 +665,12 @@ class TimelineRenderer {
   }
 
   formatTimeAtX(x) {
-    return formatTimelineTime(this.timeAtX(x), getReadoutDecimals(this.getMsPerPx()));
+    return this.formatTimeAtMs(this.timeAtX(x));
+  }
+
+  /** The same readout, for a time worked out some other way (a snapped one). */
+  formatTimeAtMs(timeMs) {
+    return formatTimelineTime(timeMs, getReadoutDecimals(this.getMsPerPx()));
   }
 
   step(now) {
@@ -703,8 +825,8 @@ class TimelineRenderer {
     this.drawBreaks(ctx, layout, toX, startMs, endMs);
     this.drawKiai(ctx, layout, toX, startMs, endMs, false);
     const beatGridStrength = this.drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx);
-    const tickStepMs = pickTickStep(msPerPx);
-    this.drawTimeGrid(ctx, layout, toX, startMs, endMs, tickStepMs, 1 - beatGridStrength);
+    const ruler = this.buildRuler(startMs, endMs, msPerPx, toX);
+    this.drawTimeGrid(ctx, layout, ruler.xs, 1 - beatGridStrength);
 
     const objectMix = 1 - smoothstep(OBJECTS_SHOWN_MS_PER_PX, DENSITY_SHOWN_MS_PER_PX, msPerPx);
     if (objectMix < 1) {
@@ -716,7 +838,7 @@ class TimelineRenderer {
 
     this.drawKiai(ctx, layout, toX, startMs, endMs, true);
     this.drawPreviewMarker(ctx, layout, toX);
-    this.drawTicks(ctx, layout, toX, startMs, endMs, tickStepMs);
+    this.drawTicks(ctx, layout, ruler.xs);
     this.drawEndMarker(ctx, layout, toX, startMs, endMs);
 
     if (this.hoverX !== null && !this.isInteracting && this.hoverX >= 0 && this.hoverX <= width) {
@@ -781,26 +903,30 @@ class TimelineRenderer {
 
   // Bar and beat lines from the map's own timing, once they are far enough
   // apart to read. Returns how strongly the grid showed, 0 to 1.
-  drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx) {
+  /**
+   * The map's own grid: a line per bar, and per beat once they are far enough
+   * apart to read.
+   *
+   * @returns how far the grid has faded in, which is also how far the fainter
+   *   full-height ruler lines fade out behind it.
+   */
+  /**
+   * Each uninherited timing section that overlaps the view, clipped to it.
+   * Shared by the beat grid and the ruler so the two can never disagree about
+   * where a tempo starts.
+   */
+  getVisibleTimingSections(startMs, endMs) {
     const sections = this.timingSections;
-    if (sections.length === 0) {
-      return 0;
+    const visible = [];
+    let index = 0;
+    while (index + 1 < sections.length && sections[index + 1].time <= startMs) {
+      index += 1;
     }
-
-    let sectionIndex = 0;
-    while (sectionIndex + 1 < sections.length && sections[sectionIndex + 1].time <= startMs) {
-      sectionIndex += 1;
-    }
-
-    // Pairs of x and opacity, drawn after the walk so each kind is one batch.
-    const barLines = [];
-    const beatLines = [];
-    let strength = 0;
-    for (; sectionIndex < sections.length; sectionIndex += 1) {
-      const section = sections[sectionIndex];
-      const sectionEndMs = sectionIndex + 1 < sections.length ? sections[sectionIndex + 1].time : Infinity;
+    for (; index < sections.length; index += 1) {
+      const section = sections[index];
+      const sectionEndMs = index + 1 < sections.length ? sections[index + 1].time : Infinity;
       // The first timing point's grid also runs back to the start of the map.
-      const fromMs = Math.max(startMs, sectionIndex === 0 ? -Infinity : section.time);
+      const fromMs = Math.max(startMs, index === 0 ? -Infinity : section.time);
       const toMs = Math.min(endMs, sectionEndMs);
       if (fromMs > endMs) {
         break;
@@ -808,7 +934,17 @@ class TimelineRenderer {
       if (toMs <= fromMs) {
         continue;
       }
+      visible.push({ section, fromMs, toMs });
+    }
+    return visible;
+  }
 
+  drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx) {
+    // Pairs of x and opacity, drawn after the walk so each kind is one batch.
+    const barLines = [];
+    const beatLines = [];
+    let strength = 0;
+    for (const { section, fromMs, toMs } of this.getVisibleTimingSections(startMs, endMs)) {
       const beatPx = section.beatLength / msPerPx;
       const barPx = beatPx * section.meter;
       const barStrength = clamp((barPx - MIN_BAR_SPACING_PX) / 20, 0, 1);
@@ -851,14 +987,63 @@ class TimelineRenderer {
     return strength;
   }
 
-  drawTimeGrid(ctx, layout, toX, startMs, endMs, stepMs, strength) {
+  /**
+   * Where the marks along the timeline go at this zoom -- the ticks on the top
+   * edge and the faint full-height lines behind them, which are one ruler
+   * drawn twice.
+   *
+   * Always the map's own bars, grouped in whatever power of two keeps them far
+   * enough apart to read: every bar zoomed right in, then every two, four,
+   * eight as the view widens. Phrases are written in those groupings, so a
+   * coarse ruler still lands where the music does -- which round seconds,
+   * sharing no factor with the tempo or the offset, never do.
+   *
+   * Only a map with no timing at all falls back to the clock, there being no
+   * beat to count from.
+   */
+  buildRuler(startMs, endMs, msPerPx, toX) {
+    const xs = [];
+    const sections = this.getVisibleTimingSections(startMs, endMs);
+
+    if (sections.length > 0) {
+      for (const { section, fromMs, toMs } of sections) {
+        const barMs = section.beatLength * section.meter;
+        if (!(barMs > 0)) {
+          continue;
+        }
+        let stepMs = barMs;
+        while (stepMs / msPerPx < MIN_TICK_SPACING_PX) {
+          stepMs *= 2;
+        }
+        // Counted from the section's own start, so every mark is a downbeat
+        // of the tempo in force rather than of the one before it.
+        let index = Math.ceil(((fromMs - section.time) / stepMs) - 1e-6);
+        for (; ; index += 1) {
+          const timeMs = section.time + (index * stepMs);
+          if (timeMs >= toMs) {
+            break;
+          }
+          xs.push(Math.round(toX(timeMs)));
+        }
+      }
+      return { xs, onBars: true };
+    }
+
+    const stepMs = pickTickStep(msPerPx);
+    for (let index = Math.ceil(startMs / stepMs); index * stepMs <= endMs; index += 1) {
+      xs.push(Math.round(toX(index * stepMs)));
+    }
+    return { xs, onBars: false };
+  }
+
+  drawTimeGrid(ctx, layout, rulerXs, strength) {
     if (strength <= 0.01) {
       return;
     }
     ctx.fillStyle = COLOURS.gridLine;
     ctx.globalAlpha = 0.045 * strength;
-    for (let index = Math.ceil(startMs / stepMs); index * stepMs <= endMs; index += 1) {
-      ctx.fillRect(Math.round(toX(index * stepMs)), layout.trackTop, 1, layout.trackBottom - layout.trackTop);
+    for (const x of rulerXs) {
+      ctx.fillRect(x, layout.trackTop, 1, layout.trackBottom - layout.trackTop);
     }
     ctx.globalAlpha = 1;
   }
@@ -970,7 +1155,61 @@ class TimelineRenderer {
         ctx.stroke();
       }
     }
+
+    this.drawSelection(ctx, toX, startMs, endMs, middle, radius, bodyHalf, alpha);
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * A ring around each picked object, drawn over the pass that laid them out
+   * so it reads whether the object is played or still to come. What is ringed
+   * here is what a copied timestamp will name.
+   */
+  drawSelection(ctx, toX, startMs, endMs, middle, radius, bodyHalf, alpha) {
+    if (this.selection.size === 0) {
+      return;
+    }
+
+    const bodies = [];
+    const heads = [];
+    for (const index of this.selection) {
+      const object = this.objects[index];
+      const time = Number(object?.time);
+      if (!Number.isFinite(time) || time > endMs) {
+        continue;
+      }
+      const endTime = Number.isFinite(object.endTime) ? Math.max(time, object.endTime) : time;
+      if (endTime < startMs) {
+        continue;
+      }
+      heads.push(toX(time));
+      if (endTime - time > 1) {
+        bodies.push(toX(time), toX(endTime));
+      }
+    }
+    if (heads.length === 0) {
+      return;
+    }
+
+    if (bodies.length > 0) {
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.fillStyle = COLOURS.selectedHalo;
+      ctx.beginPath();
+      for (let index = 0; index < bodies.length; index += 2) {
+        traceCapsule(ctx, bodies[index], bodies[index + 1], middle, bodyHalf + 1);
+      }
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = COLOURS.selected;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (const x of heads) {
+      ctx.moveTo(x + radius + 1.5, middle);
+      ctx.arc(x, middle, radius + 1.5, 0, Math.PI * 2);
+    }
+    ctx.stroke();
   }
 
   // The beatmap's preview point: a line with a small flag at its top.
@@ -989,11 +1228,11 @@ class TimelineRenderer {
     ctx.fill();
   }
 
-  // Short marks hanging from the top edge, spreading out as the view zooms in.
-  drawTicks(ctx, layout, toX, startMs, endMs, stepMs) {
+  // Short marks hanging from the top edge, on the ruler buildRuler laid out.
+  drawTicks(ctx, layout, rulerXs) {
     ctx.fillStyle = COLOURS.tick;
-    for (let index = Math.ceil(startMs / stepMs); index * stepMs <= endMs; index += 1) {
-      ctx.fillRect(Math.round(toX(index * stepMs)), layout.trackTop, 1, TICK_HEIGHT_PX);
+    for (const x of rulerXs) {
+      ctx.fillRect(x, layout.trackTop, 1, TICK_HEIGHT_PX);
     }
   }
 

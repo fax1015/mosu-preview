@@ -1,5 +1,6 @@
 import { clamp } from '../core/math.js';
 import { formatTimelineTime } from '../timeline.js';
+import { applySelectionClick } from '../core/objectSelection.js';
 
 // Pointer, wheel and keyboard handling for the timeline (src/timeline.js).
 // Every seek goes through the playback controller's `seekTo` and never touches
@@ -37,8 +38,11 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
 
-  const seekToX = (x) => {
-    seekTo(getTimeline().timeAtX(x));
+  // Alt is the way past the magnet, for landing between two objects on a
+  // zoomed timeline. Everywhere else the objects pull the playhead onto them.
+  const seekToX = (x, { snap = true } = {}) => {
+    const timeline = getTimeline();
+    seekTo(snap ? timeline.snapTimeAtX(x) : timeline.timeAtX(x));
   };
 
   const scrollAtEdge = (now) => {
@@ -83,7 +87,7 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       scrollAtEdge(now);
       if (isSeekPending) {
         isSeekPending = false;
-        seekToX(drag.x);
+        seekToX(drag.x, { snap: !drag.noSnap });
       }
     }
     renderer.renderTimeline();
@@ -127,6 +131,10 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       text = `${formatTimelineTime(startMs)} – ${formatTimelineTime(endMs)}`;
     } else if (!drag && timeline.regionAt(y) === 'overview') {
       text = formatTimelineTime(timeline.overviewTimeAtX(x));
+    } else if (!drag?.noSnap && timeline.areObjectsGrabbable()) {
+      // Named from where the playhead will actually land, so the readout and
+      // the click never disagree.
+      text = timeline.formatTimeAtMs(timeline.snapTimeAtX(x));
     } else {
       text = timeline.formatTimeAtX(x);
     }
@@ -143,6 +151,25 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
     tooltip.style.left = `${Math.min(Math.max(rawLeft, minLeft), maxLeft)}px`;
   };
 
+  // Which object a click picks out; what the modifiers then do with it is
+  // shared with the playfield, so the two cannot drift apart.
+  let selectionAnchor = -1;
+
+  const updateSelectionAt = (x, event) => {
+    const timeline = getTimeline();
+    const { selection, anchor } = applySelectionClick({
+      selection: timeline.getSelectedIndices(),
+      index: timeline.objectIndexAtX(x, { includeBodies: true }),
+      // Nothing picked out means no run for shift to extend from, so an
+      // anchor cannot reach back across a deselect.
+      anchor: timeline.hasSelection() ? selectionAnchor : -1,
+      additive: event.ctrlKey || event.metaKey,
+      ranged: event.shiftKey,
+    });
+    selectionAnchor = anchor;
+    timeline.setSelection(selection);
+  };
+
   const updateHover = (x, y) => {
     const timeline = getTimeline();
     let cursor = '';
@@ -152,6 +179,9 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       timeline.setHoverX(null);
     } else {
       timeline.setHoverX(x);
+      if (timeline.objectIndexAtX(x, { includeBodies: true }) >= 0) {
+        cursor = 'pointer';
+      }
     }
     canvas.style.cursor = cursor;
   };
@@ -181,10 +211,16 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       drag = { kind: 'overview', pointerId: event.pointerId, grabOffsetMs };
       canvas.style.cursor = 'grabbing';
     } else {
-      drag = { kind: 'scrub', pointerId: event.pointerId, x, lastFrameAt: null };
+      const noSnap = Boolean(event.altKey);
+      drag = {
+        kind: 'scrub', pointerId: event.pointerId, x, lastFrameAt: null, noSnap,
+      };
       timeline.resumeFollow();
       isSeekPending = false;
-      seekToX(x);
+      if (!noSnap) {
+        updateSelectionAt(x, event);
+      }
+      seekToX(x, { snap: !noSnap });
     }
     updateTooltip(x, y);
     requestFrame();
@@ -225,7 +261,7 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       // whichever sample the last frame happened to catch.
       isSeekPending = false;
       if (event.type === 'pointerup') {
-        seekToX(ended.x);
+        seekToX(ended.x, { snap: !ended.noSnap });
       }
     }
     timeline?.setInteracting(false);

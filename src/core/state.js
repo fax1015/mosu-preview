@@ -91,6 +91,13 @@ const createInitialState = ({ audio = null } = {}) => {
     providerPriority: normalizedSettings.providerPriority,
     disabledProviders: normalizedSettings.disabledProviders,
     autoFallback: normalizedSettings.autoFallback,
+    autoplay: normalizedSettings.autoplay,
+    keybindings: normalizedSettings.keybindings,
+    // Which action the shortcuts panel is waiting for a key for, or null.
+    capturingShortcutAction: null,
+    // Where `n` and `p` can land: bookmarks, kiai starts and break starts, in
+    // time order. Rebuilt with each map.
+    sectionMarks: [],
     hitsoundEvents: [],
     hitsounds: normalizedSettings.hitsounds,
     hitsoundVolume: normalizedSettings.hitsoundVolume,

@@ -1,7 +1,6 @@
 import { extractFullBeatmapAudioToCache } from './audio/fullAudioExtractionCore.js';
 
 const runtimeApi = globalThis.browser?.runtime ?? globalThis.chrome?.runtime ?? null;
-const usesChromeCallbackMessaging = Boolean(globalThis.chrome?.runtime && !globalThis.browser?.runtime);
 
 /** Tracks the single active extraction job so we can abort it when a new request arrives. */
 let activeExtractionJob = null;
@@ -110,21 +109,37 @@ const handleExtractFullAudio = async (message, extract = extractFullBeatmapAudio
   return job.promise;
 };
 
+/**
+ * The worker's runtime.onMessage listener. `handle` is injectable so the reply
+ * path can be tested without reaching the network.
+ *
+ * Answered through sendResponse with the channel held open, in every browser.
+ * Returning the promise instead is only honoured where the browser supports
+ * it, and which browsers do can no longer be told from the namespace: Chrome
+ * 148 defines `browser` but is still rolling promise-returning listeners out,
+ * and where they are off the reply was dropped -- the popup then downloaded the
+ * archive the worker was already downloading. `return true` works in Chrome
+ * and Firefox alike.
+ */
+const createMessageListener = (handle = handleExtractFullAudio) => (message, _sender, sendResponse) => {
+  if (message?.type !== 'extractFullAudio') {
+    return false;
+  }
+  if (typeof sendResponse !== 'function') {
+    return handle(message);
+  }
+  Promise.resolve()
+    .then(() => handle(message))
+    .then(sendResponse, (err) => {
+      sendResponse({ ok: false, error: err?.message || String(err) });
+    });
+  return true;
+};
+
 if (runtimeApi?.onMessage?.addListener) {
-  runtimeApi.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type !== 'extractFullAudio') {
-      return false;
-    }
-    if (usesChromeCallbackMessaging && typeof sendResponse === 'function') {
-      handleExtractFullAudio(message).then(sendResponse).catch((err) => {
-        sendResponse({ ok: false, error: err?.message || String(err) });
-      });
-      return true;
-    }
-    return handleExtractFullAudio(message);
-  });
+  runtimeApi.onMessage.addListener(createMessageListener());
 }
 
 // Exported for tests: the dedupe hinges entirely on two requests for the same
 // track producing the same key.
-export { getExtractionRequestKey, handleExtractFullAudio, abortActiveExtraction };
+export { getExtractionRequestKey, handleExtractFullAudio, abortActiveExtraction, createMessageListener };

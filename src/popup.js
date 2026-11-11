@@ -5,6 +5,7 @@ import {
   PROVIDER_OVERRIDE_KEY,
   AUDIO_VOLUME_KEY,
   DEFAULT_AUDIO_VOLUME,
+  KEYBINDINGS_KEY,
   MANIA_KEY_COUNT_KEY,
   MANIA_PRIMARY_KEY_COUNTS,
   PREVIEW_SETTING_KEYS,
@@ -25,12 +26,20 @@ import {
   queryTabs,
   storageGet,
   storageSet,
+  updateTab,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
 import { extractBeatmapInfoFromUrl, normalizeNumericId } from './core/beatmapUrl.js';
 import { buildBeatmapSourceUrl, readDetachedParams } from './core/detachedWindow.js';
 import { toFollowTarget } from './core/tabFollow.js';
+import {
+  buildSectionMarks,
+  findNextSectionMark,
+  findPreviousSectionMark,
+} from './core/sectionMarks.js';
+import { formatEditorTimestamp } from './core/timestamp.js';
+import { applySelectionClick, isClickAwayFromSelection } from './core/objectSelection.js';
 import { convertMapForMode } from './core/beatmapConversion.js';
 import { getHistory, addToHistory, clearHistory, setHistoryDebugLogger } from './core/history.js';
 import {
@@ -58,11 +67,19 @@ import { createAudioBadgeController } from './ui/audioBadge.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
 import { bindPopupUiEvents, bindPopover } from './ui/popupUI.js';
+import { createShortcutsPanel } from './ui/shortcutsPanel.js';
+import { toStoredKeybindings } from './core/keybindings.js';
 import { attachOverlayScrollbar } from './ui/overlayScrollbar.js';
 import { createUnsupportedViewController } from './ui/unsupportedView.js';
 import { createMediaSessionController } from './ui/mediaSession.js';
 import { createComparePanels } from './ui/comparePanels.js';
-import { parseBeatmapsetPage } from './core/beatmapsetPage.js';
+import {
+  formatStars,
+  getStarRatingColour,
+  getStarRatingTextColour,
+  listDifficultiesForRuleset,
+  parseBeatmapsetPage,
+} from './core/beatmapsetPage.js';
 import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from './core/playbackSpeed.js';
 
 // Resolved and applied before anything else renders: the detached flag decides
@@ -88,13 +105,22 @@ if (IS_DETACHED_WINDOW) {
   document.documentElement.classList.add('is-detached-window');
 }
 
-if (/firefox/i.test(globalThis.navigator?.userAgent || '')) {
+const IS_FIREFOX = /firefox|fxios/i.test(globalThis.navigator?.userAgent || '');
+const IS_MOBILE_VIEW = /android|mobile|tablet|ipad|iphone|ipod/i.test(globalThis.navigator?.userAgent || '')
+  || Boolean(globalThis.matchMedia?.('(hover: none) and (pointer: coarse)')?.matches);
+// Firefox for Android shows the popup as a page of its own, and a tab opened
+// from it opens behind that page: the user has to leave the popup to see it.
+const OPENS_TABS_OUT_OF_SIGHT = IS_FIREFOX && IS_MOBILE_VIEW;
+
+if (IS_FIREFOX) {
   document.body?.classList.add('is-firefox-popup');
 }
 
-const IS_FIREFOX = /firefox|fxios/i.test(globalThis.navigator?.userAgent || '');
-const IS_MOBILE_VIEW = /android|mobile|tablet|ipad|iphone|ipod/i.test(globalThis.navigator?.userAgent || '')
-  || globalThis.matchMedia?.('(hover: none) and (pointer: coarse)')?.matches;
+// A phone has no windows to detach into and no keyboard to bind, so the detach
+// button and the shortcuts list are left out there (see popup.css).
+if (IS_MOBILE_VIEW) {
+  document.documentElement.classList.add('is-mobile-view');
+}
 
 const popup = document.querySelector('#mapPreviewPopup');
 const titleLine = document.querySelector('#mapPreviewTitle');
@@ -173,20 +199,7 @@ const shortcutsButton = document.querySelector('#mapPreviewHelpBtn');
 const shortcutsModal = document.querySelector('#mapPreviewShortcutsModal');
 const shortcutsBackdrop = document.querySelector('#mapPreviewShortcutsBackdrop');
 const shortcutsCloseButton = document.querySelector('#mapPreviewShortcutsCloseBtn');
-const openShortcutItem = document.querySelector('#mapPreviewOpenShortcut');
-const openShortcutKey = document.querySelector('#mapPreviewOpenShortcutKey');
-
-// The browser owns this binding and the user can change or clear it, so the row
-// reads it rather than repeating the manifest's suggestion.
-getCommandShortcut('_execute_action').then((shortcut) => {
-  if (shortcut === null || !openShortcutItem || !openShortcutKey) {
-    return;
-  }
-  openShortcutKey.textContent = shortcut
-    ? shortcut.split('+').map((key) => key.trim()).filter(Boolean).join(' + ')
-    : 'Not set';
-  openShortcutItem.hidden = false;
-}).catch(() => {});
+const shortcutsList = document.querySelector('#mapPreviewShortcutsList');
 
 const recentPanel = document.querySelector('#mapPreviewRecentPanel');
 const recentList = document.querySelector('#mapPreviewRecentList');
@@ -249,6 +262,9 @@ let mediaSessionController = null;
 // uses are declared. The lead's own length is kept apart from theirs, so the
 // timeline can stretch to the longest of them and back.
 let comparePanels = null;
+// The shortcuts panel; assigned once the writer it saves a keymap through is
+// declared. Both the popup and the detached window get one.
+let shortcutsPanel = null;
 let leadMappedDurationMs = 1;
 // What the renderers were last configured with, for a panel made later.
 let lastRendererSettings = null;
@@ -552,6 +568,11 @@ const renderShortcutsMenu = () => {
   if (shortcutsModal) {
     setModalShellVisible(shortcutsModal, state.shortcutsMenuOpen);
   }
+  // A chip left armed would otherwise still be holding the keyboard the next
+  // time the panel opens.
+  if (!state.shortcutsMenuOpen) {
+    shortcutsPanel?.dismiss();
+  }
 };
 
 // The shortcuts dialog normally sits on top of the info menu, but the `?`
@@ -561,6 +582,11 @@ const renderShortcutsMenu = () => {
 let shortcutsOpenedFromInfoMenu = false;
 
 const setShortcutsMenuOpen = (isOpen) => {
+  // Left out on a phone, where its button is hidden; a paired keyboard's `?`
+  // must not open a dialog there is no button to have asked for.
+  if (isOpen && IS_MOBILE_VIEW) {
+    return;
+  }
   if (isOpen) {
     lastShortcutsFocus = document.activeElement instanceof HTMLElement ? document.activeElement : shortcutsButton;
     shortcutsOpenedFromInfoMenu = state.infoMenuOpen;
@@ -626,6 +652,16 @@ const renderRecentPanel = async () => {
   const cachedEntries = buildCachedMapsetEntries(cachedMapsets, history);
 
   recentPanel.hidden = false;
+  recentPanel.classList.remove('is-difficulty-view');
+  const recentTitle = recentPanel.querySelector('.map-preview-recent-title');
+  if (recentTitle) {
+    recentTitle.textContent = 'Cached mapsets';
+  }
+  if (recentClearBtn) {
+    recentClearBtn.hidden = false;
+    recentClearBtn.style.display = '';
+  }
+  recentList.classList.remove('is-difficulty-grid');
   void updateRecentClearButtonCacheUsage();
   recentList.innerHTML = '';
 
@@ -666,8 +702,13 @@ const renderRecentPanel = async () => {
       if (!safeSetId) {
         return;
       }
-      createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` }).catch((error) => {
+      createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` }).then(() => {
+        if (OPENS_TABS_OUT_OF_SIGHT) {
+          showPopupToast('mapset page opened, exit this view to see it');
+        }
+      }).catch((error) => {
         addDebugLog(`cached: could not open set ${safeSetId} (${error?.message || error})`);
+        showPopupToast('Could not open that mapset');
       });
     });
     recentList.appendChild(item);
@@ -724,7 +765,7 @@ const openExtensionOptions = async () => {
     await createTab({ url: 'options.html' });
   }
   setInfoMenuOpen(false);
-  if (IS_FIREFOX && IS_MOBILE_VIEW) {
+  if (OPENS_TABS_OUT_OF_SIGHT) {
     showPopupToast('settings page opened, exit this view to see settings');
   }
 };
@@ -794,6 +835,11 @@ const readPreviewSettings = async () => {
   } catch {
     return normalizePreviewSettings();
   }
+};
+
+const writeKeybindingsSetting = async (bindings) => {
+  await storageSet('sync', { [KEYBINDINGS_KEY]: toStoredKeybindings(bindings) });
+  return true;
 };
 
 const writeAudioVolumeSetting = async (volume) => {
@@ -896,6 +942,9 @@ const applyPreviewSettings = (settings = {}) => {
   state.hitsounds = normalized.hitsounds;
   state.hitsoundVolume = normalized.hitsoundVolume;
   state.hitsoundStyle = normalized.hitsoundStyle;
+  state.autoplay = normalized.autoplay;
+  state.keybindings = normalized.keybindings;
+  shortcutsPanel?.setKeybindings(normalized.keybindings);
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
   hitsoundPlayer.setStyle(normalized.hitsoundStyle);
@@ -1057,6 +1106,7 @@ const {
 });
 
 let lastTimeLabelText = '';
+let lastSelectedCount = -1;
 
 // A hidden window's loop runs off a timer, and a browser that throttles it can
 // stretch the ticks to a second apart, so its hitsounds are placed well past that.
@@ -1094,6 +1144,18 @@ const renderFrame = () => {
   if (nextTimeLabel !== lastTimeLabelText) {
     lastTimeLabelText = nextTimeLabel;
     timeLabel.textContent = nextTimeLabel;
+  }
+
+  // What the button will actually copy changes with the selection, so it says
+  // so -- on the same write-only-on-change footing as the label itself.
+  const selectedCount = renderer.timeline?.getSelectedIndices?.().length ?? 0;
+  if (selectedCount !== lastSelectedCount) {
+    lastSelectedCount = selectedCount;
+    const label = selectedCount === 0
+      ? 'Copy timestamp (C)'
+      : `Copy timestamp with ${selectedCount} object${selectedCount === 1 ? '' : 's'} (C)`;
+    timeLabel.title = label;
+    timeLabel.setAttribute('aria-label', label.replace(' (C)', ''));
   }
 };
 
@@ -1381,6 +1443,121 @@ const toggleMute = () => {
   }
 };
 
+/**
+ * Jumps to the next or previous place the map names for itself -- a bookmark,
+ * the start of a kiai section, or the start of a break -- and says which one
+ * it landed on, since the timeline alone does not name them.
+ */
+const seekToSectionMark = (direction) => {
+  const marks = state.sectionMarks;
+  if (!state.mapData || !Array.isArray(marks) || marks.length === 0) {
+    showPopupToast('This map marks no sections');
+    return;
+  }
+
+  const mark = direction < 0
+    ? findPreviousSectionMark(marks, state.currentTimeMs)
+    : findNextSectionMark(marks, state.currentTimeMs);
+  if (!mark) {
+    showPopupToast(direction < 0 ? 'At the first section' : 'At the last section');
+    return;
+  }
+
+  seekTo(clamp(mark.timeMs, 0, state.durationMs));
+  showPopupToast(`${mark.label} — ${formatTime(mark.timeMs)}`);
+};
+
+/**
+ * An osu!-editor timestamp on the clipboard, ready to paste into a mod or a
+ * chat.
+ *
+ * With objects picked out on the timeline it names them, from the first one's
+ * time -- which is the timestamp the editor would give for that selection.
+ * With none it is the bare playhead, because a timestamp that named whatever
+ * happened to be under the playhead would be guessing at what it is about.
+ */
+const copyEditorTimestamp = async () => {
+  const selected = renderer.timeline?.getSelectedObjects?.() || [];
+  const timeMs = selected.length > 0 ? Number(selected[0].time) : state.currentTimeMs;
+  if (!Number.isFinite(timeMs) || timeMs < 0) {
+    return;
+  }
+
+  const timestamp = formatEditorTimestamp(timeMs, {
+    objects: selected,
+    mode: state.mapData?.mode ?? 0,
+  });
+
+  try {
+    await navigator.clipboard.writeText(timestamp);
+    showPopupToast(`Copied ${timestamp.replace(/\s*-\s*$/, '')}`, undefined, 'copied');
+  } catch (error) {
+    addDebugLog(`ui: failed to copy timestamp -> ${error?.message || 'unknown error'}`);
+    showPopupToast('Could not reach the clipboard');
+  }
+};
+
+// The last object picked out on the playfield, so shift-click there extends a
+// run the same way it does on the timeline.
+let playfieldSelectionAnchor = -1;
+
+/**
+ * Lets go of every picked object, for a click that lands away from the
+ * preview. Escape is deliberately not wired to this: it already zooms out and
+ * closes, and is given nothing else to do (see tests/popup-keys.test.js).
+ *
+ * @returns true when there was something to let go of.
+ */
+const clearObjectSelection = () => {
+  const timeline = renderer.timeline;
+  if (!timeline?.hasSelection()) {
+    return false;
+  }
+  timeline.clearSelection();
+  playfieldSelectionAnchor = -1;
+  // A paused preview has no frame loop to take the rings off on.
+  if (!state.isPlaying) {
+    renderFrame();
+  }
+  return true;
+};
+
+/**
+ * A click on the playfield that landed on a circle.
+ *
+ * @returns true when it picked one out, so the caller leaves playback alone.
+ */
+const selectObjectAtPoint = (event) => {
+  const timeline = renderer.timeline;
+  if (!timeline || !state.mapData) {
+    return false;
+  }
+
+  const rect = playfieldCanvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return false;
+  }
+  const index = renderer.objectIndexAtPoint(event.clientX - rect.left, event.clientY - rect.top);
+  if (index < 0) {
+    return false;
+  }
+
+  const { selection, anchor } = applySelectionClick({
+    selection: timeline.getSelectedIndices(),
+    index,
+    anchor: timeline.hasSelection() ? playfieldSelectionAnchor : -1,
+    additive: event.ctrlKey || event.metaKey,
+    ranged: event.shiftKey,
+  });
+  playfieldSelectionAnchor = anchor;
+  timeline.setSelection(selection);
+  // A paused preview has no frame loop to show the ring on.
+  if (!state.isPlaying) {
+    renderFrame();
+  }
+  return true;
+};
+
 const setMetadataText = () => {
   if (!state.metadata || !state.mapData) {
     titleLine.textContent = 'Map Preview';
@@ -1484,6 +1661,161 @@ const fetchBeatmapsetDifficulties = async (setId) => {
   }
 };
 
+// The grid names the first ruleset the way players do. "osu!" is the game's own
+// branding and reads as a duplicate of the site beside "taiko" and the rest.
+const DIFFICULTY_MODE_LABELS = Object.freeze(['standard', 'taiko', 'catch', 'mania']);
+const difficultyModeLabel = (mode) => DIFFICULTY_MODE_LABELS[mode] || 'standard';
+
+const renderDifficultiesPanel = async (setId, requestedMode = null) => {
+  if (!recentPanel || !recentList || !setId) {
+    return false;
+  }
+
+  let difficulties;
+  try {
+    difficulties = await fetchBeatmapsetDifficulties(setId);
+  } catch (error) {
+    addDebugLog(`diff-list: could not fetch difficulties for set ${setId} (${error?.message || error})`);
+    return false;
+  }
+
+  if (!Array.isArray(difficulties) || difficulties.length === 0) {
+    return false;
+  }
+
+  let list;
+  if (Number.isInteger(requestedMode)) {
+    list = listDifficultiesForRuleset(difficulties, requestedMode);
+  }
+  if (!list || list.length === 0) {
+    const natives = difficulties.filter((entry) => entry && !entry.convert);
+    list = natives.length > 0 ? natives : difficulties;
+  }
+
+  if (list.length === 0) {
+    return false;
+  }
+
+  recentPanel.hidden = false;
+  recentPanel.classList.add('is-difficulty-view');
+  const recentTitle = recentPanel.querySelector('.map-preview-recent-title');
+  if (recentTitle) {
+    recentTitle.textContent = 'Available difficulties';
+  }
+  if (recentClearBtn) {
+    recentClearBtn.hidden = true;
+    recentClearBtn.style.display = 'none';
+  }
+  recentList.classList.add('is-difficulty-grid');
+  recentList.innerHTML = '';
+
+  const groups = new Map();
+  list.forEach((diff) => {
+    const m = Number.isInteger(diff.mode) ? diff.mode : 0;
+    if (!groups.has(m)) {
+      groups.set(m, []);
+    }
+    groups.get(m).push(diff);
+  });
+
+  const sortedModes = [...groups.keys()].sort((a, b) => a - b);
+  const groupsContainer = document.createElement('div');
+  groupsContainer.className = 'map-preview-diff-groups';
+
+  sortedModes.forEach((mode) => {
+    const diffsInMode = groups.get(mode) || [];
+    if (diffsInMode.length === 0) {
+      return;
+    }
+
+    diffsInMode.sort((a, b) => {
+      const starsA = a.stars ?? Number.POSITIVE_INFINITY;
+      const starsB = b.stars ?? Number.POSITIVE_INFINITY;
+      if (starsA !== starsB) return starsA - starsB;
+      return String(a.version || '').localeCompare(String(b.version || ''));
+    });
+
+    const groupElement = document.createElement('div');
+    groupElement.className = 'map-preview-diff-group';
+
+    if (sortedModes.length > 1) {
+      const header = document.createElement('div');
+      header.className = 'map-preview-diff-group-header';
+      header.textContent = `${difficultyModeLabel(mode)} (${diffsInMode.length})`;
+      groupElement.appendChild(header);
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'map-preview-diff-group-grid';
+
+    diffsInMode.forEach((diff) => {
+      const item = document.createElement('a');
+      item.className = 'map-preview-recent-item';
+      const targetUrl = `https://osu.ppy.sh/beatmapsets/${encodeURIComponent(setId)}/discussion/${encodeURIComponent(diff.beatmapId)}/timeline/total`;
+      item.href = targetUrl;
+
+      const badge = document.createElement('div');
+      badge.className = 'map-preview-diff-badge';
+
+      const starPill = document.createElement('span');
+      starPill.className = 'map-preview-panel-stars';
+      if (Number.isFinite(diff.stars)) {
+        starPill.textContent = `★ ${formatStars(diff.stars)}`;
+        starPill.style.setProperty('--star-bg', getStarRatingColour(diff.stars));
+        starPill.style.setProperty('--star-fg', getStarRatingTextColour(diff.stars));
+      } else {
+        starPill.textContent = '★ --';
+      }
+
+      badge.appendChild(starPill);
+
+      const info = document.createElement('span');
+      info.className = 'map-preview-recent-info';
+
+      const title = document.createElement('span');
+      title.className = 'map-preview-recent-item-title';
+      title.textContent = diff.version || 'Difficulty';
+
+      const modeLabel = difficultyModeLabel(diff.mode);
+
+      item.title = `${diff.version || 'Difficulty'} (${modeLabel}${diff.convert ? ' convert' : ''}${Number.isFinite(diff.stars) ? ` ★ ${formatStars(diff.stars)}` : ''})`;
+
+      info.appendChild(title);
+      item.appendChild(badge);
+      item.appendChild(info);
+
+      item.addEventListener('click', async (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        try {
+          const activeTab = await queryActiveTab().catch(() => null);
+          if (activeTab?.id) {
+            await updateTab(activeTab.id, { url: targetUrl });
+          } else {
+            await createTab({ url: targetUrl });
+          }
+        } catch {
+          await createTab({ url: targetUrl }).catch(() => {});
+        }
+        initializePreviewForCurrentTab({ sourceUrlOverride: targetUrl }).catch((err) => {
+          addDebugLog(`diff-select: failed to load preview (${err?.message || err})`);
+        });
+      });
+
+      grid.appendChild(item);
+    });
+
+    groupElement.appendChild(grid);
+    groupsContainer.appendChild(groupElement);
+  });
+
+  recentList.appendChild(groupsContainer);
+
+  return true;
+};
+
 const readCachedPreview = async () => {
   if (!hasStorageArea('session', 'local')) {
     return null;
@@ -1522,10 +1854,23 @@ const revealPopup = () => {
   popup?.classList.add('is-open');
 };
 
+// The loading screen covers the shell from the start of a load until its first
+// render, so the popup is never seen in a half-built state. Keyed on the shell
+// rather than the overlay so both stay in step from one class.
+const setPreviewLoading = (isLoading) => {
+  if (!popup) {
+    return;
+  }
+  popup.classList.toggle('is-loading', isLoading);
+  popup.setAttribute('aria-busy', isLoading ? 'true' : 'false');
+};
+
 const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) => {
   previewLoadToken += 1;
   const loadToken = previewLoadToken;
   const isStaleLoad = () => loadToken !== previewLoadToken;
+
+  setPreviewLoading(true);
 
   // Which tab this is decides which view the popup opens on, so it is asked for
   // straight away, alongside the settings below rather than after them. A
@@ -1538,8 +1883,12 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   stopPlayback();
   setPlaybackSpeedControlEnabled(false);
   state.sourceMapData = null;
+  state.sectionMarks = [];
   syncManiaKeyControls();
   setUnsupportedMode(false);
+  if (recentPanel) {
+    recentPanel.hidden = true;
+  }
   void pruneFullAudioCache();
   clearDebugLogs();
   state.hasAutoStarted = false;
@@ -1588,30 +1937,46 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       addDebugLog(`init: detached window for beatmap ${detachedParams.beatmapId}`);
     } else {
       setStatus('Checking current tab...');
-      const activeTab = await activeTabRequest;
-
-      if (!activeTab?.url) {
-        throw new Error('No active tab URL found.');
-      }
-      sourceUrl = activeTab.url;
+      const activeTab = await activeTabRequest.catch(() => null);
+      // Chrome withholds the URL of tabs it will not let an extension read --
+      // the new tab page, chrome:// pages, other extensions' pages. That is
+      // not a failed load, it is simply a page with no map: the unsupported
+      // view below, not the error one.
+      sourceUrl = activeTab?.url || '';
     }
 
     const info = extractBeatmapInfoFromUrl(sourceUrl);
+
     if (!info.valid) {
       addDebugLog(`init: invalid tab url (${info.reason})`);
       setHeaderSubtitle();
       configureAudioPreview(null, null);
       if (unsupportedAscii) {
-        if (unsupportedPanel && !info.unsupportedSite) {
+        if (unsupportedPanel) {
           const titleEl = unsupportedPanel.querySelector('.map-preview-unsupported-title');
-          if (titleEl) titleEl.textContent = 'no map detected... o_0';
+          if (titleEl) {
+            if (info.unsupportedSite) {
+              titleEl.textContent = 'unsupported webpage :(';
+            } else if (info.needsDifficulty) {
+              titleEl.textContent = 'select a difficulty first';
+            } else {
+              titleEl.textContent = 'no map detected... o_0';
+            }
+          }
         }
         setUnsupportedMode(true);
         // The cached list is part of this view and takes room in it, so it gets
         // a moment to be in place before the popup shows rather than shoving
         // the art aside after. A slow cache read only holds it back so long.
-        const listed = renderRecentPanel().catch((error) => {
-          addDebugLog(`init: cached mapsets unavailable -> ${error?.message || 'unknown error'}`);
+        const listed = (info.needsDifficulty && info.setId
+          ? renderDifficultiesPanel(info.setId, info.mode).then((ok) => {
+            if (!ok) {
+              return renderRecentPanel();
+            }
+          })
+          : renderRecentPanel()
+        ).catch((error) => {
+          addDebugLog(`init: panel list unavailable -> ${error?.message || 'unknown error'}`);
         });
         await Promise.race([
           listed,
@@ -1622,13 +1987,15 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       } else {
         setUnsupportedMode(false);
         titleLine.textContent = 'Preview unavailable';
-        setStatus(info.reason, true);
+        setStatus(info.needsDifficulty ? 'Select a difficulty first' : info.reason, true);
       }
       mediaSessionController?.clearTrack();
       comparePanels?.clear();
       renderer.setBeatmap({ objects: [], mode: 0, comboColours: [] }, 1);
       setTimelineState({ currentTimeMs: 0, durationMs: 1 });
       renderFrame();
+      // This view is the answer, not a placeholder: nothing left to wait for.
+      setPreviewLoading(false);
       revealPopup();
       return;
     }
@@ -1730,6 +2097,8 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     state.mapData = mapData;
     // Only mania converts again (for its key count); other maps need no copy.
     state.sourceMapData = mapData.mode === 3 ? sourceMapData : null;
+    state.sectionMarks = buildSectionMarks(mapData);
+    addDebugLog(`init: ${state.sectionMarks.length} section marks (bookmarks, kiai, breaks)`);
     leadMappedDurationMs = durationMs;
     state.mappedDurationMs = Math.max(durationMs, comparePanels?.getLongestMappedDurationMs() ?? 0);
     const resume = takePendingResume();
@@ -1784,6 +2153,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       creator: metadata.creator,
     });
     renderFrame();
+    setPreviewLoading(false);
 
     setPlaybackSpeedControlEnabled(true);
 
@@ -1793,10 +2163,15 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     // a map-specific audio delay when the full track is already cached.
     if (!state.hasAutoStarted && !isStaleLoad()) {
       state.hasAutoStarted = true;
-      // A preview that was paused when it popped out stays paused; auto-playing
-      // would be its own discontinuity.
-      if (!resume?.paused) {
+      // A handoff carries its own playing state across: a preview that was
+      // paused when it popped out stays paused, and one that was playing keeps
+      // playing whatever autoplay says -- stopping it there would be its own
+      // discontinuity. Autoplay only governs a preview opened from nothing.
+      const shouldPlay = resume ? !resume.paused : state.autoplay;
+      if (shouldPlay) {
         await togglePlayback();
+      } else if (!resume) {
+        addDebugLog('init: autoplay off, starting paused');
       }
     }
 
@@ -1848,6 +2223,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     setTimelineState({ currentTimeMs: 0, durationMs: 1 });
     syncTimeLabelWidth();
     renderFrame();
+    setPreviewLoading(false);
   }
 };
 
@@ -1890,9 +2266,11 @@ comparePanels = createComparePanels({
   button: compareButton,
   listElement: compareList,
   statusElement: compareStatus,
-  // Firefox's toolbar popup has no transitions; its detached window does.
+  // Firefox's desktop toolbar popup has no transitions. Its detached window
+  // does, and so does Firefox for Android, where the popup is a page of its
+  // own rather than a panel hung off the toolbar.
   allowMotion: () => !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
-    && !(IS_FIREFOX && !IS_DETACHED_WINDOW),
+    && !(IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_MOBILE_VIEW),
   bindPopover,
   fetchDifficulties: fetchBeatmapsetDifficulties,
   fetchBeatmap: fetchBeatmapFile,
@@ -1943,6 +2321,24 @@ comparePanels = createComparePanels({
   },
   addDebugLog,
 });
+
+shortcutsPanel = createShortcutsPanel({
+  listElement: shortcutsList,
+  state,
+  persistKeybindings: writeKeybindingsSetting,
+  showPopupToast,
+  addDebugLog,
+});
+shortcutsPanel.render();
+
+// The browser owns the shortcut that opens the preview and the user can change
+// or clear it, so the row reads it rather than repeating the manifest's
+// suggestion. It arrives late; the panel redraws when it does.
+getCommandShortcut('_execute_action').then((shortcut) => {
+  if (shortcut !== null) {
+    shortcutsPanel?.setBrowserShortcut(shortcut);
+  }
+}).catch(() => {});
 
 bindPopupUiEvents({
   elements: {
@@ -2010,6 +2406,10 @@ bindPopupUiEvents({
     showPopupToast,
     seekRelative,
     seekTo,
+    seekToSectionMark,
+    copyEditorTimestamp,
+    selectObjectAtPoint,
+    consumeShortcutCapture: (event) => Boolean(shortcutsPanel?.consumeCaptureKey(event)),
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
@@ -2025,6 +2425,23 @@ bindPopupUiEvents({
       void renderRecentPanel();
     },
   },
+});
+
+// Clicking anywhere that is not the preview lets the picked objects go: the
+// playfield and the timeline are where they live and where they are chosen, so
+// anywhere else is a click away from them.
+//
+// Pointerdown rather than click, to match the other dismiss-on-outside
+// handlers, and listening on the document so it catches the header, the
+// controls, the menus and the gaps between them alike.
+document.addEventListener('pointerdown', (event) => {
+  if (isClickAwayFromSelection(event.target, {
+    previewArea: canvasWrap,
+    timelineCanvas,
+    copyButton: timeLabel,
+  })) {
+    clearObjectSelection();
+  }
 });
 
 // `pagehide` rather than `unload`: `unload` is deprecated, is not guaranteed to
@@ -2101,7 +2518,9 @@ renderInfoMenu();
 // event fire a sync against a target that is not set yet, which reloads the same
 // map a second time on every open.
 initializePreviewForCurrentTab().finally(() => {
-  // Whatever happened, the popup must not stay invisible.
+  // Whatever happened, the popup must not stay invisible -- or under its
+  // loading screen, if the load threw before it could clear that itself.
+  setPreviewLoading(false);
   revealPopup();
   if (IS_DETACHED_WINDOW) {
     startFollowingBrowsingTabs();
@@ -2109,7 +2528,24 @@ initializePreviewForCurrentTab().finally(() => {
 });
 
 addStorageChangedListener((changes, areaName) => {
-  if (areaName !== 'sync' || !hasPreviewSettingChange(changes)) {
+  if (areaName !== 'sync') {
+    return;
+  }
+
+  // The volume lives outside the preview-settings bundle because the slider
+  // writes it on a debounce. A write still waiting here is newer than
+  // whatever storage now holds, so applying that would undo the drag the user
+  // is in the middle of -- the same guard the initial read uses.
+  if (Object.hasOwn(changes, AUDIO_VOLUME_KEY) && state.volumePersistTimer === null) {
+    const candidate = Number(changes[AUDIO_VOLUME_KEY]?.newValue);
+    if (Number.isFinite(candidate)) {
+      // applyAudioVolume only moves the level and its slider; persisting is a
+      // separate call, so reacting here writes nothing back.
+      applyAudioVolume(clamp(candidate, 0, 1));
+    }
+  }
+
+  if (!hasPreviewSettingChange(changes)) {
     return;
   }
 

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createUnsupportedViewController } from '../src/ui/unsupportedView.js';
 
 const createMockElements = () => {
@@ -116,4 +117,42 @@ test('unsupported ASCII view controller toggles unsupported state and runs Conwa
   // Stopping must also deregister the interval, otherwise the cleanup registry
   // accumulates a dead id every time the animation restarts.
   assert.equal(intervals.size, 0);
+});
+
+// --- the menu button the cached-mapsets panel carries -----------------------
+//
+// There are two ways into the options menu and only one of them is ever on
+// screen. Which one depends on this view: it hides the header, so the panel
+// needs its own; everywhere else the header is right above the panel and a
+// second button is the same button twice.
+
+const popupHtml = () => readFileSync(new URL('../popup.html', import.meta.url), 'utf8');
+const popupCss = () => readFileSync(new URL('../popup.css', import.meta.url), 'utf8');
+
+test('both menu buttons open the same menu', () => {
+  const html = popupHtml();
+  const buttons = [...html.matchAll(/js-map-preview-info-btn/g)];
+
+  assert.equal(buttons.length, 2, 'the header carries one and the cached panel the other');
+  assert.match(html, /id="mapPreviewHeaderInfoBtn"/);
+  assert.match(html, /id="mapPreviewRecentInfoBtn"/);
+});
+
+test('this view hides the header, which is why the panel carries a menu button', () => {
+  // The premise of the rule below. If the header is ever shown here too, the
+  // panel's button stops being the only way in and should go entirely.
+  const css = popupCss();
+  const rule = css.match(/\.map-preview-popup\.is-unsupported>\s*:not\([^{]*\)\s*\{[^}]*\}/);
+
+  assert.ok(rule, 'everything but a few children is hidden in the unsupported view');
+  assert.ok(!/map-preview-header/.test(rule[0]), 'the header is not one of the exceptions');
+  assert.match(rule[0], /display:\s*none/);
+});
+
+test('the panel does not repeat the menu button the header is already showing', () => {
+  assert.match(popupHtml(), /class="[^"]*map-preview-recent-menu-btn[^"]*"[\s\S]{0,120}id="mapPreviewRecentInfoBtn"/);
+  assert.match(
+    popupCss(),
+    /\.map-preview-popup:not\(\.is-unsupported\)\s+\.map-preview-recent-menu-btn\s*\{\s*display:\s*none;\s*\}/,
+  );
 });

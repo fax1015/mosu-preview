@@ -33,7 +33,9 @@ const mergeArchiveFetchOptions = (options = {}) => {
   return {
     cache: 'no-store',
     redirect: 'follow',
-    referrer: 'https://osu.ppy.sh/',
+    // No `referrer` here: fetch only takes one on the page's own origin and
+    // quietly swaps anything else for the default, so the osu.ppy.sh this used
+    // to name was never sent.
     referrerPolicy: 'strict-origin-when-cross-origin',
     ...options,
     headers: mergedHeaders,

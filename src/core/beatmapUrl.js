@@ -44,9 +44,17 @@ const getRequestedMode = (url) => {
 };
 
 const extractBeatmapInfoFromUrl = (rawUrl) => {
+  const candidate = String(rawUrl ?? '').trim();
+  if (!candidate) {
+    // No URL at all: a page the browser will not let an extension read, such
+    // as the new tab page, a chrome:// page or another extension's. There is
+    // nothing to preview there, which is an unsupported page, not a failure.
+    return { valid: false, reason: 'unsupported website :(', unsupportedSite: true };
+  }
+
   let url;
   try {
-    url = new URL(rawUrl);
+    url = new URL(candidate);
   } catch {
     return { valid: false, reason: 'Active tab URL is not valid.' };
   }
@@ -87,6 +95,21 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     };
   }
 
+  // Discussion pages embed the beatmap id in the path:
+  // /beatmapsets/<setId>/discussion/<beatmapId>/...
+  const discussionMatch = url.pathname.match(
+    /\/beatmapsets\/\d+\/discussion\/(\d+)/i,
+  );
+  if (discussionMatch) {
+    return {
+      valid: true,
+      beatmapId: discussionMatch[1],
+      setId: beatmapSetMatch[1],
+      mode: getRequestedMode(url),
+      sourceUrl: url.toString(),
+    };
+  }
+
   const queryBeatmapId = url.searchParams.get('b');
   if (queryBeatmapId && /^\d+$/.test(queryBeatmapId)) {
     return {
@@ -98,9 +121,18 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     };
   }
 
+  // A set page with no difficulty in it: what a search result, a forum link or
+  // the modding queue opens, and what the site itself shows a default
+  // difficulty for. The set id is handed back so a caller that can read the
+  // set's difficulty list resolves one rather than giving up; a caller that
+  // cannot still sees an invalid URL.
   return {
     valid: false,
     reason: 'Beatmap set page found, but no beatmap difficulty ID in the URL hash.',
+    needsDifficulty: true,
+    setId: beatmapSetMatch[1],
+    mode: getRequestedMode(url),
+    sourceUrl: url.toString(),
   };
 };
 

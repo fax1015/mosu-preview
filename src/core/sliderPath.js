@@ -162,6 +162,13 @@ const BEZIER_FLATNESS_SQUARED = BEZIER_TOLERANCE * BEZIER_TOLERANCE * 4;
 // No real slider comes near this, but a corrupt file should not be able to
 // spend a whole frame subdividing one span.
 const MAX_BEZIER_POINTS = 65536;
+// Halving a span costs its control point count squared, so the point ceiling
+// alone does not bound the time: one span of 200,000 anchors spends twenty
+// seconds on its first halving and never reaches a point to count. This is the
+// work one slider may spend, in inner steps of the halving. Real maps are
+// nowhere near it: the 7,427-anchor sliders of beatmap 5839914 are split by
+// their red anchors into spans of at most 90 points, about 1e5 steps each.
+const MAX_BEZIER_WORK = 1e9;
 
 // Spans are held as flat x, y pairs rather than point objects: this walks every
 // control point of every slider in a map, and the per-point objects the old
@@ -218,7 +225,7 @@ const bezierApproximate = (span, output, left, right, midpoints, count) => {
   }
 };
 
-const sampleBezierSegment = (controlPoints) => {
+const sampleBezierSegment = (controlPoints, budget = { work: 0 }) => {
   if (!Array.isArray(controlPoints) || controlPoints.length < 2) {
     return [];
   }
@@ -241,9 +248,19 @@ const sampleBezierSegment = (controlPoints) => {
   const output = [];
   const toFlatten = [first];
   const freeSpans = [];
+  const workPerHalving = count * count;
 
   while (toFlatten.length > 0 && output.length < MAX_BEZIER_POINTS) {
     const span = toFlatten.pop();
+    budget.work += workPerHalving;
+    if (budget.work > MAX_BEZIER_WORK) {
+      // Out of budget: what is left is drawn as its control polygon, which is
+      // where the curve was heading anyway, rather than not at all.
+      for (let i = 0; i < count - 1; i += 1) {
+        output.push({ x: span[i * 2], y: span[(i * 2) + 1] });
+      }
+      continue;
+    }
     if (bezierIsFlatEnough(span, count)) {
       bezierApproximate(span, output, left, right, midpoints, count);
       freeSpans.push(span);
@@ -375,15 +392,18 @@ const sampleBezierPath = (pathPoints) => {
   }
 
   const sampled = [];
+  // One budget for the whole slider, however many spans it is cut into.
+  const budget = { work: 0 };
   for (const segment of segments) {
-    const partial = sampleBezierSegment(segment);
+    const partial = sampleBezierSegment(segment, budget);
     if (!partial.length) {
       continue;
     }
-    if (sampled.length && pointsEqual(sampled[sampled.length - 1], partial[0])) {
-      sampled.push(...partial.slice(1));
-    } else {
-      sampled.push(...partial);
+    // Appended one at a time: spreading a span of a hundred thousand points
+    // into push() overflows the call stack.
+    const skipFirst = sampled.length && pointsEqual(sampled[sampled.length - 1], partial[0]);
+    for (let i = skipFirst ? 1 : 0; i < partial.length; i += 1) {
+      sampled.push(partial[i]);
     }
   }
 
@@ -597,8 +617,51 @@ const positionOnPathAtProgress = (path, progress) => {
   return path[path.length - 1];
 };
 
+/**
+ * The running length at each point of a polyline, for looking positions up on
+ * it more than once. positionOnPathAtProgress measures the whole path on every
+ * call, which is right for a path made for one frame and ruinous for a
+ * converter asking after every droplet of a 250,000-point slider.
+ */
+const measurePath = (path) => {
+  const cumulativeLengths = new Float64Array(Array.isArray(path) ? path.length : 0);
+  for (let i = 1; i < cumulativeLengths.length; i += 1) {
+    cumulativeLengths[i] = cumulativeLengths[i - 1] + pointDistance(path[i - 1], path[i]);
+  }
+  return cumulativeLengths;
+};
+
+/** positionOnPathAtProgress, by binary search over measurePath's lengths. */
+const positionOnMeasuredPath = (path, cumulativeLengths, progress) => {
+  if (!Array.isArray(path) || path.length === 0) {
+    return { x: 0, y: 0 };
+  }
+  const last = path.length - 1;
+  const totalLength = cumulativeLengths[last] || 0;
+  if (last === 0 || !(totalLength > 0)) {
+    return path[0];
+  }
+
+  const target = clamp(Number(progress) || 0, 0, 1) * totalLength;
+  let low = 1;
+  let high = last;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (cumulativeLengths[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  const segmentLength = cumulativeLengths[low] - cumulativeLengths[low - 1];
+  const t = segmentLength <= 0 ? 0 : clamp((target - cumulativeLengths[low - 1]) / segmentLength, 0, 1);
+  return {
+    x: path[low - 1].x + ((path[low].x - path[low - 1].x) * t),
+    y: path[low - 1].y + ((path[low].y - path[low - 1].y) * t),
+  };
+};
+
 export {
   buildSliderCurvePoints,
+  measurePath,
+  positionOnMeasuredPath,
   dedupeAdjacentPoints,
   fitPathToExpectedDistance,
   getPathLength,

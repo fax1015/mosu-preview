@@ -627,3 +627,58 @@ test('a preview clip that cannot cover the map is not mistaken for a stall', asy
   assert.equal(state.playbackMode, 'manual', 'a clip minutes away is not a stall');
   assert.ok(state.currentTimeMs >= 25 * 60_000, 'the playhead stays where the user put it');
 });
+
+// --- how often a scrub repaints ---------------------------------------------
+//
+// The playfield draws on a desynchronized canvas, which presents what has been
+// drawn so far rather than waiting for the frame to be finished. A repaint
+// that starts off the frame clock can therefore show its clear without the
+// objects that follow, and a drag used to fire several of those a frame: one
+// from the seek itself and one from every `seeked` event the element handed
+// back. That is the flicker.
+
+test('a paused seek paints once, on the frame clock, not the moment it is asked', async () => {
+  const harness = createHarness();
+  const { state, frames, gate, controller, rendered } = harness;
+
+  controller.seekTo(5000);
+  assert.deepEqual(rendered, [], 'nothing is painted inside the seek call itself');
+  assert.equal(frames.pending, 1, 'a frame is queued for it');
+
+  frames.runFrame(0);
+  assert.deepEqual(rendered, [5000], 'and the frame paints it, once');
+
+  // The element reports the seek afterwards, off the frame clock.
+  await gate.settleNext(true);
+  assert.deepEqual(rendered, [5000], 'which does not paint on the spot either');
+  frames.runFrame(16);
+  assert.equal(rendered.length, 2);
+  assert.equal(state.currentTimeMs, 5000);
+});
+
+test('a burst of seeks in one frame paints once, not once each', async () => {
+  // What dragging the timeline does: a seek per pointer sample, each one
+  // superseding the last.
+  const harness = createHarness();
+  const { frames, controller, rendered } = harness;
+
+  controller.seekTo(1000);
+  controller.seekTo(2000);
+  controller.seekTo(3000);
+  assert.equal(frames.pending, 1, 'one frame queued for all three');
+
+  frames.runFrame(0);
+  assert.deepEqual(rendered, [3000], 'painted once, at where the drag got to');
+});
+
+test('playback still paints on its own frame, with no extra hop', async () => {
+  // The loop already runs on the frame clock; routing it through the same
+  // coalescing would cost it a frame for nothing.
+  const harness = createHarness();
+  const { frames, rendered } = harness;
+  await harness.startAudioPlayback(0);
+
+  const before = rendered.length;
+  frames.runFrame(16);
+  assert.equal(rendered.length, before + 1, 'exactly one paint for the frame');
+});

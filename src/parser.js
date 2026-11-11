@@ -7,6 +7,26 @@ import { clamp } from './core/math.js';
 const MIN_SLIDER_VELOCITY = 0.1;
 const MAX_SLIDER_VELOCITY = 10;
 
+// The ranges osu!lazer's decoder holds a map's own numbers to. A .osu file is
+// whatever its uploader typed, and every one of these is a divisor or a loop
+// bound somewhere downstream: a tick rate of 1e9 asked the renderer for two
+// billion slider ticks, and a beat length of 1e12 made one slider last 68
+// years. Clamping here, once, is what keeps every consumer finite.
+const MIN_SLIDER_MULTIPLIER = 0.4;
+const MAX_SLIDER_MULTIPLIER = 3.6;
+const MIN_SLIDER_TICK_RATE = 0.5;
+const MAX_SLIDER_TICK_RATE = 8;
+const MIN_BEAT_LENGTH = 6;
+const MAX_BEAT_LENGTH = 60000;
+// Positions and slider lengths, in osu!pixels (lazer's MAX_COORDINATE_VALUE).
+const MAX_COORDINATE = 131072;
+// Times are 32-bit milliseconds in osu!, a little under 25 days. An object
+// outside that has nowhere on a timeline to go and is dropped, as lazer drops
+// it; an object that starts inside it and runs past it ends there.
+export const MAX_OBJECT_TIME_MS = 2147483647;
+
+const clampCoordinate = (value) => clamp(value, -MAX_COORDINATE, MAX_COORDINATE);
+
 export const parseMetadata = (content) => {
   const data = {};
   let section = '';
@@ -155,6 +175,9 @@ export const parseMapPreviewData = (content, options = {}) => {
   // [General] SampleSet is the bank a hit falls back to when neither the object
   // nor the timing point names one.
   let defaultSampleSet = SAMPLE_SET_NONE;
+  // [Editor] Bookmarks: where the mapper marked something worth coming back
+  // to. Nothing in the preview is drawn from them; they are places to seek to.
+  let bookmarks = [];
 
   const lines = content.split(/\r?\n/);
 
@@ -196,6 +219,22 @@ export const parseMapPreviewData = (content, options = {}) => {
       continue;
     }
 
+    if (section === 'editor') {
+      const sep = trimmed.indexOf(':');
+      if (sep !== -1 && trimmed.slice(0, sep).trim().toLowerCase() === 'bookmarks') {
+        // A comma list of whole milliseconds. Older editors wrote a trailing
+        // comma, and a map saved with the bookmarks cleared writes the key with
+        // nothing after it, so both leave empty fields to drop.
+        bookmarks = [...new Set(
+          trimmed.slice(sep + 1)
+            .split(',')
+            .map((field) => Number.parseInt(field.trim(), 10))
+            .filter((time) => Number.isFinite(time) && time >= 0 && time <= MAX_OBJECT_TIME_MS),
+        )].sort((a, b) => a - b);
+      }
+      continue;
+    }
+
     if (section === 'difficulty') {
       const sep = trimmed.indexOf(':');
       if (sep === -1) {
@@ -209,9 +248,9 @@ export const parseMapPreviewData = (content, options = {}) => {
       }
 
       if (key === 'slidermultiplier') {
-        sliderMultiplier = value || 1.0;
+        sliderMultiplier = clamp(value, MIN_SLIDER_MULTIPLIER, MAX_SLIDER_MULTIPLIER);
       } else if (key === 'slidertickrate') {
-        sliderTickRate = value || 1.0;
+        sliderTickRate = clamp(value, MIN_SLIDER_TICK_RATE, MAX_SLIDER_TICK_RATE);
       } else if (key === 'circlesize') {
         circleSize = value;
       } else if (key === 'approachrate') {
@@ -231,8 +270,8 @@ export const parseMapPreviewData = (content, options = {}) => {
       }
 
       const time = parseInt(parts[0], 10);
-      const beatLength = parseFloat(parts[1]);
-      if (!Number.isFinite(time) || !Number.isFinite(beatLength)) {
+      const rawBeatLength = parseFloat(parts[1]);
+      if (!Number.isFinite(time) || !Number.isFinite(rawBeatLength) || Math.abs(time) > MAX_OBJECT_TIME_MS) {
         continue;
       }
 
@@ -242,7 +281,12 @@ export const parseMapPreviewData = (content, options = {}) => {
       // silently drops every SV change on legacy beatmaps.
       const uninherited = parts.length > 6
         ? parts[6] === '1'
-        : beatLength > 0;
+        : rawBeatLength > 0;
+      // Only a real tempo is held to the range: a negative value on a
+      // greenline is a slider velocity, clamped where it is read.
+      const beatLength = uninherited && rawBeatLength > 0
+        ? clamp(rawBeatLength, MIN_BEAT_LENGTH, MAX_BEAT_LENGTH)
+        : rawBeatLength;
 
       timingPoints.push({
         time,
@@ -296,15 +340,20 @@ export const parseMapPreviewData = (content, options = {}) => {
       continue;
     }
 
-    const x = parseFloat(parts[0]);
-    const y = parseFloat(parts[1]);
+    const rawX = parseFloat(parts[0]);
+    const rawY = parseFloat(parts[1]);
     const time = parseInt(parts[2], 10);
     const type = parseInt(parts[3], 10);
     const hitSound = parseInt(parts[4], 10);
 
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(time) || !Number.isFinite(type)) {
+    if (
+      !Number.isFinite(rawX) || !Number.isFinite(rawY) || !Number.isFinite(time) || !Number.isFinite(type)
+      || Math.abs(time) > MAX_OBJECT_TIME_MS
+    ) {
       continue;
     }
+    const x = clampCoordinate(rawX);
+    const y = clampCoordinate(rawY);
 
     const isSlider = (type & 2) !== 0;
     const isSpinner = (type & 8) !== 0;
@@ -326,7 +375,7 @@ export const parseMapPreviewData = (content, options = {}) => {
         const firstToken = pathString.split('|')[0] || '';
         sliderCurveType = firstToken.trim().charAt(0).toUpperCase() || 'B';
         slides = Math.min(MAX_SLIDER_SLIDES, Math.max(1, parseInt(parts[6], 10) || 1));
-        length = parseFloat(parts[7]) || 0;
+        length = clamp(parseFloat(parts[7]) || 0, 0, MAX_COORDINATE);
         sliderEdgeSounds = (parts[8] || '')
           .split('|')
           .map((value) => Number.parseInt(value, 10))
@@ -342,7 +391,8 @@ export const parseMapPreviewData = (content, options = {}) => {
         endTime = time + Math.max(0, Math.round(duration));
 
         sliderPoints = parseSliderPath(pathString)
-          .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y));
+          .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+          .map((point) => ({ x: clampCoordinate(point.x), y: clampCoordinate(point.y) }));
       }
     } else if (isSpinner) {
       endTime = parseInt(parts[5], 10) || time;
@@ -367,7 +417,9 @@ export const parseMapPreviewData = (content, options = {}) => {
       x,
       y,
       time,
-      endTime: Math.max(time, endTime),
+      // NaN from a duration that overflowed reads as "no length" rather than
+      // poisoning every comparison made against it.
+      endTime: Number.isFinite(endTime) ? clamp(endTime, time, MAX_OBJECT_TIME_MS) : time,
       kind,
       type,
       sourceType: type,
@@ -405,7 +457,7 @@ export const parseMapPreviewData = (content, options = {}) => {
   if (isTruncated) {
     for (let index = objects.length; index < hitObjectLines.length; index += 1) {
       const time = Number.parseInt(hitObjectLines[index].split(',')[2], 10);
-      if (Number.isFinite(time) && time > maxObjectTime) {
+      if (Number.isFinite(time) && time > maxObjectTime && time <= MAX_OBJECT_TIME_MS) {
         maxObjectTime = time;
       }
     }
@@ -462,6 +514,7 @@ export const parseMapPreviewData = (content, options = {}) => {
     timingPoints: uninheritedTimingPoints,
     defaultSampleSet,
     timingControlPoints,
+    bookmarks,
     comboColours: parseColours(content),
     maxObjectTime,
     hitObjectCount: hitObjectLines.length,

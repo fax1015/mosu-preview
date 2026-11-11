@@ -93,9 +93,11 @@ const gridOf = (count, width, height) => {
 };
 
 // The preview areas measured in Helium: the toolbar popup's, and a detached
-// window's at its default size, tall and narrow, and wide and short.
+// window's at its default size, tall and narrow, and wide and short. The
+// popup's is 357 wide as measured, and as tall as the 4:3 preview makes that
+// (it measured 276 when the preview was 1.29:1).
 const AREAS = {
-  popup: [357, 276],
+  popup: [357, 267],
   detachedDefault: [600, 585],
   tallNarrow: [380, 860],
   wideShort: [1400, 470],
@@ -106,6 +108,11 @@ test('in the popup\'s own area two sit side by side and three or four in a 2x2 g
   assert.equal(gridOf(2, w, h), '2x1');
   assert.equal(gridOf(3, w, h), '2x2');
   assert.equal(gridOf(4, w, h), '2x2');
+  // An area the panels' own shape is a dead heat for two, and goes to side by
+  // side whichever way the half pixel falls.
+  for (const height of [299, 300, 301]) {
+    assert.equal(`${choosePanelGrid(2, 400, height).cols}x${choosePanelGrid(2, 400, height).rows}`, '2x1', `400x${height}`);
+  }
 });
 
 test('a squarish window uses a 2x2 grid once there are three', () => {
@@ -190,3 +197,4 @@ test('what is on screen wins over what was stored', () => {
     ['c'],
   );
 });
+

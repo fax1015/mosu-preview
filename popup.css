@@ -361,6 +361,86 @@ html.is-detached-window .map-preview-follow-btn {
     pointer-events: auto;
 }
 
+/* A map arrives all at once -- title, subtitle, playfield and controls -- but
+   the frames before the first render show it arriving piecemeal: the empty
+   playfield, then the placeholder title, then the badge. This covers the shell
+   until that render is in, so the popup only ever opens on a finished view. */
+.map-preview-loading {
+    position: absolute;
+    inset: 0;
+    /* Above the cached-mapsets panel and the menus it can open, all of which
+       belong to the view this is hiding. */
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    border-radius: inherit;
+    background: rgb(36, 34, 42);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.16s ease, visibility 0.16s ease;
+}
+
+.map-preview-popup.is-loading .map-preview-loading {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+/* One throbber wherever the popup waits on something: the loading screen, the
+   audio badge (including while the full track is fetched), a compare panel
+   still loading its map, and the difficulty picker's list. Only the size and
+   spacing differ, set by each caller. */
+.map-preview-loading-spinner,
+.map-preview-audio-badge.is-spinning::before,
+.map-preview-audio-badge.is-loading::before,
+.map-preview-panel.is-loading .map-preview-panel-status::before,
+.map-preview-compare-status.is-loading::before {
+    box-sizing: border-box;
+    display: inline-block;
+    flex: 0 0 auto;
+    width: var(--map-preview-throbber-size, 1.25rem);
+    height: var(--map-preview-throbber-size, 1.25rem);
+    border: 2px solid rgba(255, 255, 255, 0.16);
+    border-top-color: rgba(205, 223, 255, 0.9);
+    border-radius: 50%;
+    animation: map-preview-spinner 0.72s linear infinite;
+}
+
+.map-preview-panel.is-loading .map-preview-panel-status::before,
+.map-preview-compare-status.is-loading::before {
+    content: "";
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .map-preview-loading {
+        transition: none;
+    }
+
+    .map-preview-loading-spinner,
+    .map-preview-audio-badge.is-spinning::before,
+    .map-preview-audio-badge.is-loading::before,
+    .map-preview-panel.is-loading .map-preview-panel-status::before,
+    .map-preview-compare-status.is-loading::before {
+        animation: none;
+        border-top-color: rgba(205, 223, 255, 0.55);
+    }
+}
+
+/* A phone has no separate windows to open a preview in, and no keyboard for
+   the shortcuts list to describe. */
+html.is-mobile-view .map-preview-detach-btn,
+html.is-mobile-view #mapPreviewHelpBtn {
+    display: none;
+}
+
 body.is-firefox-popup .map-preview-popup {
     background: rgb(36, 34, 42);
     box-shadow: none;
@@ -411,6 +491,14 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 
 .map-preview-popup.is-unsupported .map-preview-recent-panel {
     flex-shrink: 0;
+}
+
+/* The cached-mapsets panel carries its own way into the options menu, because
+   the rule above hides the header -- and the menu button on it -- whenever
+   there is no map. Over a beatmap page that header is right above the panel,
+   so the panel's button is the same button a second time, two rows down. */
+.map-preview-popup:not(.is-unsupported) .map-preview-recent-menu-btn {
+    display: none;
 }
 
 .map-preview-unsupported-title {
@@ -540,18 +628,33 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 }
 
 /* The artist gives way first; the difficulty, which says which map this is,
-   keeps up to just over half the line. */
+   is the last to be cut.
+
+   Said with shrink factors rather than a width on either one. The difficulty
+   used to carry `max-width: 55%`, which is a ceiling and not the reservation
+   it was meant to be: a short artist left a third of the line empty and the
+   difficulty was clipped anyway, whatever the window was widened to. Both are
+   free to take the whole line now, and the 8:1 weighting only decides who
+   loses characters once there are none left to share. */
 .map-preview-artist {
-    flex: 0 1 auto;
-    min-width: 0;
+    flex: 0 8 auto;
+    /* Not 0: a difficulty name long enough to overrun the whole line would
+       otherwise take every pixel the artist has, and the header is the only
+       place the artist is written. A couple of characters and an ellipsis at
+       least say there is one, and the full name stays in the tooltip. */
+    min-width: 3ch;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
-.map-preview-version {
-    flex: 0 0 auto;
+/* ...but a floor under nothing is just an indent before the difficulty. */
+.map-preview-artist:empty {
     min-width: 0;
-    max-width: 55%;
+}
+
+.map-preview-version {
+    flex: 0 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     color: rgba(226, 222, 238, 0.86);
@@ -577,10 +680,19 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     flex-shrink: 0;
 }
 
+/* 4:3, osu!'s own 640x480 view, and not to be changed without the reference
+   below. The height is set by one slider: beatmap 5337582 (Aphex Twin -
+   Cock/ver10 [7\]) at 2:50, the CS 5.1 loop that runs around the outside of
+   the playfield from x=-32 to 544 and y=-24 to 392. At 4:3 its body lies just
+   inside the preview, about 3px from every edge. Taller (this was 1.29:1)
+   leaves a band above and below it; shorter cuts it off. The playfield itself
+   is never stretched to fit: the preview is sized to the field instead.
+   tests/renderer.test.js holds this to the slider, and the README's
+   "preview size" section says why. */
 .map-preview-canvas-wrap {
     position: relative;
     width: 100%;
-    aspect-ratio: 1.29 / 1;
+    aspect-ratio: 4 / 3;
     border-radius: calc(var(--border-radius) - 3px);
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.08);
@@ -683,13 +795,10 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     border-radius: 50%;
 }
 
-.map-preview-audio-badge.is-spinning::before {
-    width: 0.72rem;
-    height: 0.72rem;
+.map-preview-audio-badge.is-spinning::before,
+.map-preview-audio-badge.is-loading::before {
+    --map-preview-throbber-size: 0.72rem;
     margin-right: 0.34rem;
-    border: 2px solid rgba(255, 255, 255, 0.28);
-    border-top-color: rgba(255, 255, 255, 0.9);
-    animation: map-preview-spinner 0.72s linear infinite;
 }
 
 .map-preview-audio-badge.is-preview {
@@ -1138,7 +1247,10 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 .map-preview-shortcuts-list {
     flex: 1 1 auto;
     display: grid;
-    gap: 0.35rem;
+    /* The rows carry their own hairline separators, so a gap here would only
+       break the list back up into the cards this replaced. */
+    gap: 0;
+    align-content: start;
     min-height: 0;
     overflow-y: auto;
     padding-right: 0.18rem;
@@ -1167,32 +1279,189 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     display: none;
 }
 
+/* A row is a key column and a label, with a hairline between rows instead of a
+   card each: the cards cost more height than the text in them and turned a
+   list of twenty keys into a long scroll. The key column is a fixed width so
+   every chip lines up down the list rather than stepping in and out with the
+   length of the key on it. */
 .map-preview-shortcut-item {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: var(--map-preview-shortcut-key-column, 4.9rem) minmax(0, 1fr);
     align-items: center;
-    gap: 1rem;
-    padding: 0.4rem 0.6rem;
-    border-radius: 0.5rem;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.04);
+    gap: 0.55rem;
+    padding: 0.17rem 0.3rem;
+    border-radius: 0.35rem;
+}
+
+.map-preview-shortcut-item:hover {
+    background: rgba(255, 255, 255, 0.045);
+}
+
+/* The browser's own shortcut is a chord, not a key, and does not fit the
+   column the single keys line up in. */
+.map-preview-shortcut-item--browser {
+    grid-template-columns: auto minmax(0, 1fr);
+}
+
+.map-preview-shortcut-item+.map-preview-shortcut-item {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.map-preview-shortcut-keys {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+/* Uppercase hairline heading, so four groups cost about one row between them. */
+.map-preview-shortcut-group {
+    margin: 0.5rem 0 0.1rem;
+    padding: 0 0.3rem;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.38);
+}
+
+.map-preview-shortcut-group:first-child {
+    margin-top: 0;
 }
 
 .map-preview-shortcut-key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.55rem;
+    padding: 0.1rem 0.32rem;
     font-family: var(--font-family-mono);
-    font-size: 0.7rem;
+    font-size: 0.66rem;
     font-weight: 700;
+    line-height: 1.45;
     color: var(--accent-secondary);
     background: rgba(239, 196, 95, 0.1);
-    padding: 0.15rem 0.4rem;
     border-radius: 0.3rem;
     border: 1px solid rgba(239, 196, 95, 0.2);
+    white-space: nowrap;
+}
+
+/* Bound keys are buttons; the ones the preview does not own are not, and say
+   so by sitting flat and grey rather than looking like a chip that ignores a
+   click. */
+button.map-preview-shortcut-key {
+    cursor: pointer;
+    appearance: none;
+    transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+button.map-preview-shortcut-key:hover {
+    background: rgba(239, 196, 95, 0.2);
+    border-color: rgba(239, 196, 95, 0.45);
+}
+
+button.map-preview-shortcut-key:focus-visible {
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: 1px;
+}
+
+.map-preview-shortcut-key.is-fixed {
+    color: rgba(255, 255, 255, 0.52);
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.09);
+}
+
+.map-preview-shortcut-key.is-unset {
+    color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.08);
+    font-style: italic;
+}
+
+/* Armed and waiting for a key. Pulsing rather than merely recoloured: the
+   popup takes every keypress while this is up, so it has to be obvious which
+   chip is holding the keyboard. */
+.map-preview-shortcut-key.is-capturing {
+    color: rgb(24, 23, 28);
+    background: var(--accent-secondary);
+    border-color: var(--accent-secondary);
+    animation: map-preview-shortcut-capture 1.1s ease-in-out infinite;
+}
+
+@keyframes map-preview-shortcut-capture {
+    50% {
+        opacity: 0.55;
+    }
+}
+
+.map-preview-shortcut-copy {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    min-width: 0;
 }
 
 .map-preview-shortcut-desc {
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
+    color: rgba(255, 255, 255, 0.88);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.map-preview-shortcut-note {
+    flex-shrink: 0;
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.38);
+    white-space: nowrap;
+}
+
+.map-preview-shortcut-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.3rem 0.1rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.map-preview-shortcut-hint {
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.34);
+}
+
+.map-preview-shortcut-reset {
+    flex-shrink: 0;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.78);
+    font-family: inherit;
+    font-size: 0.62rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.map-preview-shortcut-reset[hidden] {
+    display: none;
+}
+
+.map-preview-shortcut-reset:hover {
+    background: rgba(255, 255, 255, 0.11);
+    color: var(--text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    button.map-preview-shortcut-key,
+    .map-preview-shortcut-key.is-capturing {
+        transition: none;
+        animation: none;
+    }
 }
 
 .map-preview-toggle-indicator {
@@ -1265,11 +1534,17 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     grid-auto-flow: column;
     align-items: center;
     gap: 4px;
+    /* Let the row's height fall out of the children and the padding, so the
+       vertical gap stays the same size as the horizontal one whatever the
+       border width rounds to. A fixed outer height left the 22px children
+       centred in whatever slack the border did not account for. */
     box-sizing: border-box;
-    height: calc(var(--map-preview-capsule-inner-height) + 8px);
+    height: auto;
     padding: 3px;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: calc((var(--map-preview-capsule-inner-height) + 8px) / 2);
+    /* A fixed pill radius tracks the row's height whatever the padding and
+       border round to. */
+    border-radius: 999px;
     background: rgba(0, 0, 0, 0.22);
     line-height: 1;
 }
@@ -1325,11 +1600,6 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     transition: color var(--transition), background-color var(--transition);
-}
-
-/* Volume leads the row as a soft pill; speed sits bare past the hairline. */
-.map-preview-volume-btn {
-    background: rgba(255, 255, 255, 0.07);
 }
 
 /* Hover only lifts it; the accent is reserved for the open popover, so the
@@ -1837,6 +2107,37 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     text-align: center;
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
+    /* It is a button -- it copies the timestamp -- so it carries a button's
+       reset and a pointer, but reads as the readout it replaced until the
+       cursor is on it. */
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font-family: inherit;
+    font-weight: inherit;
+    cursor: pointer;
+    transition: color 0.16s ease, background-color 0.16s ease;
+}
+
+.map-preview-time-label:hover:not(:disabled) {
+    color: var(--text-primary, rgba(255, 255, 255, 0.92));
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.map-preview-time-label:active:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.map-preview-time-label:focus-visible {
+    outline: 1px solid rgba(255, 255, 255, 0.55);
+    outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .map-preview-time-label {
+        transition: none;
+    }
 }
 
 /* Torus draws its figures about 0.05em below the middle of its line box, so
@@ -2033,8 +2334,97 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     color: inherit;
     font: inherit;
     text-align: left;
+    text-decoration: none;
+    box-sizing: border-box;
     cursor: pointer;
     transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.map-preview-recent-item .map-preview-panel-stars {
+    font-size: 0.68rem;
+    padding: 0.22rem 0.5rem;
+    min-width: 3.4rem;
+}
+
+.map-preview-diff-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    width: 100%;
+}
+
+.map-preview-diff-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.map-preview-diff-group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.1rem 0.2rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.map-preview-diff-group-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: 0.3rem;
+}
+
+.map-preview-diff-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+}
+
+.map-preview-recent-list.is-difficulty-grid .map-preview-recent-item {
+    display: flex;
+    align-items: center;
+    /* Two lines of title plus this card's padding and border, reserved either
+       way, so a short name's line centres in a card the same height as a
+       wrapped one. */
+    min-height: 2.625rem;
+    padding: 0.3rem 0.45rem;
+    gap: 0.4rem;
+    border-radius: 0.45rem;
+}
+
+.map-preview-recent-list.is-difficulty-grid .map-preview-panel-stars {
+    font-size: 0.6rem;
+    padding: 0.12rem 0.32rem;
+    min-width: 2.5rem;
+}
+
+.map-preview-recent-list.is-difficulty-grid .map-preview-recent-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    /* The shared rule stacks title and meta in a column; a difficulty has only
+       the title, and a column would centre it across the row's spare width. */
+    flex-direction: row;
+    align-items: center;
+}
+
+.map-preview-recent-list.is-difficulty-grid .map-preview-recent-item-title {
+    font-size: 0.76rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--text-primary);
+    text-align: left;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
 }
 
 .map-preview-recent-item:hover {
@@ -2103,6 +2493,11 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     font: inherit;
     font-size: 0.72rem;
     font-weight: 700;
+}
+
+.map-preview-recent-action-btn[hidden],
+.map-preview-recent-panel.is-difficulty-view .map-preview-recent-clear-btn {
+    display: none !important;
 }
 
 .map-preview-recent-action-btn svg {
@@ -2503,6 +2898,7 @@ html.is-hitsounds-off .map-preview-panel-label.is-sound-source .map-preview-pane
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.4rem;
     padding: 0 1rem;
     color: rgba(255, 255, 255, 0.65);
     font-size: 0.72rem;
@@ -2517,6 +2913,12 @@ html.is-hitsounds-off .map-preview-panel-label.is-sound-source .map-preview-pane
 
 .map-preview-panel.is-loading .map-preview-panel-status {
     animation: map-preview-panel-pulse 1.2s ease-in-out infinite;
+}
+
+/* The panels are small, so their wait mark is a step down from the full-screen
+   one rather than dwarfing the caption beside it. */
+.map-preview-panel.is-loading .map-preview-panel-status::before {
+    --map-preview-throbber-size: 1rem;
 }
 
 /* A panel whose map is still on its way is a card a shade above the grid, so
@@ -2724,6 +3126,13 @@ html.is-comparing .map-preview-compare-btn,
     animation: map-preview-compare-check-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
+/* Un-ticking a difficulty: the check shrinks away before its row's tag is
+   rewritten, so the row does not blink from tick to word. Kept in step with
+   CHECK_EXIT_MS in src/ui/comparePanels.js, which swaps the tag when it ends. */
+.map-preview-compare-check.is-leaving {
+    animation: map-preview-compare-check-out 130ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
 .map-preview-compare-check svg {
     display: block;
     overflow: visible;
@@ -2744,6 +3153,13 @@ html.is-comparing .map-preview-compare-btn,
     }
 }
 
+@keyframes map-preview-compare-check-out {
+    to {
+        opacity: 0;
+        transform: scale(0.6);
+    }
+}
+
 @media (prefers-reduced-motion: reduce) {
     .map-preview-compare-popover,
     .map-preview-compare-control.is-compare-open .map-preview-compare-popover {
@@ -2753,13 +3169,17 @@ html.is-comparing .map-preview-compare-btn,
 
     .map-preview-panel.is-loading .map-preview-panel-status,
     html.is-comparing .map-preview-panel-label,
-    .map-preview-compare-check {
+    .map-preview-compare-check,
+    .map-preview-compare-check.is-leaving {
         animation: none;
     }
 }
 
-html:not(.is-detached-window) body.is-firefox-popup .map-preview-panel-label,
-html:not(.is-detached-window) body.is-firefox-popup .map-preview-compare-check {
+/* Firefox's desktop toolbar popup only: a detached window and Firefox for
+   Android, where the popup is a full page, animate like everything else. */
+html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-panel-label,
+html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check,
+html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check.is-leaving {
     animation: none;
 }
 

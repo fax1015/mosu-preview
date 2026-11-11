@@ -298,6 +298,32 @@ const createPlaybackController = ({
   // sample.
   let isSettlingSeek = false;
 
+  /**
+   * A seek's paint, coalesced onto the next animation frame.
+   *
+   * Dragging the timeline seeks once a frame, but every seek also gets a
+   * `seeked` event back from the media element whenever the element gets round
+   * to it, and the settle loop below paints on each one. Those land off the
+   * frame clock, and the playfield draws on a desynchronized canvas
+   * (core/canvas.js) -- it presents what has been drawn so far rather than
+   * waiting for the frame to be finished, so a repaint that starts mid-frame
+   * can put its clear on screen without the objects that follow it. Several of
+   * those a frame is the flicker a scrub used to show.
+   *
+   * The playback loop paints directly: it already runs on the frame clock, and
+   * going through here would cost it a frame.
+   */
+  let seekFrameId = null;
+  const renderSeekFrame = () => {
+    if (seekFrameId !== null) {
+      return;
+    }
+    seekFrameId = requestFrame(() => {
+      seekFrameId = null;
+      renderFrame();
+    });
+  };
+
   const completePendingSeek = async (token, settled) => {
     const targetMapMs = state.pendingSeekMapMs;
     state.pendingSeekMapMs = null;
@@ -308,7 +334,7 @@ const createPlaybackController = ({
       // the preview rather than freezing on a seek that may never land.
       syncVisualClockToMapTime(targetMapMs ?? state.currentTimeMs);
       releaseAudioClock();
-      renderFrame();
+      renderSeekFrame();
       return;
     }
 
@@ -318,7 +344,7 @@ const createPlaybackController = ({
       // dragging them to wherever the audio stopped.
       syncVisualClockToMapTime(targetMapMs);
       releaseAudioClock();
-      renderFrame();
+      renderSeekFrame();
       return;
     }
 
@@ -329,7 +355,7 @@ const createPlaybackController = ({
       // here -- following it only made a paused click land early.
       syncVisualClockToMapTime(targetMapMs);
       state.playbackMode = 'none';
-      renderFrame();
+      renderSeekFrame();
       return;
     }
 
@@ -339,7 +365,7 @@ const createPlaybackController = ({
     } catch {
       if (isCurrentAudioOperation(token)) {
         releaseAudioClock();
-        renderFrame();
+        renderSeekFrame();
       }
       return;
     }
@@ -349,7 +375,7 @@ const createPlaybackController = ({
     }
 
     adoptAudioClock();
-    renderFrame();
+    renderSeekFrame();
   };
 
   const runSeekSettleLoop = async () => {
@@ -402,7 +428,7 @@ const createPlaybackController = ({
         // release the hold, so this seek has to.
         releaseAudioClock();
       }
-      renderFrame();
+      renderSeekFrame();
       return;
     }
 
@@ -418,12 +444,12 @@ const createPlaybackController = ({
     if (!hasAudioTarget) {
       state.pendingSeekMapMs = null;
       releaseAudioClock();
-      renderFrame();
+      renderSeekFrame();
       return;
     }
 
     state.pendingSeekMapMs = targetMapMs;
-    renderFrame();
+    renderSeekFrame();
 
     if (!isSettlingSeek) {
       void runSeekSettleLoop();

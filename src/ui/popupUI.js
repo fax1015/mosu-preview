@@ -1,4 +1,5 @@
 import { bindTimelineInput } from './timelineInput.js';
+import { createKeybindingLookup, eventKeyToken } from '../core/keybindings.js';
 
 // Speed, volume and mania's key count each show their value on a button that
 // opens a panel above it. All open and close on click alone: hover-to-open has
@@ -25,8 +26,12 @@ const bindPopover = ({
   });
 
   // Covers keyboard dismissal; pointers are handled by the outside pointerdown.
+  // A click on a plain part of the panel moves focus to the body rather than to
+  // another element, which reads as `relatedTarget: null` -- focus has not left
+  // the popover, so that must not close it. Only focus moving to another
+  // element outside does.
   control?.addEventListener('focusout', (event) => {
-    if (control.contains(event.relatedTarget)) {
+    if (!event.relatedTarget || control.contains(event.relatedTarget)) {
       return;
     }
     setOpen(false);
@@ -120,9 +125,12 @@ const bindPopupUiEvents = ({
     setDebugPanelOpen,
     applyAudioVolume,
     writeAudioVolumeSetting,
-    showPopupToast,
     seekRelative,
     seekTo,
+    seekToSectionMark,
+    copyEditorTimestamp,
+    selectObjectAtPoint,
+    consumeShortcutCapture,
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
@@ -132,6 +140,9 @@ const bindPopupUiEvents = ({
     toggleCachedMapsetsPanel,
     closeCachedMapsetsPanel,
   } = actions;
+
+  // What a focused range input does for itself.
+  const SLIDER_OWN_KEYS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
 
   // One frame at 60fps: fine enough to step through a stack, coarse enough that
   // holding the key still moves visibly.
@@ -174,17 +185,43 @@ const bindPopupUiEvents = ({
     return false;
   };
 
+  // Rebuilt only when the keymap is replaced -- which is what a rebind and a
+  // settings change both do -- rather than on every keypress.
+  let cachedBindings = null;
+  let cachedLookup = new Map();
+  const actionForEvent = (event) => {
+    if (state.keybindings !== cachedBindings) {
+      cachedBindings = state.keybindings;
+      cachedLookup = createKeybindingLookup(state.keybindings);
+    }
+    return cachedLookup.get(eventKeyToken(event)) ?? null;
+  };
+
   document.addEventListener('keydown', async (event) => {
+    // An armed chip in the shortcuts panel owns the keyboard outright: the
+    // next key is the one being bound, so nothing below may read it first --
+    // not the dialog's Tab trap and not Escape, which here means "never mind".
+    if (consumeShortcutCapture?.(event)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+
     if (trapDialogTab(event, state.shortcutsMenuOpen ? shortcutsModal : infoModal)) {
       return;
     }
 
-    // Ignore while typing
-    const isTyping = ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)
+    const { key, shiftKey } = event;
+
+    // Ignore while typing. A slider is an input too, but nothing is typed
+    // into one: it keeps the keys that move it and the rest stay shortcuts.
+    // Treating it as a text field left Space, M and every other key dead
+    // from the moment the volume was dragged until something else was clicked.
+    const isSlider = event.target.tagName === 'INPUT' && event.target.type === 'range';
+    const isTyping = (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) && !isSlider)
       || event.target.isContentEditable;
     if (isTyping) return;
-
-    const { key, shiftKey } = event;
+    if (isSlider && SLIDER_OWN_KEYS.includes(key)) return;
 
     // Ctrl+R, Cmd+W and the like belong to the browser; in the detached window
     // Ctrl+R used to restart the preview as well as reload it. AltGr arrives as
@@ -195,36 +232,47 @@ const bindPopupUiEvents = ({
       return;
     }
 
-    const isShortcutsKey = key === '?' || (key === '/' && shiftKey);
+    const action = actionForEvent(event);
 
     // A dialog is modal: the preview behind it must not react, and Space on one
     // of its buttons has to reach that button instead of toggling playback.
     if (state.infoMenuOpen || state.shortcutsMenuOpen) {
-      if (isShortcutsKey) {
+      if (action === 'showShortcuts') {
         setShortcutsMenuOpen(!state.shortcutsMenuOpen);
       }
       return;
     }
 
-    // The cached-mapsets rows and the difficulty picker's are buttons too.
+    // The cached-mapsets rows, the difficulty picker's and the time label are
+    // buttons too: Space and Enter on one belong to it, not to playback.
     if ((key === ' ' || key === 'Enter')
-      && (recentPanel?.contains(event.target) || compareControl?.contains(event.target))) {
+      && (recentPanel?.contains(event.target)
+        || compareControl?.contains(event.target)
+        || event.target === timeLabel)) {
       return;
     }
 
-    // Prevention of browser scrolling for specific keys
+    // Prevention of browser scrolling for specific keys. Whatever they are
+    // bound to, these scroll the page, so the list stays by key rather than by
+    // action; a key that did reach an action is swallowed below.
     if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
       event.preventDefault();
     }
 
-    // Digits jump to a percentage of the map: 0 is the start, 9 is 90%.
+    // Digits jump to a percentage of the map: 0 is the start, 9 is 90%. A
+    // range rather than an action, which is why the digits cannot be rebound.
     if (!shiftKey && /^[0-9]$/.test(key) && state.durationMs > 0) {
       seekTo((Number(key) / 10) * state.durationMs);
       return;
     }
 
-    switch (key.toLowerCase()) {
-      case ' ': {
+    if (!action) {
+      return;
+    }
+    event.preventDefault();
+
+    switch (action) {
+      case 'playPause': {
         const wasPlaying = state.isPlaying;
         const isPlayingNow = await togglePlayback();
         if (isPlayingNow || wasPlaying) {
@@ -232,70 +280,78 @@ const bindPopupUiEvents = ({
         }
         break;
       }
-      case 'arrowleft':
+      // Shift is a modifier on the seek, not a binding of its own: whichever
+      // key seeks, holding shift makes it the long one.
+      case 'seekBackward':
         seekRelative(shiftKey ? -15000 : -5000);
         break;
-      case 'arrowright':
+      case 'seekForward':
         seekRelative(shiftKey ? 15000 : 5000);
         break;
-      case 'arrowup':
+      case 'volumeUp':
         applyAudioVolume(state.volume + 0.05);
         break;
-      case 'arrowdown':
+      case 'volumeDown':
         applyAudioVolume(state.volume - 0.05);
         break;
-      case 's':
+      case 'cycleSpeed':
         cyclePlaybackSpeed();
         break;
-      case 'k':
+      case 'cycleManiaKeys':
         cycleManiaKeyCount?.();
         break;
-      case 'm':
+      case 'mute':
         toggleMute();
         break;
-      case 'r':
+      case 'restart':
         restartPreview();
         break;
-      case 'home':
+      // The places the map names for itself: a bookmark, a kiai start, a
+      // break. Faster than walking a marathon in five-second steps.
+      case 'nextSection':
+        seekToSectionMark?.(1);
+        break;
+      case 'previousSection':
+        seekToSectionMark?.(-1);
+        break;
+      case 'copyTimestamp':
+        void copyEditorTimestamp?.();
+        break;
+      case 'jumpStart':
         seekTo(0);
         break;
-      case 'end':
+      case 'jumpEnd':
         // A hair inside the end, so the clock does not immediately trip the
         // end-of-map stop and reset to zero.
         if (state.durationMs > 0) {
           seekTo(Math.max(0, state.durationMs - 1));
         }
         break;
-      case ',':
-      case '.': {
+      case 'frameBack':
+      case 'frameForward': {
         // Stepping a frame only means anything on a paused preview: at normal
         // speed playback covers the step before the next frame is drawn.
         if (state.isPlaying) {
           await togglePlayback();
           showCanvasToggleFeedback('pause');
         }
-        seekRelative(key === ',' ? -FRAME_STEP_MS : FRAME_STEP_MS);
+        seekRelative(action === 'frameBack' ? -FRAME_STEP_MS : FRAME_STEP_MS);
         break;
       }
-      case '=':
-      case '+':
+      case 'zoomIn':
         timelineControls.zoomIn();
         break;
-      case '-':
-      case '_':
+      case 'zoomOut':
         timelineControls.zoomOut();
         break;
-      case '[':
+      case 'speedDown':
         applyPlaybackSpeed(state.playbackSpeed - SPEED_NUDGE_STEP);
         break;
-      case ']':
+      case 'speedUp':
         applyPlaybackSpeed(state.playbackSpeed + SPEED_NUDGE_STEP);
         break;
-      case '?':
-      case '/':
-        if (isShortcutsKey) {
-          setShortcutsMenuOpen(!state.shortcutsMenuOpen);
-        }
+      case 'showShortcuts':
+        setShortcutsMenuOpen(!state.shortcutsMenuOpen);
         break;
     }
   });
@@ -384,22 +440,15 @@ const bindPopupUiEvents = ({
   });
 
   timeLabel?.addEventListener('click', () => {
-    const tsMs = state.currentTimeMs;
-    if (!Number.isFinite(tsMs) || tsMs < 0) return;
-    const totalSec = Math.floor(tsMs / 1000);
-    const mins = String(Math.floor(totalSec / 60)).padStart(2, '0');
-    const secs = String(totalSec % 60).padStart(2, '0');
-    const ms = String(Math.floor(tsMs % 1000)).padStart(3, '0');
-    const timestamp = `${mins}:${secs}:${ms}`;
-
-    navigator.clipboard.writeText(timestamp).then(() => {
-      showPopupToast(`Copied ${timestamp}`, undefined, 'copied');
-    }).catch((err) => {
-      addDebugLog(`ui: failed to copy timestamp -> ${err?.message || 'unknown error'}`);
-    });
+    void copyEditorTimestamp?.();
   });
 
-  playfieldCanvas.addEventListener('click', async () => {
+  playfieldCanvas.addEventListener('click', async (event) => {
+    // A circle under the pointer is something to pick out; the rest of the
+    // playfield is still the big play/pause button it has always been.
+    if (selectObjectAtPoint?.(event)) {
+      return;
+    }
     const wasPlaying = state.isPlaying;
     const isPlayingNow = await togglePlayback();
     if (isPlayingNow || wasPlaying) {

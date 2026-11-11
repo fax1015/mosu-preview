@@ -1,6 +1,8 @@
 import { MAX_SLIDER_SLIDES } from '../parser.js';
 import { getTimingStateAt } from './controlPoints.js';
-import { buildSliderCurvePoints, getPathLength, positionOnPathAtProgress } from './sliderPath.js';
+import {
+  buildSliderCurvePoints, getPathLength, measurePath, positionOnMeasuredPath,
+} from './sliderPath.js';
 import { clamp } from './math.js';
 import { parseModeToken } from './beatmapUrl.js';
 
@@ -516,16 +518,20 @@ const getPathPosition = (object, progress) => {
     return { x: 0, y: 0 };
   }
 
-  let path = sliderCurveCache.get(object);
-  if (!path) {
+  // Measured once with the curve: a long slider is asked about at every
+  // droplet, and walking its whole polyline each time made an anchor-dense one
+  // take the converter tens of seconds.
+  let measured = sliderCurveCache.get(object);
+  if (!measured) {
     const curve = buildSliderCurvePoints(object);
-    path = curve.length > 0
+    const path = curve.length > 0
       ? curve
       : [{ x: Number(object.x) || 0, y: Number(object.y) || 192 }];
-    sliderCurveCache.set(object, path);
+    measured = { path, lengths: measurePath(path) };
+    sliderCurveCache.set(object, measured);
   }
 
-  return positionOnPathAtProgress(path, progress);
+  return positionOnMeasuredPath(measured.path, measured.lengths, progress);
 };
 
 const buildCatchObjects = (mapData) => {
@@ -600,7 +606,9 @@ const buildCatchObjects = (mapData) => {
         }
 
         spanTicks.sort((a, b) => a.time - b.time);
-        events.push(...spanTicks);
+        for (const tick of spanTicks) {
+          events.push(tick);
+        }
 
         if (span < spanCount - 1) {
           events.push({
@@ -674,7 +682,11 @@ const buildCatchObjects = (mapData) => {
         const time = source.time + ((duration * i) / count);
         const seed = ((source.time * 0.0017) + (i * 0.61803398875)) | 0;
         const random = createLegacyRandom(seed);
-        add(indexedSource, time, random.nextDouble() * OSU_WIDTH, 'banana');
+        // The list is full: a spinner days long would otherwise go on seeding a
+        // generator for each of a hundred million bananas nobody will see.
+        if (!add(indexedSource, time, random.nextDouble() * OSU_WIDTH, 'banana')) {
+          break;
+        }
       }
       continue;
     }

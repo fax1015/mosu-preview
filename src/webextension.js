@@ -107,6 +107,27 @@ export const createTab = async (createProperties) => {
   });
 };
 
+export const updateTab = async (tabId, updateProperties) => {
+  if (!extensionApi?.tabs?.update) {
+    throw new Error('Tabs API is unavailable.');
+  }
+
+  if (usesPromiseApi) {
+    return extensionApi.tabs.update(tabId, updateProperties);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.tabs.update(tabId, updateProperties, (tab) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to update tab.'));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+};
+
 export const hasWindowsApi = () => Boolean(extensionApi?.windows?.create);
 
 export const getExtensionUrl = (path) => (

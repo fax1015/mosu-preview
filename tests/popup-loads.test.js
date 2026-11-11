@@ -127,6 +127,7 @@ const installStubs = () => {
     tabs: {
       query: () => Promise.resolve([]),
       create: () => Promise.resolve({}),
+      update: () => Promise.resolve({}),
       onUpdated: { addListener: noop },
     },
     windows: {
@@ -168,5 +169,28 @@ test('popup.js evaluates without an unbound reference', async () => {
     assert.fail(`popup.js throws at evaluation: ${failure.name}: ${failure.message}`);
   }
   // Anything else means the stub ran out of browser, which is fine here.
+  assert.ok(true);
+});
+
+// Same reasoning for the options page, which has the same failure mode and is
+// even easier to miss: nothing there animates, so a page that threw on load
+// looks like a page whose controls simply do nothing.
+test('options.js evaluates without an unbound reference', async () => {
+  installStubs();
+  const ignoreRejection = () => {};
+  process.on('unhandledRejection', ignoreRejection);
+
+  let failure = null;
+  try {
+    await import(pathToFileURL(new URL('../src/options.js', import.meta.url).pathname).href);
+  } catch (error) {
+    failure = error;
+  } finally {
+    process.off('unhandledRejection', ignoreRejection);
+  }
+
+  if (failure && (failure instanceof ReferenceError || / is not defined/.test(failure.message))) {
+    assert.fail(`options.js throws at evaluation: ${failure.name}: ${failure.message}`);
+  }
   assert.ok(true);
 });

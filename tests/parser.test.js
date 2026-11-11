@@ -263,3 +263,64 @@ SampleSet: Nonsense
   assert.equal(map.timingControlPoints[0].sampleSet, 0);
   assert.equal(map.timingControlPoints[0].volume, 100, 'volume is clamped, not dropped');
 });
+
+test('parses editor bookmarks, sorted and deduplicated', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Editor]
+Bookmarks: 48000,12000,24000,12000
+DistanceSpacing:1
+BeatDivisor:4
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.deepEqual(map.bookmarks, [12000, 24000, 48000]);
+});
+
+test('an empty or absent Bookmarks line leaves no bookmarks', () => {
+  // A map saved with its bookmarks cleared still writes the key, and older
+  // editors wrote a trailing comma after the last one.
+  assert.deepEqual(parseMapPreviewData(`
+osu file format v14
+
+[Editor]
+Bookmarks:
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`).bookmarks, []);
+
+  assert.deepEqual(parseMapPreviewData(`
+osu file format v14
+
+[Editor]
+Bookmarks: 1000,2000,
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`).bookmarks, [1000, 2000]);
+
+  assert.deepEqual(parseMapPreviewData(`
+osu file format v14
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`).bookmarks, []);
+});
+
+test('a bookmark that is not a time is dropped, not read as zero', () => {
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Editor]
+Bookmarks: 1000,nonsense,-500,2000
+
+[HitObjects]
+256,192,1000,1,0,0:0:0:0:
+`);
+
+  assert.deepEqual(map.bookmarks, [1000, 2000]);
+});

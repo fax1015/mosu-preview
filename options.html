@@ -159,6 +159,23 @@
 
       <div class="settings-group">
         <h2 class="settings-section-title">audio</h2>
+        <label for="autoplay" class="settings-toggle-card">
+          <input id="autoplay" type="checkbox" checked />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Play on open</span>
+            <span class="settings-toggle-description">Start the preview as soon as it opens.</span>
+          </span>
+        </label>
+        <div class="settings-slider-card settings-slider-card--single">
+          <label for="audioVolume" class="settings-slider-copy">
+            <span class="settings-slider-title">Music volume</span>
+            <span class="settings-slider-value"><span id="audioVolumeValue">80%</span></span>
+          </label>
+          <div class="settings-slider-controls">
+            <input id="audioVolume" class="settings-range" type="range" min="0" max="100" step="5" value="80" />
+          </div>
+        </div>
         <label for="autoFallback" class="settings-toggle-card">
           <input id="autoFallback" type="checkbox" checked />
           <span class="settings-toggle-mark" aria-hidden="true"></span>
@@ -175,6 +192,28 @@
 
         <div id="providerPriorityList" class="settings-priority-list">
           <!-- Priority items with toggles injected here -->
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">cache</h2>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <span class="settings-row-title">Cached audio</span>
+            <span class="settings-row-description" id="cacheUsageValue">Reading&hellip;</span>
+          </div>
+          <button type="button" class="settings-action-btn" id="cacheClearBtn">Clear</button>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <h2 class="settings-section-title">reset</h2>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <span class="settings-row-title">Restore defaults</span>
+            <span class="settings-row-description">Resets everything here to defaults, but keeps your data.</span>
+          </div>
+          <button type="button" class="settings-action-btn settings-action-btn--danger" id="resetDefaultsBtn">Reset</button>
         </div>
       </div>
     </section>

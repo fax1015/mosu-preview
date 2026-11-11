@@ -600,6 +600,8 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo =
 
 export {
   FULL_AUDIO_CACHE_NAME,
+  FULL_AUDIO_CACHE_TOTAL_MAX_BYTES,
+  FULL_AUDIO_CACHE_ENTRY_MAX_AGE_MS,
   MAPSET_INFO_HEADERS,
   buildMapsetInfoHeaders,
   parseCachedMapsetInfo,

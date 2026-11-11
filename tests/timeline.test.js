@@ -279,3 +279,362 @@ test('a re-converted map swaps its objects without losing the zoom or the song e
   assert.equal(timeline.maxObjectDurationMs, 7000, 'the longest object is the new hold');
   assert.equal(timeline.fullDensity, null, 'density is counted again from the new notes');
 }));
+
+// --- the ticks along the top edge ------------------------------------------
+//
+// They are the boldest thing on that edge, so where they sit is read as the
+// scale. Zoomed out that can only be the clock; zoomed in it has to be the
+// map's own bars, because seconds and downbeats almost never coincide and a
+// ruler sitting visibly off the notes under it reads as a bug.
+
+const TICK_H = 3;
+
+// Records what was painted, so a test can ask where the ticks landed.
+const createRecordingCanvas = () => {
+  const rects = [];
+  const arcs = [];
+  const state = { globalAlpha: 1 };
+  const context = new Proxy({}, {
+    get: (target, property) => {
+      if (property === 'fillRect') {
+        return (x, y, w, h) => rects.push({
+          x, y, w, h, alpha: state.globalAlpha,
+        });
+      }
+      if (property === 'arc') {
+        return (x, y, r) => arcs.push({
+          x, y, r, stroke: state.strokeStyle, alpha: state.globalAlpha,
+        });
+      }
+      if (property in state) {
+        return state[property];
+      }
+      if (!(property in target)) {
+        target[property] = () => {};
+      }
+      return target[property];
+    },
+    set: (target, property, value) => {
+      state[property] = value;
+      return true;
+    },
+  });
+  const canvas = {
+    clientWidth: WIDTH, clientHeight: 22, width: WIDTH, height: 22, getContext: () => context,
+  };
+  return { canvas, rects, arcs };
+};
+
+// 120 BPM in 4/4 -- a bar every 2000ms -- offset 137ms, so no bar can ever
+// land on a round second.
+const OFFSET_MS = 137;
+const BAR_MS = 2000;
+
+const createOffsetTimeline = (canvas) => {
+  const timeline = new TimelineRenderer(canvas);
+  const objects = [];
+  for (let time = OFFSET_MS; time < 60000; time += 500) {
+    objects.push({ kind: 'circle', time, endTime: time });
+  }
+  timeline.setBeatmap({
+    objects,
+    timingControlPoints: [{ time: OFFSET_MS, beatLength: 500, meter: 4, uninherited: true, kiai: false }],
+  }, 60000, { previewTimeMs: -1 });
+  return timeline;
+};
+
+const tickXs = (rects) => rects
+  .filter((rect) => rect.h === TICK_H && rect.y === 0 && rect.alpha > 0.01)
+  .map((rect) => rect.x);
+
+test('zoomed in, the ticks sit on the map\'s bars rather than on round seconds', () => {
+  withWindow(() => {
+    const { canvas, rects } = createRecordingCanvas();
+    const timeline = createOffsetTimeline(canvas);
+    // 4s across 200px: bars land 100px apart, which is well past the width the
+    // beat grid has finished fading in at.
+    timeline.setView(0, 4000, { animate: false });
+    rects.length = 0;
+    timeline.render(0);
+
+    const msPerPx = 4000 / WIDTH;
+    const expected = [OFFSET_MS, OFFSET_MS + BAR_MS].map((ms) => Math.round(ms / msPerPx));
+    assert.deepEqual(tickXs(rects), expected);
+
+    // And emphatically not where the clock would have put them.
+    const clockStepMs = pickTickStep(msPerPx);
+    const clockXs = [];
+    for (let ms = 0; ms <= 4000; ms += clockStepMs) {
+      clockXs.push(Math.round(ms / msPerPx));
+    }
+    assert.notDeepEqual(tickXs(rects), clockXs);
+  });
+});
+
+test('zoomed out, the ticks stay on bars and only group into bigger steps', () => {
+  withWindow(() => {
+    const { canvas, rects } = createRecordingCanvas();
+    const timeline = createOffsetTimeline(canvas);
+    // The whole minute across 200px puts single bars 6.7px apart -- too close
+    // to read, but grouping them is what widens the ruler, not falling back to
+    // the clock.
+    timeline.resetZoom({ animate: false });
+    rects.length = 0;
+    timeline.render(0);
+
+    const msPerPx = 60000 / WIDTH;
+    // The smallest power-of-two grouping of bars that stays legible.
+    let stepMs = BAR_MS;
+    while (stepMs / msPerPx < 22) {
+      stepMs *= 2;
+    }
+    assert.ok(stepMs > BAR_MS, 'this view should need more than one bar a tick');
+    assert.equal(Math.log2(stepMs / BAR_MS) % 1, 0, 'grouped by a power of two');
+
+    const expected = [];
+    for (let ms = OFFSET_MS; ms < 60000; ms += stepMs) {
+      expected.push(Math.round(ms / msPerPx));
+    }
+    assert.deepEqual(tickXs(rects), expected);
+
+    // Every mark is still a downbeat, and they are far enough apart to read.
+    for (const ms of [OFFSET_MS, OFFSET_MS + stepMs]) {
+      assert.equal((ms - OFFSET_MS) % BAR_MS, 0);
+    }
+    const xs = tickXs(rects);
+    assert.ok(xs[1] - xs[0] >= 22, `ticks ${xs[1] - xs[0]}px apart`);
+
+    // And still nowhere near the clock, which has no factor in common with a
+    // 137ms offset.
+    const clockStepMs = pickTickStep(msPerPx);
+    const clockXs = [];
+    for (let ms = 0; ms <= 60000; ms += clockStepMs) {
+      clockXs.push(Math.round(ms / msPerPx));
+    }
+    assert.notDeepEqual(xs, clockXs);
+  });
+});
+
+test('each tempo counts its own bars from where it starts', () => {
+  withWindow(() => {
+    const { canvas, rects } = createRecordingCanvas();
+    const timeline = new TimelineRenderer(canvas);
+    // 120 BPM from 0, then 150 BPM from 8000ms -- a bar of 2000ms, then 1600ms.
+    timeline.setBeatmap({
+      objects: [{ kind: 'circle', time: 0, endTime: 0 }],
+      timingControlPoints: [
+        { time: 0, beatLength: 500, meter: 4, uninherited: true, kiai: false },
+        { time: 8000, beatLength: 400, meter: 4, uninherited: true, kiai: false },
+      ],
+    }, 16000, { previewTimeMs: -1 });
+    timeline.setView(0, 16000, { animate: false });
+    rects.length = 0;
+    timeline.render(0);
+
+    const msPerPx = 16000 / WIDTH;
+    const expected = [];
+    // 2000ms bars are 25px apart, which is legible as they are.
+    for (let ms = 0; ms < 8000; ms += 2000) expected.push(Math.round(ms / msPerPx));
+    // 1600ms bars are only 20px, so this tempo groups into twos on its own --
+    // and counts them from its own downbeat rather than carrying the first
+    // tempo's grid across.
+    for (let ms = 8000; ms < 16000; ms += 3200) expected.push(Math.round(ms / msPerPx));
+
+    assert.deepEqual(tickXs(rects), expected);
+    // Which is the point: one grid cannot describe two tempos.
+    assert.notEqual(expected[1] - expected[0], expected[expected.length - 1] - expected[expected.length - 2]);
+  });
+});
+
+test('a map with no timing points still gets a ruler', () => {
+  withWindow(() => {
+    const { canvas, rects } = createRecordingCanvas();
+    const timeline = new TimelineRenderer(canvas);
+    timeline.setBeatmap({ objects: [{ kind: 'circle', time: 0, endTime: 0 }], timingControlPoints: [] }, 10000);
+    timeline.setView(0, 4000, { animate: false });
+    rects.length = 0;
+    timeline.render(0);
+
+    assert.ok(tickXs(rects).length > 0, 'the clock ticks are all there is to show');
+  });
+});
+
+// --- snapping and picking objects out --------------------------------------
+//
+// Zoomed in, the marks are what the pointer is aiming at, so they pull it on:
+// landing a few milliseconds off a note is never what a click meant. Which
+// objects are ringed is also what a copied timestamp names, so the hit test
+// has to agree with what is drawn.
+
+// Notes every 500ms from 1000ms, plus a 3s slider at 6000ms.
+const createPickableTimeline = () => {
+  const timeline = new TimelineRenderer(createCanvas());
+  const objects = [];
+  for (let time = 1000; time <= 5000; time += 500) {
+    objects.push({ kind: 'circle', time, endTime: time, comboNumber: (time / 500) % 4 });
+  }
+  objects.push({ kind: 'slider', time: 6000, endTime: 9000, comboNumber: 1 });
+  timeline.setBeatmap({
+    objects,
+    timingControlPoints: [{ time: 0, beatLength: 500, meter: 4, uninherited: true, kiai: false }],
+  }, 12000, { previewTimeMs: -1 });
+  return timeline;
+};
+
+// 2000ms across 200px is 10ms/px: objects are fully drawn and a grab radius of
+// 7px is 70ms, comfortably inside the 500ms spacing.
+const zoomOnto = (timeline, startMs = 1000, durationMs = 2000) => {
+  timeline.setView(startMs, durationMs, { animate: false });
+  timeline.render(0);
+  return durationMs / WIDTH;
+};
+
+test('zoomed in, a time near an object is pulled onto it', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    const msPerPx = zoomOnto(timeline);
+
+    // 30ms past the 2000ms note: three pixels off, well inside the magnet.
+    const x = (2030 - 1000) / msPerPx;
+    assert.equal(timeline.snapTimeAtX(x), 2000);
+    assert.equal(timeline.objectIndexAtX(x), 2);
+  });
+});
+
+test('a time between two objects is left where it is', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    const msPerPx = zoomOnto(timeline);
+
+    // Halfway between the 2000ms and 2500ms notes is 25px from each.
+    const x = (2250 - 1000) / msPerPx;
+    assert.equal(timeline.objectIndexAtX(x), -1);
+    assert.equal(Math.round(timeline.snapTimeAtX(x)), 2250);
+  });
+});
+
+test('zoomed out, nothing is magnetic', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    // The whole map across 200px: the objects are drawn as density, not marks,
+    // so there is nothing to aim at.
+    timeline.resetZoom({ animate: false });
+    timeline.render(0);
+
+    assert.equal(timeline.areObjectsGrabbable(), false);
+    assert.equal(timeline.objectIndexAtX(50), -1);
+    assert.equal(timeline.snapTimeAtX(50), timeline.timeAtX(50));
+  });
+});
+
+test('a slider body can be picked out but does not drag the playhead to its head', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    const msPerPx = zoomOnto(timeline, 6000, 4000);
+    // Right in the middle of the 6000-9000ms slider.
+    const x = (7500 - 6000) / msPerPx;
+
+    assert.equal(timeline.objectIndexAtX(x, { includeBodies: true }), 9, 'the slider is pickable');
+    assert.equal(timeline.objectIndexAtX(x), -1, 'but its head is nowhere near');
+    // Snapping only follows heads, or scrubbing a long object would fling the
+    // playhead back to where it started.
+    assert.equal(Math.round(timeline.snapTimeAtX(x)), 7500);
+  });
+});
+
+test('the selection is what a timestamp will name, in time order', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    timeline.setSelection([4, 2, 3]);
+
+    assert.deepEqual(timeline.getSelectedIndices(), [2, 3, 4]);
+    assert.deepEqual(timeline.getSelectedObjects().map((o) => o.time), [2000, 2500, 3000]);
+    assert.equal(timeline.hasSelection(), true);
+  });
+});
+
+test('indices that point at no object are refused', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    timeline.setSelection([0, -1, 999, 1.5, null, undefined, '2']);
+
+    assert.deepEqual(timeline.getSelectedIndices(), [0]);
+  });
+});
+
+test('a converted map drops the selection rather than renaming it', () => {
+  withWindow(() => {
+    // A mania key count change can hand back a different number of notes, so
+    // indices into the old array mean nothing.
+    const timeline = createPickableTimeline();
+    timeline.setSelection([1, 2]);
+    assert.equal(timeline.hasSelection(), true);
+
+    timeline.setObjects([{ kind: 'circle', time: 1000, endTime: 1000 }]);
+    assert.equal(timeline.hasSelection(), false);
+    assert.deepEqual(timeline.getSelectedObjects(), []);
+  });
+});
+
+test('loading another map drops the selection too', () => {
+  withWindow(() => {
+    const timeline = createPickableTimeline();
+    timeline.setSelection([1]);
+    timeline.setBeatmap({ objects: [{ kind: 'circle', time: 0, endTime: 0 }] }, 1000);
+
+    assert.equal(timeline.hasSelection(), false);
+  });
+});
+
+test('a ring is drawn on each selected object that is on screen', () => {
+  withWindow(() => {
+    const { canvas, arcs } = createRecordingCanvas();
+    const timeline = new TimelineRenderer(canvas);
+    const objects = [];
+    for (let time = 1000; time <= 9000; time += 1000) {
+      objects.push({ kind: 'circle', time, endTime: time });
+    }
+    timeline.setBeatmap({
+      objects,
+      timingControlPoints: [{ time: 0, beatLength: 500, meter: 4, uninherited: true, kiai: false }],
+    }, 12000, { previewTimeMs: -1 });
+
+    // 1000..3000ms across 200px. Two of the three picked objects are in it;
+    // the one at 9000ms is far off the right.
+    timeline.setSelection([0, 1, 8]);
+    timeline.setView(1000, 2000, { animate: false });
+    arcs.length = 0;
+    timeline.render(0);
+
+    const rings = arcs.filter((arc) => arc.stroke === 'rgb(255, 222, 123)');
+    const msPerPx = 2000 / WIDTH;
+    assert.deepEqual(
+      rings.map((ring) => Math.round(ring.x)),
+      [0, Math.round(1000 / msPerPx)],
+      'one ring per visible selected object, at its own time',
+    );
+    assert.ok(rings.every((ring) => ring.r > 0));
+  });
+});
+
+test('nothing selected draws no rings at all', () => {
+  withWindow(() => {
+    const { canvas, arcs } = createRecordingCanvas();
+    const timeline = new TimelineRenderer(canvas);
+    timeline.setBeatmap({
+      objects: [{ kind: 'circle', time: 1000, endTime: 1000 }, { kind: 'circle', time: 2000, endTime: 2000 }],
+      timingControlPoints: [{ time: 0, beatLength: 500, meter: 4, uninherited: true, kiai: false }],
+    }, 12000, { previewTimeMs: -1 });
+    timeline.setView(1000, 2000, { animate: false });
+
+    arcs.length = 0;
+    timeline.render(0);
+    assert.equal(arcs.filter((arc) => arc.stroke === 'rgb(255, 222, 123)').length, 0);
+
+    // ...and one does, so the check above is not passing for want of a canvas.
+    timeline.setSelection([0]);
+    arcs.length = 0;
+    timeline.render(0);
+    assert.equal(arcs.filter((arc) => arc.stroke === 'rgb(255, 222, 123)').length, 1);
+  });
+});

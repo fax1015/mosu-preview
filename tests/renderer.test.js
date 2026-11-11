@@ -11,8 +11,12 @@ import {
   getStandardPlayfieldLayout,
   normalizeComboColour,
 } from '../src/renderer.js';
+import { readFileSync } from 'node:fs';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
+import { buildSliderCurvePoints } from '../src/core/sliderPath.js';
+import { PANEL_ASPECT } from '../src/core/panelLayout.js';
+import { POPUP_SIZE_PRESETS } from '../src/settings.js';
 
 test('uses osu!lazer legacy default combo colours', () => {
   assert.deepEqual(DEFAULT_COLOURS, [
@@ -213,18 +217,86 @@ test('standard playfield keeps horizontal fit and expands by the full CS radius'
   assert.equal(highCs.edgePadding, getCircleRadius(10) * highCs.scale);
 });
 
-test('beatmap 5337582 edge-loop slider body stays inside the canvas, top and bottom', () => {
-  const canvasWidth = 359;
-  const canvasHeight = 280;
-  const circleSize = 5.1;
-  const layout = getStandardPlayfieldLayout(canvasWidth, canvasHeight, circleSize);
-  const drawnCircleRadius = Math.max(0.5, (getCircleRadius(circleSize) * layout.scale * 0.92) - 0.75);
-  const sliderBodyRadius = Math.max(2, drawnCircleRadius * 0.95);
-  const sliderTop = layout.playfieldY + ((-24 / 384) * layout.playfieldHeight) - sliderBodyRadius;
-  const sliderBottom = layout.playfieldY + ((392 / 384) * layout.playfieldHeight) + sliderBodyRadius;
+// The preview's height is set by one slider, and these two tests hold it there.
+// Beatmap 5337582 (Aphex Twin - Cock/ver10 [7\]) at 2:50: a CS 5.1 loop around
+// the outside of the playfield, the line below copied from the map as it is.
+// Its body should lie just inside the preview, a few pixels clear of every
+// edge. A taller preview leaves a band above and below it (1.29:1 left nearly
+// ten pixels each way), a shorter one cuts it off. If one of these fails, the
+// preview's proportions have moved: put them back rather than the numbers here.
+// See .map-preview-canvas-wrap in popup.css and the README's "preview size".
+const REFERENCE_SLIDER_MAP = `osu file format v14
 
-  assert.ok(sliderTop >= 0, `top ${sliderTop}`);
-  assert.ok(sliderBottom <= canvasHeight, `bottom ${sliderBottom}`);
+[Difficulty]
+CircleSize:5.1
+SliderMultiplier:2.39999990463257
+SliderTickRate:0.5
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+512,0,170804,6,0,B|544:0|544:0|544:392|544:392|-32:392|-32:392|-32:-24|-32:-24|544:-24,1,1992,0|4,2:0|2:0,2:0:0:0:
+`;
+// As far inside as the body may sit and still count as just fitting.
+const REFERENCE_SLIDER_MAX_MARGIN_PX = 5;
+
+const previewAspectFromCss = () => {
+  const css = readFileSync(new URL('../popup.css', import.meta.url), 'utf8');
+  const rule = css.match(/(?:^|\n)\.map-preview-canvas-wrap \{([^}]*)\}/);
+  assert.ok(rule, 'the preview rule is in popup.css');
+  const ratio = rule[1].match(/aspect-ratio:\s*([\d.]+)\s*\/\s*([\d.]+)/);
+  assert.ok(ratio, 'the preview has an aspect-ratio');
+  return Number(ratio[1]) / Number(ratio[2]);
+};
+
+test('the reference slider just fits the preview at every popup size', () => {
+  const aspect = previewAspectFromCss();
+  const map = parseMapPreviewData(REFERENCE_SLIDER_MAP);
+  const [slider] = map.objects;
+  const path = buildSliderCurvePoints(slider, { x: 0, y: 0 });
+  const xs = path.map((point) => point.x);
+  const ys = path.map((point) => point.y);
+  // Read off the curve rather than written in, so the test follows the path
+  // code: -32..544 across and -24..392 down.
+  assert.deepEqual(
+    [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)].map(Math.round),
+    [-32, 544, -24, 392],
+  );
+
+  // The popup's frame is its content width less 0.75rem of padding and a 1px
+  // border each side; the canvas is that less the preview's own 1px border.
+  const frameWidths = Object.values(POPUP_SIZE_PRESETS)
+    .flatMap((preset) => [preset.contentWidth, preset.mobileContentWidth])
+    .map((contentWidth) => contentWidth - 26);
+
+  for (const frameWidth of frameWidths) {
+    const canvasWidth = frameWidth - 2;
+    const canvasHeight = (frameWidth / aspect) - 2;
+    const layout = getStandardPlayfieldLayout(canvasWidth, canvasHeight, map.circleSize);
+    // The outline's outer edge is the drawn hit circle's radius.
+    const bodyRadius = Math.max(0.5, (getCircleRadius(map.circleSize) * layout.scale * 0.92) - 0.75);
+    const toX = (x) => layout.playfieldX + (x * layout.scale);
+    const toY = (y) => layout.playfieldY + (y * layout.scaleY);
+    const margins = {
+      left: toX(Math.min(...xs)) - bodyRadius,
+      right: canvasWidth - (toX(Math.max(...xs)) + bodyRadius),
+      top: toY(Math.min(...ys)) - bodyRadius,
+      bottom: canvasHeight - (toY(Math.max(...ys)) + bodyRadius),
+    };
+
+    for (const [edge, margin] of Object.entries(margins)) {
+      assert.ok(margin >= 0, `${frameWidth}px preview: the body runs ${(-margin).toFixed(1)}px past the ${edge}`);
+      assert.ok(
+        margin <= REFERENCE_SLIDER_MAX_MARGIN_PX,
+        `${frameWidth}px preview: ${margin.toFixed(1)}px of room at the ${edge}, more than just fitting`,
+      );
+    }
+  }
+});
+
+test('compare panels keep the single preview\'s proportions', () => {
+  assert.ok(Math.abs(PANEL_ASPECT - previewAspectFromCss()) < 1e-9, `${PANEL_ASPECT} vs the preview's`);
 });
 
 test('standard playfield border expansion shrinks with smaller object radius', () => {
@@ -687,4 +759,137 @@ test('the standard field keeps its own proportions in any shape of canvas, centr
   }
   const tall = getStandardPlayfieldLayout(377, 500, 4);
   assert.ok((500 - (480 * tall.scale)) / 2 > 50, 'a tall canvas leaves room above and below');
+});
+
+// --- picking an object out on the playfield --------------------------------
+//
+// osu!standard objects sit at a fixed place on the field for as long as they
+// are on screen, which is what makes them something to click. The hit test
+// runs against what the last frame drew, so these render first.
+
+const createPlayfieldHarness = () => {
+  const context = new Proxy({
+    createLinearGradient: () => ({ addColorStop() {} }),
+  }, {
+    get(target, property) {
+      if (!(property in target)) {
+        target[property] = () => {};
+      }
+      return target[property];
+    },
+    set: () => true,
+  });
+  const canvas = {
+    clientWidth: 512, clientHeight: 384, width: 512, height: 384, getContext: () => context,
+  };
+  const map = parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+ApproachRate:5
+OverallDifficulty:5
+SliderMultiplier:1.4
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,96,1000,5,0,0:0:0:0:
+256,192,1200,1,0,0:0:0:0:
+448,288,1400,1,0,0:0:0:0:
+`);
+  const renderer = new PreviewRenderer(canvas, null);
+  renderer.setBeatmap(map, 5000);
+  return { renderer, map, canvas };
+};
+
+const withBrowserWindow = (run) => {
+  const previous = globalThis.window;
+  globalThis.window = { devicePixelRatio: 1 };
+  try {
+    return run();
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+};
+
+// Where an object's head is drawn, in the canvas's own pixels.
+const pointFor = (renderer, object) => {
+  const layout = getStandardPlayfieldLayout(512, 384, renderer.mapData.circleSize, 0);
+  return {
+    x: layout.playfieldX + (object.x * layout.scale),
+    y: layout.playfieldY + (object.y * layout.scaleY),
+  };
+};
+
+test('a click on a circle names that object', () => {
+  withBrowserWindow(() => {
+    const { renderer, map } = createPlayfieldHarness();
+    // All three are on screen at once here: the last is inside its approach
+    // time and the first has not faded out yet.
+    renderer.setTime(1000);
+    renderer.renderPlayfield();
+
+    for (const [index, object] of map.objects.entries()) {
+      const point = pointFor(renderer, object);
+      assert.equal(renderer.objectIndexAtPoint(point.x, point.y), index, `object ${index}`);
+    }
+  });
+});
+
+test('a click on empty field names nothing', () => {
+  withBrowserWindow(() => {
+    const { renderer } = createPlayfieldHarness();
+    renderer.setTime(1200);
+    renderer.renderPlayfield();
+
+    // The middle of the field, which this map deliberately leaves empty
+    // between its three widely spaced circles.
+    const layout = getStandardPlayfieldLayout(512, 384, 4, 0);
+    const point = {
+      x: layout.playfieldX + (160 * layout.scale),
+      y: layout.playfieldY + (40 * layout.scaleY),
+    };
+    assert.equal(renderer.objectIndexAtPoint(point.x, point.y), -1);
+  });
+});
+
+test('an object that has not appeared yet cannot be clicked', () => {
+  withBrowserWindow(() => {
+    const { renderer, map } = createPlayfieldHarness();
+    const point = pointFor(renderer, map.objects[2]);
+
+    // Before its approach circle: the object is laid out but nothing is drawn
+    // there, so the field under the pointer is empty.
+    renderer.setTime(0);
+    renderer.renderPlayfield();
+    assert.equal(renderer.objectIndexAtPoint(point.x, point.y), -1, 'before it appears');
+
+    // Once it is showing, the same point names it.
+    renderer.setTime(1000);
+    renderer.renderPlayfield();
+    assert.equal(renderer.objectIndexAtPoint(point.x, point.y), 2, 'while it is on screen');
+
+    // And long after it is gone.
+    renderer.setTime(4000);
+    renderer.renderPlayfield();
+    assert.equal(renderer.objectIndexAtPoint(point.x, point.y), -1, 'after it is gone');
+  });
+});
+
+test('the other rulesets have no fixed place to click', () => {
+  withBrowserWindow(() => {
+    const { renderer, map } = createPlayfieldHarness();
+    const point = pointFor(renderer, map.objects[1]);
+
+    for (const mode of [1, 2, 3]) {
+      const converted = convertMapForMode(map, mode);
+      renderer.setBeatmap(converted, 5000);
+      renderer.setTime(1200);
+      renderer.renderPlayfield();
+      assert.equal(renderer.objectIndexAtPoint(point.x, point.y), -1, `mode ${mode}`);
+    }
+  });
 });

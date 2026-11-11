@@ -1,4 +1,5 @@
 import { clamp } from './core/math.js';
+import { normalizeKeybindings, toStoredKeybindings } from './core/keybindings.js';
 
 export const PROVIDER_OVERRIDE_KEY = 'providerOverride';
 export const AUDIO_VOLUME_KEY = 'audioVolume';
@@ -17,6 +18,8 @@ export const AUTO_FALLBACK_KEY = 'autoFallback';
 export const HITSOUNDS_KEY = 'hitsounds';
 export const HITSOUND_VOLUME_KEY = 'hitsoundVolume';
 export const HITSOUND_STYLE_KEY = 'hitsoundStyle';
+export const AUTOPLAY_KEY = 'autoplay';
+export const KEYBINDINGS_KEY = 'keybindings';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
 export const MIN_MANIA_SCROLL_SPEED = 1;
@@ -37,6 +40,10 @@ export const DEFAULT_AUTO_FALLBACK = true;
 export const DEFAULT_HITSOUNDS = false;
 export const DEFAULT_HITSOUND_VOLUME = 0.5;
 export const DEFAULT_HITSOUND_STYLE = 'argon';
+// On by default: clicking the icon to hear a map is the whole point of the
+// popup. Off is for whoever opens it with the volume up and would rather it
+// waited to be asked.
+export const DEFAULT_AUTOPLAY = true;
 
 // The voices each style plays live in audio/hitsounds.js; this is only the list
 // a stored choice is checked against, so the options page does not have to load
@@ -49,18 +56,6 @@ export const HITSOUND_STYLES = Object.freeze(['argon', 'lazer', 'minimal']);
 export const MANIA_KEY_COUNTS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 export const MANIA_PRIMARY_KEY_COUNTS = Object.freeze([4, 7]);
 
-export const PROVIDER_PRIORITY_TIERS = Object.freeze({
-  PRIMARY: 'primary',
-  SECONDARY: 'secondary',
-  EXPERIMENTAL: 'experimental',
-});
-
-export const PROVIDER_TIER_LABELS = Object.freeze({
-  primary: 'Primary',
-  secondary: 'Secondary',
-  experimental: 'Experimental',
-});
-
 const PROVIDER_DEFINITIONS = [
   {
     id: 'mino',
@@ -70,10 +65,6 @@ const PROVIDER_DEFINITIONS = [
       const useNoVideo = noVideo !== false;
       return `https://catboy.best/d/${setId}${useNoVideo ? 'n' : ''}`;
     },
-    supportsNoVideo: true,
-    supportsCors: true,
-    supportsRangeRequests: false,
-    regionBias: 'global',
     expectedReliability: 0.85,
     averageStartupLatency: 1200,
   },
@@ -82,10 +73,6 @@ const PROVIDER_DEFINITIONS = [
     label: 'osu.direct',
     rank: 1,
     buildArchiveUrl: ({ setId } = {}) => `https://osu.direct/api/d/${setId}`,
-    supportsNoVideo: false,
-    supportsCors: true,
-    supportsRangeRequests: false,
-    regionBias: 'global',
     expectedReliability: 0.8,
     averageStartupLatency: 1500,
   },
@@ -94,10 +81,6 @@ const PROVIDER_DEFINITIONS = [
     label: 'NeriNyan',
     rank: 2,
     buildArchiveUrl: ({ setId } = {}) => `https://api.nerinyan.moe/d/${setId}`,
-    supportsNoVideo: false,
-    supportsCors: true,
-    supportsRangeRequests: false,
-    regionBias: 'global',
     expectedReliability: 0.82,
     averageStartupLatency: 1000,
   },
@@ -109,10 +92,6 @@ const PROVIDER_DEFINITIONS = [
       const useNoVideo = noVideo !== false;
       return `https://txy1.sayobot.cn/beatmaps/download/${useNoVideo ? 'novideo' : 'origin'}/${setId}?server=null`;
     },
-    supportsNoVideo: true,
-    supportsCors: true,
-    supportsRangeRequests: false,
-    regionBias: 'asia',
     expectedReliability: 0.75,
     averageStartupLatency: 800,
   },
@@ -150,12 +129,14 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   HITSOUNDS_KEY,
   HITSOUND_VOLUME_KEY,
   HITSOUND_STYLE_KEY,
+  AUTOPLAY_KEY,
+  KEYBINDINGS_KEY,
 ]);
 
 // Settings changed only from the preview itself, with no control on the
 // options page. That page writes its whole form on every save, so it leaves
 // these out; writing the form's default instead would reset them each time.
-export const PREVIEW_ONLY_SETTING_KEYS = Object.freeze([MANIA_KEY_COUNT_KEY]);
+export const PREVIEW_ONLY_SETTING_KEYS = Object.freeze([MANIA_KEY_COUNT_KEY, KEYBINDINGS_KEY]);
 
 export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
   staticWeight: 0.10,
@@ -292,6 +273,8 @@ const normalizeUnitRange = (value, fallback) => {
 
 export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFAULT_HITSOUNDS);
 
+export const normalizeAutoplay = (value) => normalizeBooleanSetting(value, DEFAULT_AUTOPLAY);
+
 export const normalizeHitsoundVolume = (value) => normalizeUnitRange(value, DEFAULT_HITSOUND_VOLUME);
 
 // A style removed in a later build, or a hand-edited value, plays the default
@@ -345,6 +328,8 @@ export const normalizePreviewSettings = (items = {}) => ({
   hitsounds: normalizeHitsounds(items?.[HITSOUNDS_KEY] ?? items?.hitsounds),
   hitsoundVolume: normalizeHitsoundVolume(items?.[HITSOUND_VOLUME_KEY] ?? items?.hitsoundVolume),
   hitsoundStyle: normalizeHitsoundStyle(items?.[HITSOUND_STYLE_KEY] ?? items?.hitsoundStyle),
+  autoplay: normalizeAutoplay(items?.[AUTOPLAY_KEY] ?? items?.autoplay),
+  keybindings: normalizeKeybindings(items?.[KEYBINDINGS_KEY] ?? items?.keybindings),
 });
 
 export const toPreviewSettingsStorage = (settings = {}) => {
@@ -365,6 +350,10 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [HITSOUNDS_KEY]: normalized.hitsounds,
     [HITSOUND_VOLUME_KEY]: normalized.hitsoundVolume,
     [HITSOUND_STYLE_KEY]: normalized.hitsoundStyle,
+    [AUTOPLAY_KEY]: normalized.autoplay,
+    // Sparse: only what the user moved off its default, so adding a shortcut
+    // later does not need a migration of everyone's stored map.
+    [KEYBINDINGS_KEY]: toStoredKeybindings(normalized.keybindings),
   };
 };
 

@@ -149,8 +149,14 @@
           </span>
         </div>
       </div>
-      <button type="button" class="map-preview-audio-badge is-preview" id="mapPreviewAudioBadge">Preview audio</button>
-      <div class="map-preview-toast" id="mapPreviewToast" role="status" aria-live="polite"></div>
+      <!-- The island: the audio status and every message the popup has, in one
+           small capsule in this corner that is only there while it has
+           something to show. It springs between a ring (the full track
+           downloading), a tick (it has arrived) and a message, each kind of
+           thing in a colour of its own, and shrinks away to nothing. With no
+           map it moves to the same corner of the "unsupported webpage" card.
+           See src/ui/island.js. -->
+      <div class="map-preview-island is-hidden" id="mapPreviewIsland" role="status" aria-live="polite"></div>
       <div class="map-preview-toggle-indicator" id="mapPreviewToggleIndicator" aria-hidden="true">
         <svg class="map-preview-toggle-icon map-preview-toggle-icon--play" viewBox="0 0 448 512">
           <path

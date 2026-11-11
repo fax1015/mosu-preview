@@ -394,13 +394,11 @@ html.is-detached-window .map-preview-follow-btn {
     pointer-events: auto;
 }
 
-/* One throbber wherever the popup waits on something: the loading screen, the
-   audio badge (including while the full track is fetched), a compare panel
-   still loading its map, and the difficulty picker's list. Only the size and
-   spacing differ, set by each caller. */
+/* One throbber wherever the popup waits on something: the loading screen, a
+   compare panel still loading its map, and the difficulty picker's list. Only
+   the size and spacing differ, set by each caller. (The island's ring is its
+   own: it can show how far the download has got.) */
 .map-preview-loading-spinner,
-.map-preview-audio-badge.is-spinning::before,
-.map-preview-audio-badge.is-loading::before,
 .map-preview-panel.is-loading .map-preview-panel-status::before,
 .map-preview-compare-status.is-loading::before {
     box-sizing: border-box;
@@ -425,12 +423,14 @@ html.is-detached-window .map-preview-follow-btn {
     }
 
     .map-preview-loading-spinner,
-    .map-preview-audio-badge.is-spinning::before,
-    .map-preview-audio-badge.is-loading::before,
     .map-preview-panel.is-loading .map-preview-panel-status::before,
     .map-preview-compare-status.is-loading::before {
         animation: none;
         border-top-color: rgba(205, 223, 255, 0.55);
+    }
+
+    .map-preview-island-ring-fill {
+        animation: none;
     }
 }
 
@@ -448,7 +448,6 @@ body.is-firefox-popup .map-preview-popup {
     contain: layout paint;
 }
 
-body.is-firefox-popup .map-preview-audio-badge,
 body.is-firefox-popup .map-preview-toggle-indicator {
     transition: none;
 }
@@ -700,129 +699,267 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     margin-bottom: 0.6rem;
 }
 
-.map-preview-toast {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
-    left: auto;
-    bottom: auto;
-    z-index: 8;
-    max-width: calc(100% - 1rem);
-    padding: 0.22rem 0.52rem;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(24, 23, 28, 0.94);
-    color: rgba(238, 241, 248, 0.96);
-    font-size: 0.62rem;
-    font-weight: 700;
-    line-height: 1;
-    text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    opacity: 0;
-    transform: translateY(-4px);
-    pointer-events: none;
-    transition: opacity 0.2s ease, transform 0.2s ease;
-    letter-spacing: 0.01em;
-}
-
-.map-preview-toast.is-visible {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-/* The audio badge's pill, tinted purple, in the badge's own spot: the badge
-   steps aside while it shows rather than peeking out from under it. */
-.map-preview-toast.is-copied {
-    display: inline-flex;
-    align-items: center;
-    color: rgba(226, 210, 255, 0.97);
-    background: rgba(48, 30, 74, 0.8);
-    border-color: rgba(178, 136, 255, 0.45);
-}
-
-.map-preview-canvas-wrap:has(.map-preview-toast.is-copied.is-visible) .map-preview-audio-badge {
-    opacity: 0;
-    transform: translateY(-4px);
-    pointer-events: none;
-}
-
 .map-preview-canvas {
     width: 100%;
     height: 100%;
 }
 
-.map-preview-audio-badge {
+/* --- the island ----------------------------------------------------------------
+
+   One small capsule in the preview's top-right corner (or the "unsupported
+   webpage" card's, with no map), there only while something is going on: a
+   ring while the full track downloads, a tick when it is in, a message. Each
+   kind of thing has a colour of its own.
+
+   src/ui/island.js measures what each state needs and sets the size; the
+   capsule springs to it, pinned to the corner, so it grows leftwards and down
+   out of it and shrinks back into it. A sampled spring (damping ratio 0.65,
+   response 0.3s): nine tenths of the way there in about 120ms, past it by
+   about 7%, and settled in under half a second -- quick, with a little give,
+   not a wobble. */
+.map-preview-island {
+    --island-spring: linear(0, 0.021, 0.075, 0.152, 0.244, 0.343, 0.445, 0.543, 0.636, 0.721, 0.796, 0.861, 0.916, 0.961, 0.996, 1.024, 1.043, 1.057, 1.064, 1.068, 1.068, 1.065, 1.06, 1.054, 1.048, 1.041, 1.034, 1.028, 1.022, 1.016, 1.011, 1.007, 1.004, 1.001, 0.999, 0.998, 0.997, 0.996, 0.995, 0.995, 0.995, 0.996, 0.996, 0.997, 1);
+    --island-morph: 0.45s;
+    --island-bg: var(--bg-tertiary);
+    --island-edge: rgba(255, 255, 255, 0.1);
+    --island-fg: rgba(246, 246, 250, 0.96);
     position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
-    display: inline-flex;
-    align-items: center;
-    max-width: calc(100% - 1rem);
-    border-radius: 999px;
-    padding: 0.22rem 0.52rem;
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.01em;
-    line-height: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    border: 1px solid transparent;
-    background: transparent;
-    cursor: pointer;
-    appearance: none;
+    top: 6px;
+    right: 6px;
     z-index: 3;
-    opacity: 1;
-    transform: translateY(0);
-    transition: opacity 0.2s ease, transform 0.2s ease, border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+    width: 20px;
+    height: 20px;
+    box-sizing: border-box;
+    transform-origin: 100% 0;
+    border-radius: 10px;
+    /* Edged the way the popup's other elements are: a hairline, no shadow.
+       Drawn inset so it never adds to the size the script sets. Opaque, so the
+       playfield under it does not show through the words. */
+    background-color: var(--island-bg);
+    box-shadow: inset 0 0 0 1px var(--island-edge);
+    color: var(--island-fg);
+    overflow: hidden;
+    cursor: pointer;
+    transition:
+        width var(--island-morph) var(--island-spring),
+        height var(--island-morph) var(--island-spring),
+        scale var(--island-morph) var(--island-spring),
+        opacity 0.2s ease,
+        background-color 0.2s ease,
+        box-shadow 0.2s ease,
+        color 0.2s ease;
 }
 
-.map-preview-audio-badge.is-hidden {
+/* Its colour says what it is about, and blends from one to the next as it
+   changes shape. */
+.map-preview-island.is-progress {
+    /* The full track on its way. */
+    --island-bg: rgb(60, 50, 26);
+    --island-edge: rgba(251, 197, 90, 0.42);
+    --island-fg: rgba(255, 232, 188, 0.96);
+}
+
+.map-preview-island.is-ready {
+    /* The full track in. */
+    --island-bg: rgb(23, 52, 41);
+    --island-edge: rgba(95, 224, 154, 0.42);
+    --island-fg: rgba(196, 250, 214, 0.98);
+}
+
+.map-preview-island.is-copy {
+    /* A timestamp on the clipboard. */
+    --island-bg: rgb(46, 32, 70);
+    --island-edge: rgba(178, 136, 255, 0.45);
+    --island-fg: rgba(226, 210, 255, 0.97);
+}
+
+.map-preview-island.is-done {
+    /* Something else asked for, done: the cache cleared, the shortcuts reset. */
+    --island-bg: rgb(20, 48, 53);
+    --island-edge: rgba(96, 214, 224, 0.42);
+    --island-fg: rgba(200, 246, 250, 0.97);
+}
+
+.map-preview-island.is-info {
+    /* Something to know, or to go and do. */
+    --island-bg: rgb(31, 38, 52);
+    --island-edge: rgba(127, 185, 240, 0.4);
+    --island-fg: rgba(223, 233, 247, 0.97);
+}
+
+.map-preview-island.is-error {
+    /* Something that did not work. */
+    --island-bg: rgb(62, 26, 31);
+    --island-edge: rgba(255, 113, 113, 0.45);
+    --island-fg: rgba(255, 208, 208, 0.98);
+}
+
+/* Gone: a dot shrinking into the corner, and not there to be clicked. Its
+   colour stays, so it fades out as what it was. */
+.map-preview-island.is-hidden {
     opacity: 0;
-    transform: translateY(-4px);
+    scale: 0.35;
     pointer-events: none;
+    transition:
+        width 0.22s cubic-bezier(0.4, 0, 0.6, 1),
+        height 0.22s cubic-bezier(0.4, 0, 0.6, 1),
+        scale 0.22s cubic-bezier(0.4, 0, 0.6, 1),
+        opacity 0.16s ease 0.04s;
 }
 
-.map-preview-audio-badge::before {
-    content: "";
-    width: 0;
-    height: 0;
-    margin-right: 0;
+/* What is in it. A new layer comes in blurred and a little small while the
+   capsule moves, and the old one blurs out on top of it, so the change reads
+   as one thing turning into another rather than a swap. Pinned to the same
+   corner as the capsule, so a message is uncovered as the capsule grows. */
+.map-preview-island-layer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.32rem;
+    box-sizing: border-box;
+    width: max-content;
+    min-height: 20px;
+    padding: 0 0.5rem 0 0.4rem;
+    transform-origin: 100% 0;
+    white-space: nowrap;
+    transition:
+        opacity 0.16s ease 0.03s,
+        filter 0.2s ease 0.02s,
+        scale var(--island-morph) var(--island-spring);
+}
+
+/* At least the circle's width, with what is in it centred: a tick narrower
+   than the ring would otherwise sit against the right edge it is pinned to. */
+.map-preview-island-layer.is-compact {
+    justify-content: center;
+    gap: 0.22rem;
+    min-width: 20px;
+    padding: 0 3px;
+}
+
+.map-preview-island-layer.is-compact:has(.map-preview-island-figure:not([hidden])) {
+    padding-right: 0.42rem;
+}
+
+.map-preview-island-layer.is-message {
+    padding-top: 0.2rem;
+    padding-bottom: 0.2rem;
+    white-space: normal;
+}
+
+.map-preview-island-layer.is-entering {
+    opacity: 0;
+    filter: blur(4px);
+    scale: 0.88;
+}
+
+.map-preview-island-layer.is-leaving {
+    opacity: 0;
+    filter: blur(4px);
+    scale: 0.94;
+    pointer-events: none;
+    transition: opacity 0.1s ease, filter 0.12s ease, scale 0.14s ease;
+}
+
+.map-preview-island-ring {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    rotate: -90deg;
+}
+
+.map-preview-island-ring-track,
+.map-preview-island-ring-fill {
+    fill: none;
+    stroke-width: 2;
+}
+
+.map-preview-island-ring-track {
+    stroke: rgba(255, 255, 255, 0.14);
+}
+
+.map-preview-island-ring-fill {
+    stroke: rgb(245, 185, 74);
+    stroke-linecap: round;
+    stroke-dasharray: 28 100;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: map-preview-spinner 0.9s linear infinite;
+}
+
+.map-preview-island-layer.has-progress .map-preview-island-ring-fill {
+    animation: none;
+    transition: stroke-dasharray 0.3s ease;
+}
+
+/* Kept as wide as "100%" by the script, so the capsule holds one width for the
+   whole download, with the number centred in that room. */
+.map-preview-island-figure {
     display: inline-block;
-    vertical-align: -1px;
-    border-radius: 50%;
+    text-align: center;
+    font-size: 0.56rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
 }
 
-.map-preview-audio-badge.is-spinning::before,
-.map-preview-audio-badge.is-loading::before {
-    --map-preview-throbber-size: 0.72rem;
-    margin-right: 0.34rem;
+/* The display above would otherwise outrank the attribute. */
+.map-preview-island-figure[hidden] {
+    display: none;
 }
 
-.map-preview-audio-badge.is-preview {
-    color: rgba(189, 218, 247, 0.95);
-    background: rgba(23, 43, 64, 0.78);
-    border-color: rgba(127, 185, 240, 0.35);
+.map-preview-island-glyph {
+    flex: 0 0 auto;
+    width: 12px;
+    height: 12px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
-.map-preview-audio-badge.is-loading {
-    color: rgba(255, 232, 188, 0.96);
-    background: rgba(66, 55, 22, 0.8);
-    border-color: rgba(251, 197, 90, 0.45);
+.map-preview-island-glyph.is-info {
+    color: rgb(127, 185, 240);
 }
 
-.map-preview-audio-badge.is-ready {
-    color: rgba(196, 250, 214, 0.98);
-    background: rgba(22, 62, 44, 0.8);
-    border-color: rgba(95, 224, 154, 0.45);
+.map-preview-island-glyph.is-done {
+    color: rgb(96, 214, 224);
 }
 
-.map-preview-audio-badge.is-failed {
-    color: rgba(255, 208, 208, 0.98);
-    background: rgba(74, 24, 29, 0.82);
-    border-color: rgba(255, 113, 113, 0.44);
+.map-preview-island-glyph.is-copy {
+    color: rgb(178, 136, 255);
+}
+
+.map-preview-island-glyph.is-ready {
+    color: rgb(95, 224, 154);
+}
+
+.map-preview-island-glyph.is-error {
+    color: rgb(255, 113, 113);
+}
+
+/* Two lines at most; the longest message, on a phone, fits in one. */
+.map-preview-island-text {
+    min-width: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    font-size: 0.6rem;
+    font-weight: 600;
+    line-height: 1.22;
+    letter-spacing: 0.01em;
+}
+
+/* No transitions (reduced motion, Firefox's toolbar popup): it changes at once. */
+.map-preview-island.is-still,
+.map-preview-island.is-still .map-preview-island-layer {
+    transition: none;
 }
 
 @keyframes map-preview-spinner {
@@ -2667,7 +2804,7 @@ html.is-comparing .map-preview-panel {
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
-/* Under the audio badge (z-index 3), which can reach across the top-right
+/* Under the island (z-index 3), which can reach across the top-right
    panel's label in a narrow window and carries the live status.
 
    Kept small and see-through, tucked into the corner and capped in width, so

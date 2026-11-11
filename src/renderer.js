@@ -902,10 +902,13 @@ const composeFollowLineLayers = (target, { lines, objects }) => {
 export class PreviewRenderer {
   // Without a timeline canvas it draws the playfield only: the difficulties
   // shown next to the one you opened share that one's timeline, and draw to an
-  // ordinary canvas rather than a low-latency one (see core/canvas.js).
-  constructor(playfieldCanvas, timelineCanvas = null, { lowLatency = true } = {}) {
+  // ordinary canvas rather than a low-latency one (see core/canvas.js). Such a
+  // renderer is handed that shared timeline as `selectionTimeline`, so it rings
+  // the objects picked there while the timeline is showing its difficulty.
+  constructor(playfieldCanvas, timelineCanvas = null, { lowLatency = true, selectionTimeline = null } = {}) {
     this.playfieldCanvas = playfieldCanvas;
     this.timeline = timelineCanvas ? new TimelineRenderer(timelineCanvas) : null;
+    this.selectionTimeline = this.timeline || selectionTimeline;
     this.lowLatencyPlayfield = lowLatency;
     this.mapData = null;
     this.durationMs = 0;
@@ -978,13 +981,40 @@ export class PreviewRenderer {
    * than starting over the way a new map does.
    */
   replaceManiaObjects(mapData) {
+    // Unless the timeline is showing another difficulty, which keeps it.
+    const timelineShowsThisMap = this.showsTimelineObjects();
     this.mapData = mapData;
     this.maxObjectDurationMs = getMaxObjectDurationMs(mapData?.objects);
-    this.timeline?.setObjects(mapData?.objects);
+    if (timelineShowsThisMap) {
+      this.timeline?.setObjects(mapData?.objects);
+    }
+  }
+
+  /**
+   * Puts another difficulty's map on this renderer's timeline, or this one's
+   * back: see TimelineRenderer.showMap. The playfield is not touched.
+   */
+  showTimelineMap(mapData, { animate = false } = {}) {
+    this.timeline?.showMap(mapData, { animate });
+  }
+
+  /**
+   * Whether the timeline that picks objects for this playfield is showing this
+   * playfield's own map. The selection is indices into the timeline's objects,
+   * so only then do they name objects drawn here.
+   */
+  showsTimelineObjects() {
+    const objects = this.mapData?.objects;
+    return Boolean(this.selectionTimeline) && Array.isArray(objects) && this.selectionTimeline.objects === objects;
   }
 
   isTimelineDurationAnimating() {
     return Boolean(this.timeline?.isDurationAnimating());
+  }
+
+  /** The duration growing or the bars moving to another difficulty's. */
+  isTimelineAnimating() {
+    return Boolean(this.timeline?.isDurationAnimating() || this.timeline?.isDensityMorphing());
   }
 
   setDuration(durationMs, { animate = false } = {}) {
@@ -2719,10 +2749,14 @@ export class PreviewRenderer {
   /**
    * A ring around each picked object that is on screen, matching the one the
    * timeline draws: the two are one selection, and it is what a copied
-   * timestamp will name.
+   * timestamp will name. Drawn by whichever playfield's map the timeline is
+   * showing: the lead's, or a compared difficulty's while that one is in focus.
    */
   drawStandardSelection(ctx, toCanvas, circleRadius) {
-    const selected = this.timeline?.selection;
+    if (!this.showsTimelineObjects()) {
+      return;
+    }
+    const selected = this.selectionTimeline.selection;
     if (!selected || selected.size === 0) {
       return;
     }

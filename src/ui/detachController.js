@@ -171,7 +171,7 @@ const createDetachController = ({
         window.close();
       } catch (error) {
         addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
-        showPopupToast('Could not open a separate view');
+        showPopupToast('Could not open a separate view', { tone: 'error' });
       }
       return;
     }
@@ -203,7 +203,7 @@ const createDetachController = ({
       window.close();
     } catch (error) {
       addDebugLog(`detach: failed (${error?.message || error})`);
-      showPopupToast('Could not open a separate window');
+      showPopupToast('Could not open a separate window', { tone: 'error' });
     }
   };
 

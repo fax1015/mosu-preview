@@ -98,7 +98,7 @@ const createShortcutsPanel = ({
       await persistKeybindings(next);
     } catch (error) {
       addDebugLog(`shortcuts: could not save the keymap (${error?.message || error})`);
-      showPopupToast?.('Could not save that shortcut');
+      showPopupToast?.('Could not save that shortcut', { tone: 'error' });
     }
   };
 
@@ -130,7 +130,7 @@ const createShortcutsPanel = ({
     stopCapture({ redraw: false });
     const bindings = defaultKeybindings();
     await applyBindings(bindings, { changed: [...chips.keys()] });
-    showPopupToast?.('Shortcuts reset');
+    showPopupToast?.('Shortcuts reset', { tone: 'done' });
   };
 
   const formatKeyForMessage = (key) => (key === ' ' ? 'Space' : key);

@@ -638,3 +638,156 @@ test('nothing selected draws no rings at all', () => {
     assert.equal(arcs.filter((arc) => arc.stroke === 'rgb(255, 222, 123)').length, 1);
   });
 });
+
+// --- another difficulty in focus --------------------------------------------
+//
+// While several difficulties are compared, the timeline shows the one in focus.
+// The song is the same, so only what is drawn from the map changes; the bars
+// grow and shrink from one difficulty's heights to the other's.
+
+// Two difficulties of one minute: one mapped only in its first half, the
+// other only in its second.
+const halfMap = (fromMs, toMs, extra = {}) => {
+  const objects = [];
+  for (let time = fromMs; time < toMs; time += 250) {
+    objects.push({ kind: 'circle', time, endTime: time });
+  }
+  return {
+    objects,
+    timingControlPoints: [{ time: 0, beatLength: 500, meter: 4, uninherited: true, kiai: false }],
+    ...extra,
+  };
+};
+
+// Records the density bars: rects as wide as a drawn bar, by their x.
+const createBarCanvas = () => {
+  const bars = [];
+  const context = new Proxy({}, {
+    get: (target, property) => {
+      if (property === 'rect') {
+        return (x, y, w, h) => bars.push({ x, w, h });
+      }
+      if (!(property in target)) {
+        target[property] = () => {};
+      }
+      return target[property];
+    },
+    set: () => true,
+  });
+  const canvas = {
+    clientWidth: WIDTH, clientHeight: 22, width: WIDTH, height: 22, getContext: () => context,
+  };
+  // 200px at 2px a bar is 100 bars, each drawn 0.75px narrower than its slot.
+  const barHeights = () => {
+    const heights = new Map();
+    bars.filter((bar) => Math.abs(bar.w - 1.25) < 1e-9).forEach((bar) => heights.set(Math.round(bar.x), bar.h));
+    bars.length = 0;
+    return heights;
+  };
+  return { canvas, barHeights };
+};
+
+const heightAt = (heights, x) => heights.get(x) ?? 0;
+
+test('another difficulty\'s map replaces what is drawn, and the view stays where it was', () => withWindow(() => {
+  const timeline = createTimeline();
+  timeline.setTime(25000);
+  timeline.setView(20000, 10000, { animate: false });
+  settle(timeline);
+  timeline.setSongEnd(58000);
+  const view = timeline.getView();
+  timeline.setSelection([0, 1]);
+
+  const other = halfMap(30000, 60000, {
+    breaks: [{ start: 10000, end: 20000 }],
+    timingControlPoints: [{ time: 100, beatLength: 400, meter: 3, uninherited: true, kiai: true }],
+  });
+  timeline.showMap(other, { animate: false });
+
+  assert.equal(timeline.objects, other.objects);
+  assert.deepEqual(timeline.breaks, [{ startMs: 10000, endMs: 20000 }]);
+  assert.equal(timeline.timingSections[0].beatLength, 400, 'its own timing, for the beat grid');
+  assert.equal(timeline.kiaiSections.length, 1, 'its own kiai');
+  assert.deepEqual(timeline.getView(), view, 'the same stretch of the song is on screen');
+  assert.equal(timeline.isZoomed(), true);
+  assert.equal(timeline.durationMs, 60000);
+  assert.equal(timeline.getEndMs(), 58000, 'the song end is the song\'s, not the map\'s');
+  assert.equal(timeline.hasSelection(), false, 'the picked objects were the other map\'s');
+  assert.equal(timeline.isDensityMorphing(), false, 'nothing to animate when not asked');
+
+  // The same map again is no change at all, and keeps a new selection.
+  timeline.setSelection([2]);
+  timeline.showMap(other, { animate: true });
+  assert.equal(timeline.isDensityMorphing(), false);
+  assert.deepEqual(timeline.getSelectedIndices(), [2]);
+}));
+
+test('the bars grow and shrink from one difficulty\'s heights to the other\'s', () => withWindow(() => {
+  const first = halfMap(0, 30000);
+  const second = halfMap(30000, 60000);
+
+  // What each difficulty's bars look like on their own.
+  const reference = (map) => {
+    const { canvas, barHeights } = createBarCanvas();
+    const alone = new TimelineRenderer(canvas);
+    alone.setBeatmap(map, 60000);
+    alone.render(0);
+    return barHeights();
+  };
+  const firstHeights = reference(first);
+  const secondHeights = reference(second);
+  // One bar in each half, each drawn by only one of the two.
+  const early = 20;
+  const late = 160;
+  assert.ok(heightAt(firstHeights, early) > 0 && heightAt(firstHeights, late) === 0);
+  assert.ok(heightAt(secondHeights, late) > 0 && heightAt(secondHeights, early) === 0);
+
+  const { canvas, barHeights } = createBarCanvas();
+  const timeline = new TimelineRenderer(canvas);
+  timeline.setBeatmap(first, 60000);
+  timeline.render(1000);
+  barHeights();
+
+  timeline.showMap(second, { animate: true, now: 1000 });
+  assert.equal(timeline.isDensityMorphing(), true);
+  assert.equal(timeline.needsAnimationFrame(), true, 'a paused preview keeps drawing until it is done');
+
+  timeline.render(1000);
+  const atStart = barHeights();
+  assert.equal(heightAt(atStart, early), heightAt(firstHeights, early), 'it starts from the bars that were there');
+  assert.equal(heightAt(atStart, late), 0);
+
+  timeline.render(1100);
+  const midway = barHeights();
+  assert.ok(heightAt(midway, early) > 0 && heightAt(midway, early) < heightAt(firstHeights, early), 'the old bars shrink');
+  assert.ok(heightAt(midway, late) > 0 && heightAt(midway, late) < heightAt(secondHeights, late), 'the new ones grow');
+  // Only the heights move: a bar stays in its slot and keeps its width.
+  assert.deepEqual([...midway.keys()].filter((x) => x % 2 !== 0), []);
+
+  timeline.render(1000 + 1000);
+  assert.deepEqual(barHeights(), secondHeights, 'and ends on the new difficulty\'s bars exactly');
+  assert.equal(timeline.isDensityMorphing(), false);
+  assert.equal(timeline.needsAnimationFrame(), false);
+}));
+
+test('the bars move through a zoomed view as well, and a new map cuts them short', () => withWindow(() => {
+  const { canvas, barHeights } = createBarCanvas();
+  const timeline = new TimelineRenderer(canvas);
+  timeline.setBeatmap(halfMap(0, 30000), 60000);
+  // 10s across 200px is 50ms a pixel: still bars, not single objects. The
+  // playhead is in view, or a paused timeline would bring the view back to it.
+  timeline.setTime(30000);
+  timeline.setView(25000, 10000, { animate: false });
+  timeline.render(1000);
+  barHeights();
+
+  timeline.showMap(halfMap(30000, 60000), { animate: true, now: 1000 });
+  timeline.render(1100);
+  const midway = barHeights();
+  // 25-30s is the first half's, 30-35s the second's: both are on screen.
+  assert.ok(heightAt(midway, 40) > 0, 'the old map\'s bars, shrinking');
+  assert.ok(heightAt(midway, 160) > 0, 'the new map\'s, growing');
+
+  timeline.setBeatmap(halfMap(0, 60000), 60000);
+  assert.equal(timeline.isDensityMorphing(), false, 'another song starts with its own bars');
+}));

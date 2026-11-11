@@ -893,3 +893,52 @@ test('the other rulesets have no fixed place to click', () => {
     }
   });
 });
+
+test('the selection is ringed on whichever playfield the timeline is showing', () => {
+  // The lead owns the timeline; a compared difficulty's renderer is handed it.
+  // The selection is indices into the timeline's objects, so it is ringed only
+  // on the playfield drawing those objects.
+  const circles = (count) => Array.from({ length: count }, (_, index) => ({
+    kind: 'circle', x: 100 + (index * 50), y: 100, time: 1000 * (index + 1), endTime: 1000 * (index + 1),
+  }));
+  const leadMap = { mode: 0, objects: circles(3), timingControlPoints: [] };
+  const panelMap = { mode: 0, objects: circles(3), timingControlPoints: [] };
+  const lead = new PreviewRenderer({}, {});
+  const panel = new PreviewRenderer({}, null, { selectionTimeline: lead.timeline });
+  lead.setBeatmap(leadMap, 10000);
+  panel.setBeatmap(panelMap, 10000);
+
+  const rings = (renderer) => {
+    let count = 0;
+    const ctx = {
+      save() {}, restore() {}, beginPath() {}, moveTo() {}, stroke() {}, arc() { count += 1; },
+    };
+    renderer.visibleObjectsScratch = [...renderer.mapData.objects];
+    renderer.drawStandardSelection(ctx, (x, y) => ({ x, y }), 10);
+    return count;
+  };
+
+  lead.timeline.setSelection([0, 2]);
+  assert.equal(lead.showsTimelineObjects(), true);
+  assert.equal(panel.showsTimelineObjects(), false);
+  assert.equal(rings(lead), 2);
+  assert.equal(rings(panel), 0, 'the indices are the lead\'s objects, not this one\'s');
+
+  // The compared difficulty in focus: the timeline shows its objects.
+  lead.showTimelineMap(panelMap);
+  assert.equal(lead.showsTimelineObjects(), false, 'so a click on the lead picks nothing out');
+  assert.equal(panel.showsTimelineObjects(), true);
+  lead.timeline.setSelection([1]);
+  assert.equal(rings(panel), 1);
+  assert.equal(rings(lead), 0);
+
+  // A new key count for the lead does not take the timeline back from it...
+  lead.replaceManiaObjects({ ...leadMap, objects: circles(2) });
+  assert.equal(lead.timeline.objects, panelMap.objects);
+
+  // ...and once the lead is in focus again, it does reach the timeline.
+  lead.showTimelineMap(lead.mapData);
+  const reconverted = { ...leadMap, objects: circles(4) };
+  lead.replaceManiaObjects(reconverted);
+  assert.equal(lead.timeline.objects, reconverted.objects);
+});

@@ -48,6 +48,8 @@ const VIEW_EASE_MS = 70;
 const REVEAL_EASE_MS = 90;
 const FOLLOW_CATCH_UP_MS = 140;
 const DURATION_GROW_MS = 340;
+// How long the density bars take to grow and shrink into another difficulty's.
+const DENSITY_MORPH_MS = 320;
 // A frame gap longer than this is a stall, not motion to catch up on.
 const MAX_STEP_MS = 34;
 
@@ -282,6 +284,9 @@ class TimelineRenderer {
     this.layout = computeLayout(1, 1, 0);
     this.fullDensity = null;
     this.viewDensityCache = null;
+    // While the bars move to another difficulty's: the map they come from,
+    // with density caches of its own, and how far along they are (0 to 1).
+    this.densityMorph = null;
     // Indices into `objects`, as a set for drawing and sorted for reading.
     // Objects are in time order, so index order is time order.
     this.selection = new Set();
@@ -296,6 +301,7 @@ class TimelineRenderer {
     this.breaks = normaliseBreaks(mapData?.breaks);
     this.timingSections = buildTimingSections(mapData?.timingControlPoints);
     this.setObjects(mapData?.objects);
+    this.densityMorph = null;
     this.songEndMs = null;
     this.isFollowSuspended = false;
     this.resetZoom({ animate: false });
@@ -323,6 +329,40 @@ class TimelineRenderer {
     }
     this.fullDensity = null;
     this.viewDensityCache = null;
+  }
+
+  /**
+   * Another difficulty of the same song in place of the one shown, for the
+   * difficulty in focus while several are compared: its objects, breaks, kiai
+   * and timing. The view, the zoom, the playhead and the song's length all stay
+   * where they are, since the song has not changed. The selection goes, as its
+   * indices pointed into the other map.
+   *
+   * With `animate` the density bars grow and shrink from the old map's heights
+   * to the new one's instead of jumping; nothing else moves.
+   */
+  showMap(mapData, { animate = false, now = performance.now() } = {}) {
+    const objects = Array.isArray(mapData?.objects) ? mapData.objects : [];
+    if (objects === this.objects) {
+      return;
+    }
+    // The old map's bars, cached as they were, are where the morph starts.
+    const from = {
+      objects: this.objects,
+      fullDensity: this.fullDensity,
+      viewDensityCache: this.viewDensityCache,
+    };
+    this.kiaiSections = buildKiaiSections(mapData?.timingControlPoints);
+    this.breaks = normaliseBreaks(mapData?.breaks);
+    this.timingSections = buildTimingSections(mapData?.timingControlPoints);
+    this.setObjects(objects);
+    this.densityMorph = animate && from.objects.length > 0
+      ? { from, startTime: now, progress: 0 }
+      : null;
+  }
+
+  isDensityMorphing() {
+    return Boolean(this.densityMorph);
   }
 
   getVisualDuration(now = performance.now()) {
@@ -358,6 +398,10 @@ class TimelineRenderer {
     if (nextDurationMs !== previousDurationMs) {
       this.fullDensity = null;
       this.viewDensityCache = null;
+      if (this.densityMorph) {
+        this.densityMorph.from.fullDensity = null;
+        this.densityMorph.from.viewDensityCache = null;
+      }
       if (!this.fitsMap) {
         if (this.target.durationMs >= nextDurationMs) {
           this.resetZoom({ animate: false });
@@ -399,6 +443,7 @@ class TimelineRenderer {
   /** True while anything on the timeline is still moving on its own. */
   needsAnimationFrame() {
     return Boolean(this.durationAnimation)
+      || Boolean(this.densityMorph)
       || this.isViewEasing
       || this.overviewReveal !== (this.fitsMap ? 0 : 1);
   }
@@ -700,6 +745,15 @@ class TimelineRenderer {
       }
     }
 
+    if (this.densityMorph) {
+      const progress = (now - this.densityMorph.startTime) / DENSITY_MORPH_MS;
+      if (progress >= 1) {
+        this.densityMorph = null;
+      } else {
+        this.densityMorph.progress = easeOutCubic(progress);
+      }
+    }
+
     const revealGoal = this.fitsMap ? 0 : 1;
     if (this.overviewReveal !== revealGoal && dt > 0) {
       this.overviewReveal += (revealGoal - this.overviewReveal) * (1 - Math.exp(-dt / REVEAL_EASE_MS));
@@ -750,28 +804,32 @@ class TimelineRenderer {
     this.view.startMs = clamp(this.view.startMs + deltaMs, 0, Math.max(0, this.durationMs - this.view.durationMs));
   }
 
-  getFullDensity(binCount) {
-    if (this.fullDensity?.binCount === binCount) {
-      return this.fullDensity;
+  /**
+   * `source` is whatever holds the objects and their caches: the timeline for
+   * the map shown, or the map a morph is leaving.
+   */
+  getFullDensity(binCount, source = this) {
+    if (source.fullDensity?.binCount === binCount) {
+      return source.fullDensity;
     }
-    const counts = countObjectsIntoBins(this.objects, 0, this.durationMs, new Float32Array(binCount));
+    const counts = countObjectsIntoBins(source.objects, 0, this.durationMs, new Float32Array(binCount));
     let maxCount = 0;
     for (const count of counts) {
       maxCount = Math.max(maxCount, count);
     }
     const bins = counts.map((count) => (maxCount > 0 ? count / maxCount : 0));
-    this.fullDensity = {
+    source.fullDensity = {
       binCount,
       bins,
       // Objects per ms in the busiest bar of the whole map. Zoomed-in bars are
       // measured against it, so they keep their height as the view pans.
       maxRate: maxCount / (this.durationMs / binCount),
     };
-    return this.fullDensity;
+    return source.fullDensity;
   }
 
-  getViewDensity(startMs, durationMs, binCount) {
-    const full = this.getFullDensity(binCount);
+  getViewDensity(startMs, durationMs, binCount, source = this) {
+    const full = this.getFullDensity(binCount, source);
     const binDurationMs = durationMs / binCount;
     if (startMs <= 0 && Math.abs(durationMs - this.durationMs) < 0.5) {
       return { bins: full.bins, firstBinIndex: 0, binDurationMs };
@@ -783,7 +841,7 @@ class TimelineRenderer {
     const endBinIndex = Math.ceil(((startMs + durationMs) / binDurationMs) - 1e-9);
     const visibleBinCount = Math.max(1, endBinIndex - firstBinIndex);
 
-    const cached = this.viewDensityCache;
+    const cached = source.viewDensityCache;
     if (
       cached
       && cached.firstBinIndex === firstBinIndex
@@ -793,7 +851,7 @@ class TimelineRenderer {
       return cached;
     }
     const bins = countObjectsIntoAlignedBins(
-      this.objects,
+      source.objects,
       firstBinIndex,
       binDurationMs,
       cached?.bins.length === visibleBinCount ? cached.bins : new Float32Array(visibleBinCount),
@@ -802,8 +860,8 @@ class TimelineRenderer {
     for (let index = 0; index < visibleBinCount; index += 1) {
       bins[index] = Math.min(1, bins[index] * scale);
     }
-    this.viewDensityCache = { firstBinIndex, binDurationMs, bins };
-    return this.viewDensityCache;
+    source.viewDensityCache = { firstBinIndex, binDurationMs, bins };
+    return source.viewDensityCache;
   }
 
   render(now = performance.now()) {
@@ -1057,14 +1115,23 @@ class TimelineRenderer {
     const middle = (layout.trackTop + layout.trackBottom) / 2;
     const maxHeight = Math.max(2, layout.trackBottom - layout.trackTop - 5);
     const msPerPx = durationMs / layout.width;
+    const heightOf = (bin) => (bin > 0 ? Math.max(1, bin * maxHeight) : 0);
+    // Mid-morph each bar is part way from the old map's height to the new
+    // one's. Both maps are binned over the same view, so their bars line up.
+    const morph = this.densityMorph;
+    const fromBins = morph ? this.getViewDensity(startMs, durationMs, binCount, morph.from).bins : null;
 
     const traceBars = () => {
       ctx.beginPath();
       for (let index = 0; index < bins.length; index += 1) {
-        if (bins[index] <= 0) {
+        let barHeight = heightOf(bins[index]);
+        if (fromBins) {
+          const fromHeight = heightOf(fromBins[index]);
+          barHeight = fromHeight + ((barHeight - fromHeight) * morph.progress);
+        }
+        if (barHeight <= 0) {
           continue;
         }
-        const barHeight = Math.max(1, bins[index] * maxHeight);
         const binStartMs = (firstBinIndex + index) * binDurationMs;
         const x = (binStartMs - startMs) / msPerPx;
         ctx.rect(x, middle - (barHeight / 2), barWidthDrawn, barHeight);

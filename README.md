@@ -9,6 +9,12 @@ an extension popup that previews osu! beatmaps directly from the active tab.
 3. the popup validates the URL, fetches `https://osu.ppy.sh/osu/{beatmapId}`, parses hit objects, and renders a map preview.
 4. no loading time is needed, as the extension uses the preview audio first, and fetches the full audio in the background.
 
+the preview's top-right corner has an island: a small capsule that is only there while something is going on. while the full track downloads it holds a ring, filling as it goes, with the percentage once the size is known; when the track lands it shows a tick for a moment and then shrinks away. playing the preview clip or the full track with nothing happening shows nothing at all. hover the island for where the audio is coming from; click it for the debug panel.
+
+every message the popup has -- a copied timestamp, a failure, the phone's "leave this view" -- comes from the same island. it springs out of the corner for a few seconds, then back to what it was showing, or away. click a message to put it away early. with no map open it sits in the same corner of the "unsupported webpage" card.
+
+each kind of thing has a colour of its own: amber for the full track downloading, green for it arriving, violet for a copied timestamp, teal for anything else done (the cache cleared, the shortcuts reset), blue for something to know or go and do, red for a failure.
+
 the extension only works on valid osu beatmap URLs.
 
 ## detached window
@@ -33,7 +39,7 @@ taiko maps play the taiko drum instead, whichever style is chosen: a centre hit 
 
 mania previews show the key count in the controls row. for a standard map converted to mania it opens a picker, like osu!lazer's key mods: auto (the count the map works out for itself), 4k and 7k up front and every other count from 1k to 10k one click further, also on `k`. the choice is remembered for every convert. mania maps keep their own key count, as they do in lazer.
 
-the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open. on firefox for android a set picked from it opens behind the popup, so the popup says to leave it to see the page, as it does for the settings page.
+the cached mapsets list is reachable from the menu on any page, not just when no beatmap is open. on firefox for android a set picked from it opens behind the popup, so the popup says to leave it to see the page, as it does for the settings page. those two messages stay up longer than the rest, since they are something to do rather than something done.
 
 the preview starts playing as soon as it opens. **play on open** in settings turns that off, for whoever would rather it waited for `space`; a detached window still keeps playing, or keeps paused, as the popup left it, whatever the setting says. the music volume is on the settings page as well as the preview's own slider, and setting it either way is remembered.
 
@@ -49,7 +55,7 @@ the number lives in the `aspect-ratio` on `.map-preview-canvas-wrap` in `popup.c
 
 ### several difficulties at once
 
-the two-panel button in the header shows other difficulties of the set beside the one you opened, up to four in all, on one clock and one timeline. the list comes from the set's osu.ppy.sh page, with star ratings, and offers what the site lists under that ruleset's tab: its own difficulties and, for taiko, catch and mania, the converts of the standard ones. the preview keeps its size, in the toolbar popup, the detached window and on a phone alike: the difficulties share it, in whichever grid gives each the most room for its shape (in the popup, two side by side and three or four in a 2x2 grid; a tall window stacks them, a wide one lines them up), and every playfield keeps its proportions. the map you opened leads: its hitsounds play, its density fills the timeline, and the added ones are drawn only. a mania convert's key count applies to every convert shown.
+the two-panel button in the header shows other difficulties of the set beside the one you opened, up to four in all, on one clock and one timeline. the list comes from the set's osu.ppy.sh page, with star ratings, and offers what the site lists under that ruleset's tab: its own difficulties and, for taiko, catch and mania, the converts of the standard ones. the preview keeps its size, in the toolbar popup, the detached window and on a phone alike: the difficulties share it, in whichever grid gives each the most room for its shape (in the popup, two side by side and three or four in a 2x2 grid; a tall window stacks them, a wide one lines them up), and every playfield keeps its proportions. the map you opened leads, and one difficulty at a time is in focus: the lead, until another's name is clicked. the one in focus is the one you hear, its hitsounds playing, and the one the timeline shows: its objects, breaks and timing, with the bars growing and shrinking out of the last one's as focus moves (they change at once with reduced motion on). the view, the zoom and the playhead stay where they are, since the song is the same. objects are picked out on the timeline or on the playfield of the difficulty it is showing, and moving focus lets go of them. a mania convert's key count applies to every convert shown.
 
 what is shown is remembered per set until the browser closes, so reopening the popup, detaching it or following on to another difficulty of the set keeps the same panels; following on to one that is already shown swaps it into the lead. another set or ruleset starts with none.
 

@@ -1,8 +1,10 @@
 // Several difficulties of one mapset, previewed side by side on one clock.
 //
-// The map you opened stays the lead: its renderer owns the timeline, and its
-// hitsounds are the ones that play. Each added difficulty gets a panel of its
-// own with a playfield-only renderer, drawn at the lead's time every frame.
+// The map you opened stays the lead: its renderer owns the timeline. One
+// difficulty is in focus, the lead until another's pill is clicked: its
+// hitsounds are the ones that play, and the timeline shows its objects. Each
+// added difficulty gets a panel of its own with a playfield-only renderer,
+// drawn at the lead's time every frame.
 // They are offered in the lead's ruleset, as the site's ruleset tabs list them:
 // that ruleset's own difficulties and, outside osu!standard, the converts.
 //
@@ -159,8 +161,8 @@ const createComparePanels = ({
   prepareMap,
   convertMap,
   createRenderer,
-  // Told the map whose hitsounds should play when that changes: an added
-  // difficulty's, or null for the lead's.
+  // Told the map in focus when that changes -- whose hitsounds play and whose
+  // objects the timeline shows: an added difficulty's, or null for the lead's.
   onSoundSourceChange = () => {},
   // Draws every playfield at the current time, for a move that resizes them.
   renderPlayfields = () => {},
@@ -866,7 +868,10 @@ const createComparePanels = ({
 
   panelsElement?.addEventListener('click', (event) => {
     if (event.target instanceof HTMLCanvasElement && event.target.dataset.compare === 'true') {
-      onCanvasClick();
+      // With the panel's renderer, so the popup can tell whether the timeline
+      // is showing this difficulty and a circle under the click can be picked.
+      const panel = panels.find((candidate) => candidate.canvas === event.target);
+      onCanvasClick(event, panel?.renderer ?? null);
     }
   });
 

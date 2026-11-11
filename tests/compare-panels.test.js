@@ -144,6 +144,7 @@ const makePanels = ({
   area = { width: 1200, height: 800 },
   renderPlayfields = () => {},
   onSoundSourceChange = () => {},
+  onCanvasClick = () => {},
 } = {}) => {
   const root = new FakeElement('html');
   const canvasWrap = new FakeElement();
@@ -214,6 +215,7 @@ const makePanels = ({
     readSession: async (key) => session.get(key) ?? null,
     writeSession: async (key, value) => { session.set(key, value); },
     onPanelsChanged: () => { changes += 1; },
+    onCanvasClick,
   });
 
   const shownIds = () => panelsElement.children.filter((child) => child !== leadPanel).map((child) => child.dataset.beatmapId);
@@ -551,4 +553,34 @@ test('following on to the difficulty that was sounding keeps its hitsounds, now 
   await flush();
   assert.equal(told.at(-1), 'lead', 'it is the lead now, sounding as one');
   assert.ok(leadLabel.classList.contains('is-sound-source'));
+});
+
+test('a click on an added playfield goes to the popup with that panel\'s renderer', async () => {
+  // The popup picks out a circle under it while the timeline shows that
+  // difficulty, so it has to know which playfield was clicked.
+  const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1', '3'] }]]);
+  const clicks = [];
+  const { panels, panelsElement, renderers } = makePanels({
+    session,
+    onCanvasClick: (event, renderer) => clicks.push({ event, renderer }),
+  });
+  await panels.setLead(LEAD);
+  await flush();
+
+  const canvasOf = (beatmapId) => panelsElement.children
+    .find((child) => child.dataset.beatmapId === beatmapId)
+    .children.find((child) => child.dataset.compare === 'true');
+  const clickOn = (target) => {
+    const event = { target };
+    panelsElement.listeners.get('click').forEach((listener) => listener(event));
+    return event;
+  };
+
+  const event = clickOn(canvasOf('3'));
+  assert.equal(clicks.length, 1);
+  assert.equal(clicks[0].event, event, 'with the event, for where it landed');
+  assert.equal(clicks[0].renderer, renderers[1], 'and the renderer of the panel it landed on');
+
+  clickOn(panelsElement);
+  assert.equal(clicks.length, 1, 'the gap between panels is not a playfield');
 });

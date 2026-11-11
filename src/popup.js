@@ -64,6 +64,7 @@ import { PREVIEW_AUDIO_PROVIDER_LABEL, createFullAudioController } from './audio
 import { waitForAudioElementSeek } from './audio/mediaEvents.js';
 import { buildHitsoundEvents, createHitsoundPlayer } from './audio/hitsounds.js';
 import { createAudioBadgeController } from './ui/audioBadge.js';
+import { INSTRUCTION_MESSAGE_MS, createIsland } from './ui/island.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
 import { bindPopupUiEvents, bindPopover } from './ui/popupUI.js';
@@ -176,8 +177,13 @@ document.addEventListener('keydown', enableVolumeIconMotion, { once: true, captu
 const toggleIndicator = document.querySelector('#mapPreviewToggleIndicator');
 const unsupportedPanel = document.querySelector('#mapPreviewUnsupported');
 const unsupportedAscii = document.querySelector('#mapPreviewUnsupportedAscii');
-const audioStatusBadge = document.querySelector('#mapPreviewAudioBadge');
-const popupToast = document.querySelector('#mapPreviewToast');
+// The island: the audio status and every message, in one small capsule in the
+// preview's corner that is only there while it has something to show
+// (src/ui/island.js).
+const islandElement = document.querySelector('#mapPreviewIsland');
+// A click on the island while it shows the audio opens the debug panel.
+const audioStatusBadge = islandElement;
+const popupToast = islandElement;
 const debugPanel = document.querySelector('#mapPreviewDebugPanel');
 const debugStatus = document.querySelector('#mapPreviewDebugStatus');
 const debugLog = document.querySelector('#mapPreviewDebugLog');
@@ -429,13 +435,15 @@ const tickTimelineDurationAnimation = () => {
 
   renderFrame();
 
-  if (renderer.isTimelineDurationAnimating()) {
+  if (renderer.isTimelineAnimating()) {
     state.timelineAnimationRafId = requestAnimationFrame(tickTimelineDurationAnimation);
   }
 };
 
+// Frames for a paused timeline that is still moving on its own: its length
+// growing into the full track's, or its bars into another difficulty's.
 const ensureTimelineDurationAnimation = () => {
-  if (state.isPlaying || state.timelineAnimationRafId !== null || !renderer.isTimelineDurationAnimating()) {
+  if (state.isPlaying || state.timelineAnimationRafId !== null || !renderer.isTimelineAnimating()) {
     return;
   }
 
@@ -521,9 +529,20 @@ const unsupportedViewController = createUnsupportedViewController({
   },
 });
 const {
-  setUnsupportedMode,
+  setUnsupportedMode: setUnsupportedViewMode,
   stopUnsupportedAsciiAnimation,
 } = unsupportedViewController;
+
+// The island sits in the corner of whichever is the big panel: the preview, or
+// the "unsupported webpage" card in its place when there is no map -- which is
+// where the cached mapsets list, and its "leave this view" messages, are.
+const setUnsupportedMode = (enabled) => {
+  setUnsupportedViewMode(enabled);
+  const home = enabled ? unsupportedPanel : canvasWrap;
+  if (islandElement && home && islandElement.parentElement !== home) {
+    home.append(islandElement);
+  }
+};
 
 const renderInfoMenu = () => {
   if (infoModal) {
@@ -704,11 +723,11 @@ const renderRecentPanel = async () => {
       }
       createTab({ url: `https://osu.ppy.sh/beatmapsets/${safeSetId}` }).then(() => {
         if (OPENS_TABS_OUT_OF_SIGHT) {
-          showPopupToast('mapset page opened, exit this view to see it');
+          showPopupToast('mapset page opened, exit this view to see it', { durationMs: INSTRUCTION_MESSAGE_MS });
         }
       }).catch((error) => {
         addDebugLog(`cached: could not open set ${safeSetId} (${error?.message || error})`);
-        showPopupToast('Could not open that mapset');
+        showPopupToast('Could not open that mapset', { tone: 'error' });
       });
     });
     recentList.appendChild(item);
@@ -766,25 +785,35 @@ const openExtensionOptions = async () => {
   }
   setInfoMenuOpen(false);
   if (OPENS_TABS_OUT_OF_SIGHT) {
-    showPopupToast('settings page opened, exit this view to see settings');
+    showPopupToast('settings page opened, exit this view to see settings', { durationMs: INSTRUCTION_MESSAGE_MS });
   }
 };
 
-const showPopupToast = (message, hideDelayMs = 3500, tone = '') => {
-  if (!popupToast) {
-    return;
-  }
+// Whether things on the page move: off for reduced motion, and in Firefox's
+// desktop toolbar popup, which has no transitions. Its detached window does,
+// and so does Firefox for Android, where the popup is a page of its own rather
+// than a panel hung off the toolbar.
+const allowsMotion = () => !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+  && !(IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_MOBILE_VIEW);
 
-  state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
+const island = createIsland({
+  element: islandElement,
+  state,
+  registry,
+  allowMotion: allowsMotion,
+});
+if (!allowsMotion()) {
+  islandElement?.classList.add('is-still');
+}
 
-  popupToast.textContent = message;
-  // Set with the message, so a toast never changes look while it is up.
-  popupToast.classList.toggle('is-copied', tone === 'copied');
-  popupToast.classList.add('is-visible');
-  state.toastHideTimer = registry.addTimeout(setTimeout(() => {
-    popupToast.classList.remove('is-visible');
-    state.toastHideTimer = null;
-  }, hideDelayMs));
+/**
+ * Every message the popup shows, in the island in the preview's corner
+ * (src/ui/island.js). `tone` says what it is about, and is its colour: 'info'
+ * (the default), 'done' for something asked for, 'copy' for the clipboard, or
+ * 'error'. `durationMs` is how long it stays up.
+ */
+const showPopupToast = (message, { tone = 'info', durationMs } = {}) => {
+  island.showMessage(message, { tone, durationMs });
 };
 
 
@@ -1097,7 +1126,7 @@ const {
   setAudioBadgeWithProvider,
   showTryingArchiveProviderBadge,
 } = createAudioBadgeController({
-  badge: audioStatusBadge,
+  island,
   state,
   registry,
   renderDebugPanel,
@@ -1490,10 +1519,10 @@ const copyEditorTimestamp = async () => {
 
   try {
     await navigator.clipboard.writeText(timestamp);
-    showPopupToast(`Copied ${timestamp.replace(/\s*-\s*$/, '')}`, undefined, 'copied');
+    showPopupToast(`Copied ${timestamp.replace(/\s*-\s*$/, '')}`, { tone: 'copy' });
   } catch (error) {
     addDebugLog(`ui: failed to copy timestamp -> ${error?.message || 'unknown error'}`);
-    showPopupToast('Could not reach the clipboard');
+    showPopupToast('Could not reach the clipboard', { tone: 'error' });
   }
 };
 
@@ -1523,21 +1552,24 @@ const clearObjectSelection = () => {
 };
 
 /**
- * A click on the playfield that landed on a circle.
+ * A click on a playfield that landed on a circle: the lead's by default, or a
+ * compared difficulty's. Only the playfield whose map the timeline is showing
+ * picks anything out, since the selection is that map's objects; a click on
+ * any other is play/pause as ever.
  *
  * @returns true when it picked one out, so the caller leaves playback alone.
  */
-const selectObjectAtPoint = (event) => {
+const selectObjectAtPoint = (event, { target = renderer, canvas = playfieldCanvas } = {}) => {
   const timeline = renderer.timeline;
-  if (!timeline || !state.mapData) {
+  if (!timeline || !state.mapData || !target?.showsTimelineObjects()) {
     return false;
   }
 
-  const rect = playfieldCanvas.getBoundingClientRect();
+  const rect = canvas.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) {
     return false;
   }
-  const index = renderer.objectIndexAtPoint(event.clientX - rect.left, event.clientY - rect.top);
+  const index = target.objectIndexAtPoint(event.clientX - rect.left, event.clientY - rect.top);
   if (index < 0) {
     return false;
   }
@@ -2236,9 +2268,11 @@ const prepareCompareMap = (osuContent, mode) => {
   return { metadata, sourceMapData, mapData };
 };
 
-// The hitsounds of whichever difficulty was picked to sound, or the lead's.
-// syncTo picks up at the playhead, so a switch mid-play neither replays nor
-// skips a note.
+// The hitsounds and the timeline of whichever difficulty is in focus (picked
+// by its pill), or the lead's. syncTo picks up at the playhead, so a switch
+// mid-play neither replays nor skips a note. The timeline shows that
+// difficulty's objects, its bars growing and shrinking out of the last one's;
+// the view and the playhead stay put, as the song has not changed.
 const switchHitsoundSource = (sourceMap) => {
   const map = sourceMap || state.mapData;
   if (!map) {
@@ -2247,6 +2281,16 @@ const switchHitsoundSource = (sourceMap) => {
   state.hitsoundEvents = buildMapHitsoundEvents(map);
   hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
   addDebugLog(`hitsounds: from ${sourceMap ? 'an added difficulty' : 'the opened map'} (${state.hitsoundEvents.length} events)`);
+
+  // What was picked out belonged to the map the timeline showed before.
+  playfieldSelectionAnchor = -1;
+  renderer.showTimelineMap(map, {
+    animate: !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches,
+  });
+  if (!state.isPlaying) {
+    renderFrame();
+    ensureTimelineDurationAnimation();
+  }
 };
 
 const togglePlaybackWithFeedback = async () => {
@@ -2266,11 +2310,7 @@ comparePanels = createComparePanels({
   button: compareButton,
   listElement: compareList,
   statusElement: compareStatus,
-  // Firefox's desktop toolbar popup has no transitions. Its detached window
-  // does, and so does Firefox for Android, where the popup is a page of its
-  // own rather than a panel hung off the toolbar.
-  allowMotion: () => !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
-    && !(IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_MOBILE_VIEW),
+  allowMotion: allowsMotion,
   bindPopover,
   fetchDifficulties: fetchBeatmapsetDifficulties,
   fetchBeatmap: fetchBeatmapFile,
@@ -2278,7 +2318,11 @@ comparePanels = createComparePanels({
   convertMap: (sourceMapData, mode) => convertMapForMode(sourceMapData, mode, { maniaKeyCount: state.maniaKeyCount }),
   onSoundSourceChange: switchHitsoundSource,
   createRenderer: (canvas) => {
-    const panelRenderer = new PreviewRenderer(canvas, null, { lowLatency: false });
+    const panelRenderer = new PreviewRenderer(canvas, null, {
+      lowLatency: false,
+      // Rings what is picked on the lead's timeline while it shows this one.
+      selectionTimeline: renderer.timeline,
+    });
     if (lastRendererSettings) {
       panelRenderer.setPreviewSettings(lastRendererSettings);
     }
@@ -2316,7 +2360,12 @@ comparePanels = createComparePanels({
       }
     }
   },
-  onCanvasClick: () => {
+  // A compared difficulty's playfield: a circle on it is picked out while the
+  // timeline shows that difficulty, as on the lead's; elsewhere it is play/pause.
+  onCanvasClick: (event, panelRenderer) => {
+    if (event && panelRenderer && selectObjectAtPoint(event, { target: panelRenderer, canvas: event.target })) {
+      return;
+    }
     void togglePlaybackWithFeedback();
   },
   addDebugLog,
@@ -2421,7 +2470,7 @@ bindPopupUiEvents({
       await clearFullAudioCache();
       await clearHistory();
       await updateRecentClearButtonCacheUsage();
-      showPopupToast('Cache cleared');
+      showPopupToast('Cache cleared', { tone: 'done' });
       void renderRecentPanel();
     },
   },

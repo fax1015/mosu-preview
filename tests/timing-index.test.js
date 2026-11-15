@@ -85,7 +85,7 @@ test('mania scroll offset is the old per-segment sum, computed without the walk'
   const points = buildControlPoints();
   const renderer = new PreviewRenderer({}, {});
   renderer.mapData = { mode: 3, timingControlPoints: points, primaryBpm: 150 };
-  renderer.maniaScrollSpeed = 28;
+  renderer.mania.scrollSpeed = 28;
 
   const height = 800;
   for (const [from, to] of [[2000, 9000], [30000, 30050], [45000, 41000]]) {
@@ -96,13 +96,13 @@ test('mania scroll offset is the old per-segment sum, computed without the walk'
     for (const point of points) {
       if (point.time <= start) continue;
       if (point.time >= end) break;
-      expected += renderer.getManiaPixelsPerMs(segmentStart, height) * (point.time - segmentStart);
+      expected += renderer.mania.getPixelsPerMs(segmentStart, height) * (point.time - segmentStart);
       segmentStart = point.time;
     }
-    expected += renderer.getManiaPixelsPerMs(segmentStart, height) * (end - segmentStart);
+    expected += renderer.mania.getPixelsPerMs(segmentStart, height) * (end - segmentStart);
     expected *= sign;
 
-    const actual = renderer.getManiaScrollOffset(from, to, height);
+    const actual = renderer.mania.getScrollOffset(from, to, height);
     assert.ok(Math.abs(actual - expected) < 1e-6, `${from}->${to}: ${actual} vs ${expected}`);
   }
 });
@@ -119,7 +119,7 @@ test('a converted mania map scrolls without its greenlines', () => {
 
   const expected = getElapsedBeatsAt(points, 9000, { withSv: false })
     - getElapsedBeatsAt(points, 2000, { withSv: false });
-  const actual = renderer.getManiaScrollOffset(2000, 9000, 800) / renderer.getManiaPixelsPerBeat(800);
+  const actual = renderer.mania.getScrollOffset(2000, 9000, 800) / renderer.mania.getPixelsPerBeat(800);
   assert.ok(Math.abs(actual - expected) < 1e-9);
 });
 
@@ -129,15 +129,15 @@ test('notes before the first timing point scroll at that point\'s tempo, not 120
   const renderer = new PreviewRenderer({}, {});
   renderer.mapData = { mode: 3, timingControlPoints: points, primaryBpm: 240 };
 
-  assert.equal(renderer.getManiaTimingState(1000).beatLength, 250);
+  assert.equal(renderer.mania.getTimingState(1000).beatLength, 250);
   assert.equal(
-    renderer.getManiaPixelsPerMs(1000, 800),
-    renderer.getManiaPixelsPerMs(6000, 800),
+    renderer.mania.getPixelsPerMs(1000, 800),
+    renderer.mania.getPixelsPerMs(6000, 800),
     'speed should not change when the first timing point is reached',
   );
 
   renderer.mapData = { mode: 1, timingControlPoints: points, sliderMultiplier: 1.4 };
-  assert.equal(renderer.getTaikoPixelsPerMs(1000, 512), renderer.getTaikoPixelsPerMs(6000, 512));
+  assert.equal(renderer.taiko.getPixelsPerMs(1000, 512), renderer.taiko.getPixelsPerMs(6000, 512));
 });
 
 test('taiko bar lines stay bounded on a corrupt beat length', () => {
@@ -147,7 +147,7 @@ test('taiko bar lines stay bounded on a corrupt beat length', () => {
     timingControlPoints: [{ time: 0, beatLength: 0.0001, uninherited: true, meter: 4 }],
   };
 
-  const lines = renderer.getTaikoMeasureLines(0, 8000);
+  const lines = renderer.taiko.getMeasureLines(0, 8000);
   assert.ok(lines.length <= 8000 / (6 * 4) + 2, `${lines.length} bar lines in one frame`);
 });
 

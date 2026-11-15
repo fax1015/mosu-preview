@@ -6,7 +6,7 @@ import { createKeybindingLookup, eventKeyToken } from '../core/keybindings.js';
 // no equivalent on touch, where there is no pointer to move away. Read back
 // from the class rather than a local flag, so a popover cannot get out of step
 // when loading a map force-closes it. `canOpen` covers a button that stays
-// focusable, to explain itself, but has nothing to open.
+// but has nothing to open yet (the compare picker before its map's set is in).
 const bindPopover = ({
   control, button, openClass, canOpen = () => true,
 }) => {
@@ -111,7 +111,6 @@ const bindPopupUiEvents = ({
     applyPlaybackSpeed,
     selectManiaKeyCount,
     cycleManiaKeyCount,
-    explainLockedManiaKeyCount,
     toggleManiaKeysMore,
     togglePlayback,
     showCanvasToggleFeedback,
@@ -386,20 +385,8 @@ const bindPopupUiEvents = ({
 
   const speedPopover = bindPopover({ control: speedControl, button: speedButton, openClass: 'is-speed-open' });
   const volumePopover = bindPopover({ control: volumeControl, button: volumeButton, openClass: 'is-volume-open' });
-  // A native mania map's count is locked; its button says why instead.
-  const isKeysLocked = () => Boolean(keysButton?.classList.contains('is-locked'));
-  const keysPopover = bindPopover({
-    control: keysControl,
-    button: keysButton,
-    openClass: 'is-keys-open',
-    canOpen: () => !isKeysLocked(),
-  });
-
-  keysButton?.addEventListener('click', () => {
-    if (isKeysLocked()) {
-      explainLockedManiaKeyCount?.();
-    }
-  });
+  // Only shown for a convert: a native mania map's key count cannot change.
+  const keysPopover = bindPopover({ control: keysControl, button: keysButton, openClass: 'is-keys-open' });
 
   // Stays open after a pick, so 4K and 7K can be flipped between while the
   // map plays.
@@ -444,7 +431,7 @@ const bindPopupUiEvents = ({
   });
 
   playfieldCanvas.addEventListener('click', async (event) => {
-    // A circle under the pointer is something to pick out; the rest of the
+    // An object under the pointer is something to pick out; the rest of the
     // playfield is still the big play/pause button it has always been.
     if (selectObjectAtPoint?.(event)) {
       return;

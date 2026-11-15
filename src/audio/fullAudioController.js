@@ -41,6 +41,9 @@ const createFullAudioController = ({
   state,
   registry,
   hitsoundPlayer,
+  // False while the popup is holding the music's join to the WebAudio graph
+  // back for a load (see requestMusicAttach in popup.js); it joins there.
+  canAttachMusic = () => true,
   addDebugLog,
   badge: {
     setAudioBadge,
@@ -132,7 +135,7 @@ const createFullAudioController = ({
       state.audio.playbackRate = state.playbackSpeed;
       // Routing survives a change of `src`. This only retries an attach that
       // failed earlier, and wakes the context for the source about to play.
-      if (state.hitsounds) {
+      if (state.hitsounds && canAttachMusic()) {
         hitsoundPlayer.attachMediaElement(state.audio);
       }
       hitsoundPlayer.resumeContext();

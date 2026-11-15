@@ -118,7 +118,7 @@ test('a slider cannot ask the renderer for more ticks than it will draw', () => 
     timingControlPoints: [{ time: 0, beatLength: 500, uninherited: true, meter: 4 }],
   };
 
-  const ticks = within(2000, () => renderer.buildStandardSliderTicks(slider), 'laying the ticks');
+  const ticks = within(2000, () => renderer.standard.buildSliderTicks(slider), 'laying the ticks');
   assert.ok(ticks.length > 0);
   assert.ok(ticks.length <= 20000, `${ticks.length} ticks`);
   assert.ok(ticks.every((tick) => Number.isFinite(tick.time)));
@@ -133,7 +133,7 @@ test('taiko bar lines end even where one bar cannot be told from the next', () =
 
   // At 1e300ms adding one bar to the index no longer changes it, so a loop
   // that waits to pass the end of the window never does.
-  const lines = within(2000, () => renderer.getTaikoMeasureLines(1e300, 1e300 + 8000), 'the bar lines');
+  const lines = within(2000, () => renderer.taiko.getMeasureLines(1e300, 1e300 + 8000), 'the bar lines');
   assert.ok(lines.length <= 4096, `${lines.length} bar lines in one frame`);
 });
 

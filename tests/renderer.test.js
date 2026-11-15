@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { PreviewRenderer } from '../src/renderer.js';
 import {
   DEFAULT_COLOURS,
   MAX_COMBO_WHITENESS,
-  PreviewRenderer,
   assignComboIndices,
-  applyPreviewStacking,
   getComboColour,
+  normalizeComboColour,
+} from '../src/renderers/shared.js';
+import {
+  applyPreviewStacking,
   getCircleRadius,
   getStandardPlayfieldLayout,
-  normalizeComboColour,
-} from '../src/renderer.js';
+} from '../src/renderers/standard.js';
 import { readFileSync } from 'node:fs';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
@@ -458,7 +460,7 @@ test('stacking is stable when run again over the same objects', () => {
   assert.deepEqual(second, first);
 });
 
-test('catch hyperdash indicators are worked out once per map, not once per frame', () => {
+test('the catch model is worked out once per map, not once per frame', () => {
   const context = new Proxy({}, {
     get(target, property) {
       if (!(property in target)) {
@@ -490,10 +492,10 @@ CircleSize:4
 `);
     const renderer = new PreviewRenderer(canvas, canvas);
     let passes = 0;
-    const apply = renderer.applyCatchHyperDashIndicators.bind(renderer);
-    renderer.applyCatchHyperDashIndicators = (...args) => {
+    const build = renderer.catch.buildModel.bind(renderer.catch);
+    renderer.catch.buildModel = (...args) => {
       passes += 1;
-      return apply(...args);
+      return build(...args);
     };
 
     renderer.setBeatmap(convertMapForMode(source, 2), 3000);
@@ -604,7 +606,7 @@ const withRepeatSlider = (run) => {
 test('slider ticks come in along the slider, on lazer SliderTick preempts', () => {
   withRepeatSlider(({ renderer, slider }) => {
     assert.equal(slider.endTime, 3500);
-    const ticks = renderer.buildStandardSliderTicks(slider);
+    const ticks = renderer.standard.buildSliderTicks(slider);
     assert.deepEqual(ticks.map((tick) => tick.time), [1250, 1750, 2250, 2750, 3250]);
 
     // osu!lazer: half the tick's own way into its span, plus two thirds of the
@@ -879,17 +881,119 @@ test('an object that has not appeared yet cannot be clicked', () => {
   });
 });
 
-test('the other rulesets have no fixed place to click', () => {
+// The rulesets that scroll have no fixed place for an object: a click names
+// whatever the last frame drew under it, and nothing where nothing was drawn.
+const SCROLLING_MAP = `
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+ApproachRate:5
+OverallDifficulty:5
+SliderMultiplier:1.4
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,96,1000,5,0,0:0:0:0:
+256,192,1200,1,0,0:0:0:0:
+448,288,1400,1,0,0:0:0:0:
+128,192,1600,1,2,0:0:0:0:
+`;
+
+const targetCentre = (target) => (Number.isFinite(target.radius)
+  ? { x: target.x, y: target.y }
+  : { x: target.x + (target.width / 2), y: target.y + (target.height / 2) });
+
+test('a click on a note in taiko, catch or mania names that note\'s object', () => {
   withBrowserWindow(() => {
-    const { renderer, map } = createPlayfieldHarness();
-    const point = pointFor(renderer, map.objects[1]);
+    const { renderer } = createPlayfieldHarness();
+    const source = parseMapPreviewData(SCROLLING_MAP);
 
     for (const mode of [1, 2, 3]) {
-      const converted = convertMapForMode(map, mode);
+      const converted = convertMapForMode(source, mode);
       renderer.setBeatmap(converted, 5000);
-      renderer.setTime(1200);
+      renderer.setTime(900);
       renderer.renderPlayfield();
-      assert.equal(renderer.objectIndexAtPoint(point.x, point.y), -1, `mode ${mode}`);
+      const { hitTargets } = renderer.rulesetRenderer();
+      assert.ok(hitTargets.length > 0, `mode ${mode} drew something to pick`);
+      for (const target of hitTargets) {
+        const point = targetCentre(target);
+        const index = renderer.objectIndexAtPoint(point.x, point.y);
+        assert.ok(index >= 0 && index < converted.objects.length, `mode ${mode}`);
+        // Overlapping targets give the one on top, which is one of them.
+        assert.ok(hitTargets.some((other) => other.index === index));
+      }
+      assert.equal(renderer.objectIndexAtPoint(-50, -50), -1, `mode ${mode}: off the playfield`);
+    }
+  });
+});
+
+test('a catch piece names the object it came from', () => {
+  withBrowserWindow(() => {
+    const { renderer } = createPlayfieldHarness();
+    const converted = convertMapForMode(parseMapPreviewData(`
+osu file format v14
+
+[Difficulty]
+CircleSize:4
+ApproachRate:5
+SliderMultiplier:1.4
+
+[TimingPoints]
+0,500,4,2,0,100,1,0
+
+[HitObjects]
+64,192,1000,5,0,0:0:0:0:
+200,192,1400,2,0,L|400:192,1,200
+`), 2);
+    renderer.setBeatmap(converted, 5000);
+    renderer.setTime(1300);
+    renderer.renderPlayfield();
+    // Every droplet of the stream picks out the slider it was made from.
+    const streamTargets = renderer.catch.hitTargets.filter((target) => target.index === 1);
+    assert.ok(streamTargets.length > 3);
+    assert.ok(streamTargets.some((target) => target.ring === false), 'tiny droplets are not ringed');
+  });
+});
+
+test('picked objects are ringed on the scrolling rulesets too', () => {
+  withBrowserWindow(() => {
+    const strokes = [];
+    const context = new Proxy({
+      createLinearGradient: () => ({ addColorStop() {} }),
+    }, {
+      get(target, property) {
+        if (property === 'stroke') {
+          return () => strokes.push(target.strokeStyle);
+        }
+        if (!(property in target)) {
+          target[property] = () => {};
+        }
+        return target[property];
+      },
+    });
+    const canvas = {
+      clientWidth: 512, clientHeight: 384, width: 512, height: 384, getContext: () => context,
+    };
+    const renderer = new PreviewRenderer(canvas, canvas);
+    const source = parseMapPreviewData(SCROLLING_MAP);
+
+    for (const mode of [1, 2, 3]) {
+      renderer.setBeatmap(convertMapForMode(source, mode), 5000);
+      renderer.setTime(900);
+      renderer.renderPlayfield();
+      const picked = renderer.rulesetRenderer().hitTargets.find((target) => target.ring !== false);
+      renderer.timeline.setSelection([picked.index]);
+      strokes.length = 0;
+      renderer.renderPlayfield();
+      assert.ok(strokes.includes('rgb(255, 222, 123)'), `mode ${mode} rings the pick`);
+
+      renderer.timeline.clearSelection();
+      strokes.length = 0;
+      renderer.renderPlayfield();
+      assert.ok(!strokes.includes('rgb(255, 222, 123)'), `mode ${mode} rings nothing unpicked`);
     }
   });
 });
@@ -913,8 +1017,8 @@ test('the selection is ringed on whichever playfield the timeline is showing', (
     const ctx = {
       save() {}, restore() {}, beginPath() {}, moveTo() {}, stroke() {}, arc() { count += 1; },
     };
-    renderer.visibleObjectsScratch = [...renderer.mapData.objects];
-    renderer.drawStandardSelection(ctx, (x, y) => ({ x, y }), 10);
+    renderer.standard.visibleObjectsScratch = [...renderer.mapData.objects];
+    renderer.standard.drawSelection(ctx, (x, y) => ({ x, y }), 10);
     return count;
   };
 
@@ -941,4 +1045,30 @@ test('the selection is ringed on whichever playfield the timeline is showing', (
   const reconverted = { ...leadMap, objects: circles(4) };
   lead.replaceManiaObjects(reconverted);
   assert.equal(lead.timeline.objects, reconverted.objects);
+});
+
+test('mania picks the note where it is drawn, whichever way it scrolls', () => {
+  withBrowserWindow(() => {
+    const { renderer } = createPlayfieldHarness();
+    renderer.setBeatmap(convertMapForMode(parseMapPreviewData(SCROLLING_MAP), 3), 5000);
+    renderer.setTime(900);
+
+    renderer.setPreviewSettings({ maniaScrollDirection: 'down' });
+    renderer.renderPlayfield();
+    const down = renderer.mania.hitTargets.map((target) => ({ ...target }));
+
+    // Upward scroll draws the stage through a mirror; the targets are turned
+    // back the right way up, so a note low on the stage going down is as high
+    // on it going up.
+    renderer.setPreviewSettings({ maniaScrollDirection: 'up' });
+    renderer.renderPlayfield();
+    const up = renderer.mania.hitTargets;
+    assert.equal(up.length, down.length);
+    for (let i = 0; i < up.length; i += 1) {
+      assert.equal(up[i].index, down[i].index);
+      assert.ok(Math.abs(up[i].y - (384 - (down[i].y + down[i].height))) < 1e-9);
+      const point = targetCentre(up[i]);
+      assert.equal(renderer.objectIndexAtPoint(point.x, point.y), up[i].index);
+    }
+  });
 });

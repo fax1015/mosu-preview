@@ -197,8 +197,8 @@
       <button type="button" class="map-preview-time-label" id="mapPreviewTimeLabel"
         title="Copy timestamp (C)" aria-label="Copy the current timestamp">0:00 / 0:00</button>
       <span class="map-preview-control-divider" aria-hidden="true"></span>
-      <!-- Mania only. Shows the column count; on a convert it opens the key mod
-           picker, on a native mania map it is the map's own count, locked. -->
+      <!-- Mania converts only. Shows the column count and opens the key mod
+           picker. A native mania map keeps its own count, so it has none. -->
       <div class="map-preview-keys-control" id="mapPreviewKeysControl" hidden>
         <button type="button" class="secondary-button map-preview-keys-btn" id="mapPreviewKeysBtn"
           aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewKeysPopover">4K</button>
@@ -232,8 +232,7 @@
             </div>
             <div class="map-preview-keys-main">
               <button type="button" class="map-preview-keys-option map-preview-keys-option--auto" data-keys="auto"
-                aria-pressed="true" title="The key count the map works out for itself">Auto<span
-                  class="map-preview-keys-auto-count" id="mapPreviewKeysAutoCount"></span></button>
+                aria-pressed="true" title="The key count the map works out for itself">Auto</button>
               <button type="button" class="map-preview-keys-option" data-keys="4" aria-pressed="false">4K</button>
               <button type="button" class="map-preview-keys-option" data-keys="7" aria-pressed="false">7K</button>
               <button type="button" class="map-preview-keys-more-btn" id="mapPreviewKeysMoreBtn" aria-expanded="false"
@@ -414,6 +413,10 @@
     </div>
   </div>
 
+  <!-- First, and on its own: it starts fetching the tab's map while the rest of
+       the popup's modules are still arriving. src/popup.js imports the same
+       module and picks the request up. -->
+  <script type="module" src="src/mapRequest.js"></script>
   <script type="module" src="src/popup.js"></script>
 </body>
 

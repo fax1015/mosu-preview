@@ -1,5 +1,6 @@
 import { parseMetadata, parseMapPreviewData, parseBreakPeriods } from './parser.js';
-import { PreviewRenderer, formatTime } from './renderer.js';
+import { PreviewRenderer } from './renderer.js';
+import { formatTime } from './renderers/shared.js';
 import { clamp } from './core/math.js';
 import {
   PROVIDER_OVERRIDE_KEY,
@@ -23,16 +24,22 @@ import {
   getCommandShortcut,
   hasStorageArea,
   openOptionsPage,
-  queryTabs,
   storageGet,
   storageSet,
   updateTab,
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
-import { extractBeatmapInfoFromUrl, normalizeNumericId } from './core/beatmapUrl.js';
-import { buildBeatmapSourceUrl, readDetachedParams } from './core/detachedWindow.js';
+import { normalizeNumericId } from './core/beatmapUrl.js';
 import { toFollowTarget } from './core/tabFollow.js';
+import {
+  BEATMAP_FETCH_TIMEOUT_MS,
+  detachedParams,
+  fetchBeatmapFile,
+  queryActiveTab,
+  requestBeatmapForLoad,
+  takeInitialMapRequest,
+} from './mapRequest.js';
 import {
   buildSectionMarks,
   findNextSectionMark,
@@ -86,7 +93,6 @@ import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from '
 // Resolved and applied before anything else renders: the detached flag decides
 // whether the document is sized as a toolbar popup or as a window, and a late
 // class flip would repaint the shell at the wrong width.
-const detachedParams = readDetachedParams(globalThis.location?.search || '');
 const IS_DETACHED_WINDOW = detachedParams.isDetached;
 
 // Applies to the map the window opened with, and only that one. Following on to
@@ -151,7 +157,6 @@ const keysButton = document.querySelector('#mapPreviewKeysBtn');
 const keysDivider = document.querySelector('#mapPreviewKeysDivider');
 const keysMore = document.querySelector('#mapPreviewKeysMore');
 const keysMoreButton = document.querySelector('#mapPreviewKeysMoreBtn');
-const keysAutoCount = document.querySelector('#mapPreviewKeysAutoCount');
 const keysOptions = [...document.querySelectorAll('.map-preview-keys-option')];
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const canvasWrap = document.querySelector('#mapPreviewCanvasWrap');
@@ -274,8 +279,6 @@ let shortcutsPanel = null;
 let leadMappedDurationMs = 1;
 // What the renderers were last configured with, for a panel made later.
 let lastRendererSettings = null;
-const CACHE_KEY = 'mosuPreviewCacheV1';
-const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
 const DEBUG_LOG_LIMIT = 80;
 // Matches lazer's rate adjust range and precision.
 const PLAYBACK_SPEED_CYCLE = [1, 0.75, 0.5, 1.5];
@@ -286,9 +289,11 @@ const MANIA_KEY_COUNT_CYCLE = Object.freeze(['auto', ...MANIA_PRIMARY_KEY_COUNTS
 // 20k). Parsing all of them costs ~40MB and ~300ms, and rendering is windowed,
 // so the old cap only served to cut the timeline short.
 const MAX_PREVIEW_OBJECTS = 40000;
-const BEATMAP_FETCH_TIMEOUT_MS = 15000;
 // The longest the unsupported view waits for its cached list before showing.
 const RECENT_PANEL_REVEAL_WAIT_MS = 150;
+// How long the loading screen holds its spinner back, and so the longest a load
+// can have run without showing one. Matches the delay in popup.css.
+const LOADING_MARK_DELAY_MS = 150;
 const SUPPORT_LINKS = {
   issue: 'https://github.com/fax1015/mosu-preview/issues/new',
   osu: 'https://osu.ppy.sh/users/faxaxaxa',
@@ -956,6 +961,33 @@ const applyPopupSize = (popupSize) => {
   document.documentElement.style.setProperty('--popup-content-width-mobile', `${preset.mobileContentWidth}px`);
 };
 
+// True from the start of a load until its first render (see setPreviewLoading).
+let isPreviewLoading = false;
+
+// Routing the music through WebAudio builds the hitsound player's whole graph:
+// tens of milliseconds in which the main thread does nothing else, and far more
+// the first time a browser session opens an audio device. During a load that is
+// time the preview is not on screen, so the join waits until the load is either
+// idle on the network or has drawn its first frame (both in
+// initializePreviewForCurrentTab). Anything that starts the audio joins first.
+let isMusicAttachPending = false;
+
+const attachPendingMusic = () => {
+  if (!isMusicAttachPending) {
+    return;
+  }
+  isMusicAttachPending = false;
+  hitsoundPlayer.attachMediaElement(state.audio);
+};
+
+const requestMusicAttach = () => {
+  if (isPreviewLoading && !hitsoundPlayer.isMediaElementAttached()) {
+    isMusicAttachPending = true;
+    return;
+  }
+  hitsoundPlayer.attachMediaElement(state.audio);
+};
+
 const applyPreviewSettings = (settings = {}) => {
   const normalized = normalizePreviewSettings(settings);
   state.maniaScrollSpeed = normalized.maniaScrollSpeed;
@@ -988,7 +1020,9 @@ const applyPreviewSettings = (settings = {}) => {
   // one-time step -- an explicit syncTo() here would cancel and reschedule the
   // hits already queued, which sounds doubled.
   if (normalized.hitsounds) {
-    hitsoundPlayer.attachMediaElement(state.audio);
+    requestMusicAttach();
+  } else {
+    isMusicAttachPending = false;
   }
   applyPopupSize(normalized.popupSize);
   // The speaker on a difficulty's pill dims while hitsounds are off.
@@ -1083,6 +1117,7 @@ const {
 // without threading a helper through each of them.
 const playAudioElement = state.audio.play.bind(state.audio);
 state.audio.play = (...args) => {
+  attachPendingMusic();
   if (state.hitsounds || hitsoundPlayer.isMediaElementAttached()) {
     hitsoundPlayer.ensureContext();
     hitsoundPlayer.resumeContext();
@@ -1142,6 +1177,24 @@ let lastSelectedCount = -1;
 const HIDDEN_HITSOUND_LOOKAHEAD_SEC = 2;
 
 const isPageHidden = () => document.visibilityState === 'hidden';
+
+// Resolves once the frame now pending has been drawn, for work that should not
+// hold that frame up. A hidden page draws nothing and is given no frames, so it
+// does not wait; the timer is for a page hidden while it was waiting.
+const afterNextPaint = () => new Promise((resolve) => {
+  if (isPageHidden()) {
+    resolve();
+    return;
+  }
+  const fallback = registry.addTimeout(setTimeout(resolve, 100));
+  requestAnimationFrame(() => {
+    // A task queued from the frame callback runs after that frame is painted.
+    setTimeout(() => {
+      registry.clearTimeout(fallback);
+      resolve();
+    }, 0);
+  });
+});
 
 const renderFrame = () => {
   // Cheap when nothing changed: it only re-sends a position that has drifted.
@@ -1226,36 +1279,27 @@ const closeManiaKeysPopover = () => {
 
 const syncManiaKeyControls = () => {
   const mapData = getLoadedManiaMap();
+  // Only a convert's key count can be chosen. A native mania map keeps its
+  // own, as it does under lazer's key mods, so it gets no control at all
+  // rather than one that does nothing.
+  const showControl = Boolean(mapData) && isManiaConvert(mapData);
   if (keysControl) {
-    keysControl.hidden = !mapData;
+    keysControl.hidden = !showControl;
   }
   if (keysDivider) {
-    keysDivider.hidden = !mapData;
+    keysDivider.hidden = !showControl;
   }
-  if (!mapData || !keysButton) {
+  if (!showControl || !keysButton) {
     closeManiaKeysPopover();
     return;
   }
 
   const keys = formatKeyCount(mapData.mania?.totalColumns || mapData.circleSize);
   keysButton.textContent = keys;
-  const isConvert = isManiaConvert(mapData);
-  keysButton.classList.toggle('is-locked', !isConvert);
-  keysButton.setAttribute('aria-disabled', isConvert ? 'false' : 'true');
-  if (!isConvert) {
-    closeManiaKeysPopover();
-    keysButton.title = `${keys} map: a mania map keeps its own key count`;
-    keysButton.setAttribute('aria-label', `Key count ${keys}, the map's own`);
-    return;
-  }
-
   const autoKeys = formatKeyCount(mapData.conversion.autoKeys);
   const isAuto = state.maniaKeyCount === 'auto';
   keysButton.title = isAuto ? `Key count (${keys}, auto)` : `Key count (${keys}; auto is ${autoKeys})`;
   keysButton.setAttribute('aria-label', isAuto ? `Key count ${keys}, auto` : `Key count ${keys}`);
-  if (keysAutoCount) {
-    keysAutoCount.textContent = autoKeys;
-  }
   let isMinorSelected = false;
   for (const option of keysOptions) {
     const selected = option.dataset.keys === String(state.maniaKeyCount);
@@ -1328,6 +1372,8 @@ const selectManiaKeyCount = (keyCount) => {
   });
 };
 
+// K on a native mania map, which keeps its own key count and so has no
+// control to change it: says why nothing happened.
 const explainLockedManiaKeyCount = () => {
   const mapData = getLoadedManiaMap();
   if (mapData && !isManiaConvert(mapData)) {
@@ -1413,6 +1459,7 @@ const {
   state,
   registry,
   hitsoundPlayer,
+  canAttachMusic: () => !isMusicAttachPending,
   addDebugLog,
   badge: {
     setAudioBadge,
@@ -1552,7 +1599,7 @@ const clearObjectSelection = () => {
 };
 
 /**
- * A click on a playfield that landed on a circle: the lead's by default, or a
+ * A click on a playfield that landed on an object: the lead's by default, or a
  * compared difficulty's. Only the playfield whose map the timeline is showing
  * picks anything out, since the selection is that map's objects; a click on
  * any other is play/pause as ever.
@@ -1621,47 +1668,6 @@ const extractSetIdFromMetadata = (beatmapSetID) => {
   }
   const match = beatmapSetID.match(/beatmapsets\/(\d+)/i);
   return match ? match[1] : null;
-};
-
-const queryActiveTab = async () => {
-  const tabs = await queryTabs({ active: true, currentWindow: true });
-  return Array.isArray(tabs) ? tabs[0] : null;
-};
-
-const fetchBeatmapFile = async (beatmapId) => {
-  const controller = registry.createAbortController();
-  // A .osu file is a few hundred KB at most. Without a deadline a stalled
-  // request left "Fetching beatmap" on screen until the popup was closed.
-  const timeout = registry.addTimeout(setTimeout(() => controller.abort(), BEATMAP_FETCH_TIMEOUT_MS));
-  try {
-    const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
-      method: 'GET',
-      credentials: 'omit',
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Beatmap request failed (${response.status}).`);
-    }
-
-    // Reading the body has to stay inside the controller's lifetime, otherwise
-    // closing the popup mid-download leaves the read running unaborted.
-    const text = await response.text();
-    if (!text.includes('[HitObjects]')) {
-      throw new Error('Fetched data is not a valid .osu beatmap file.');
-    }
-
-    return text;
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new Error('osu.ppy.sh did not answer in time.');
-    }
-    throw error;
-  } finally {
-    registry.clearTimeout(timeout);
-    registry.releaseAbortController(controller);
-  }
 };
 
 // The set's page embeds every difficulty, with star ratings, for guests too.
@@ -1848,32 +1854,6 @@ const renderDifficultiesPanel = async (setId, requestedMode = null) => {
   return true;
 };
 
-const readCachedPreview = async () => {
-  if (!hasStorageArea('session', 'local')) {
-    return null;
-  }
-
-  try {
-    const items = await storageGet('session', [CACHE_KEY], { fallbackAreaName: 'local' });
-    return items?.[CACHE_KEY] || null;
-  } catch {
-    return null;
-  }
-};
-
-const writeCachedPreview = async (value) => {
-  if (!hasStorageArea('session', 'local')) {
-    return false;
-  }
-
-  try {
-    await storageSet('session', { [CACHE_KEY]: value }, { fallbackAreaName: 'local' });
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 // Bumped by every load so an older, slower one cannot overwrite the newer map's
 // state when the user switches difficulties faster than a fetch completes.
 let previewLoadToken = 0;
@@ -1883,15 +1863,38 @@ let previewLoadToken = 0;
 // unsupported view. Fades in, except in Firefox's popup, which has no
 // transitions.
 const revealPopup = () => {
-  popup?.classList.add('is-open');
+  if (!popup || popup.classList.contains('is-open')) {
+    return;
+  }
+  popup.classList.add('is-open');
+  if (isPreviewLoading) {
+    loadingShownAt = performance.now();
+  }
 };
+
+// When the loading screen came into view, or null while it is not in view: it
+// is up from the start of a load, but nothing is seen of it until the popup
+// opens.
+let loadingShownAt = null;
 
 // The loading screen covers the shell from the start of a load until its first
 // render, so the popup is never seen in a half-built state. Keyed on the shell
 // rather than the overlay so both stay in step from one class.
 const setPreviewLoading = (isLoading) => {
-  if (!popup) {
+  if (!popup || isLoading === isPreviewLoading) {
     return;
+  }
+  isPreviewLoading = isLoading;
+  if (isLoading) {
+    loadingShownAt = popup.classList.contains('is-open') ? performance.now() : null;
+    popup.classList.remove('is-quick-load');
+  } else {
+    // A load that was over before the spinner was due showed nothing but the
+    // panel's own colour. Fading that out would only hold the finished preview
+    // back behind it, so it goes at once (see is-quick-load in popup.css).
+    const shownForMs = loadingShownAt === null ? 0 : performance.now() - loadingShownAt;
+    popup.classList.toggle('is-quick-load', shownForMs < LOADING_MARK_DELAY_MS);
+    loadingShownAt = null;
   }
   popup.classList.toggle('is-loading', isLoading);
   popup.setAttribute('aria-busy', isLoading ? 'true' : 'false');
@@ -1904,12 +1907,14 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
 
   setPreviewLoading(true);
 
-  // Which tab this is decides which view the popup opens on, so it is asked for
-  // straight away, alongside the settings below rather than after them. A
-  // failure is handled where it is awaited; this only stops it being reported
-  // as unhandled in the meantime.
-  const activeTabRequest = !sourceUrlOverride && !IS_DETACHED_WINDOW ? queryActiveTab() : null;
-  activeTabRequest?.catch(() => {});
+  // Which tab this is decides which view the popup opens on, and its map is the
+  // slowest thing a load waits for, so both are asked for straight away,
+  // alongside the settings below rather than after them. The page's first load
+  // finds that request already made, before this file had even arrived
+  // (src/mapRequest.js); it is dropped rather than used for any other load.
+  const initialMapRequest = takeInitialMapRequest(isStaleLoad);
+  const mapRequest = (!sourceUrlOverride && initialMapRequest)
+    || requestBeatmapForLoad({ sourceUrlOverride, isStaleLoad });
 
   stopTimelineDurationAnimation();
   stopPlayback();
@@ -1957,27 +1962,13 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   }
 
   try {
-    let sourceUrl = '';
-    if (sourceUrlOverride) {
-      // A followed tab already resolved to a beatmap URL.
-      sourceUrl = sourceUrlOverride;
-    } else if (IS_DETACHED_WINDOW) {
-      // The ids arrived in the page URL; rebuilding a canonical beatmap URL from
-      // them keeps both entry points on the same validation path below.
+    if (IS_DETACHED_WINDOW && !sourceUrlOverride) {
       setStatus('Loading detached preview...');
-      sourceUrl = buildBeatmapSourceUrl(detachedParams);
       addDebugLog(`init: detached window for beatmap ${detachedParams.beatmapId}`);
-    } else {
-      setStatus('Checking current tab...');
-      const activeTab = await activeTabRequest.catch(() => null);
-      // Chrome withholds the URL of tabs it will not let an extension read --
-      // the new tab page, chrome:// pages, other extensions' pages. That is
-      // not a failed load, it is simply a page with no map: the unsupported
-      // view below, not the error one.
-      sourceUrl = activeTab?.url || '';
     }
 
-    const info = extractBeatmapInfoFromUrl(sourceUrl);
+    // Which map this is, with its file already on the way.
+    const { info, content: mapContentRequest } = await mapRequest;
 
     if (!info.valid) {
       addDebugLog(`init: invalid tab url (${info.reason})`);
@@ -2057,38 +2048,31 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       configureAudioPreview(info.setId, null);
     }
 
-    let osuContent = '';
-    const cached = await readCachedPreview();
-    const isCacheUsable = Boolean(
-      cached
-      && cached.version === 1
-      && cached.beatmapId === info.beatmapId
-      && Number.isFinite(cached.savedAt)
-      && (Date.now() - cached.savedAt) <= CACHE_MAX_AGE_MS
-      && typeof cached.osuContent === 'string'
-      && cached.osuContent.includes('[HitObjects]'),
-    );
-
-    if (isCacheUsable) {
-      setStatus(`Loaded cached beatmap #${info.beatmapId}`);
-      osuContent = cached.osuContent;
-    } else {
-      setStatus(`Fetching beatmap #${info.beatmapId}...`);
-      osuContent = await fetchBeatmapFile(info.beatmapId);
-      if (isStaleLoad()) {
-        return;
-      }
-      await writeCachedPreview({
-        version: 1,
-        beatmapId: info.beatmapId,
-        sourceUrl: info.sourceUrl,
-        savedAt: Date.now(),
-        osuContent,
+    // With hitsounds on, the music has still to join the WebAudio graph (see
+    // requestMusicAttach). A map that is still on its way leaves the main
+    // thread idle, so it joins now, once the loading screen has had its frame.
+    // A map that is already in is not held up for it, and joins after its
+    // first frame instead.
+    let isMapContentIn = false;
+    const markMapContentIn = () => {
+      isMapContentIn = true;
+    };
+    mapContentRequest.then(markMapContentIn, markMapContentIn);
+    if (isMusicAttachPending) {
+      void afterNextPaint().then(() => {
+        if (!isMapContentIn && !isStaleLoad()) {
+          attachPendingMusic();
+        }
       });
     }
 
+    setStatus(`Fetching beatmap #${info.beatmapId}...`);
+    const { osuContent, fromCache } = await mapContentRequest;
     if (isStaleLoad()) {
       return;
+    }
+    if (fromCache) {
+      setStatus(`Loaded cached beatmap #${info.beatmapId}`);
     }
 
     const metadata = parseMetadata(osuContent);
@@ -2188,6 +2172,16 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     setPreviewLoading(false);
 
     setPlaybackSpeedControlEnabled(true);
+
+    // The music joins the WebAudio graph here if it has not yet (see
+    // requestMusicAttach), after the frame above is on screen rather than
+    // before it, and ahead of the playback it has to be part of.
+    if (isMusicAttachPending) {
+      await afterNextPaint();
+      if (!isStaleLoad()) {
+        attachPendingMusic();
+      }
+    }
 
     // Start the current source before launching the full-audio upgrade. Both
     // paths use the same HTMLAudioElement; starting them together lets the
@@ -2360,7 +2354,7 @@ comparePanels = createComparePanels({
       }
     }
   },
-  // A compared difficulty's playfield: a circle on it is picked out while the
+  // A compared difficulty's playfield: an object on it is picked out while the
   // timeline shows that difficulty, as on the lead's; elsewhere it is play/pause.
   onCanvasClick: (event, panelRenderer) => {
     if (event && panelRenderer && selectObjectAtPoint(event, { target: panelRenderer, canvas: event.target })) {
@@ -2438,7 +2432,6 @@ bindPopupUiEvents({
     applyPlaybackSpeed,
     selectManiaKeyCount,
     cycleManiaKeyCount,
-    explainLockedManiaKeyCount,
     toggleManiaKeysMore: () => setManiaKeysMoreOpen(!isManiaKeysMoreOpen()),
     togglePlayback,
     showCanvasToggleFeedback,

@@ -127,10 +127,14 @@ const createLegacyRandom = (seed) => {
     return w;
   };
 
+  const nextDouble = () => (nextUInt() & 0x7fffffff) / 0x80000000;
   return {
     nextUInt,
-    next: (upperBound) => Math.floor((nextUInt() & 0x7fffffff) / 0x80000000 * upperBound),
-    nextDouble: () => (nextUInt() & 0x7fffffff) / 0x80000000,
+    next: (upperBound) => Math.floor(nextDouble() * upperBound),
+    // LegacyRandom.Next(lowerBound, upperBound): the C# (int) cast truncates
+    // toward zero, which for a range that crosses zero is not Math.floor.
+    nextInRange: (lowerBound, upperBound) => Math.trunc(lowerBound + (nextDouble() * (upperBound - lowerBound))),
+    nextDouble,
     nextBool: () => (nextUInt() & 1) === 1,
   };
 };
@@ -534,6 +538,86 @@ const getPathPosition = (object, progress) => {
   return positionOnMeasuredPath(measured.path, measured.lengths, progress);
 };
 
+// osu!lazer's CatchBeatmapProcessor.RNG_SEED. One generator runs over the whole
+// map in object order, so every banana and tiny droplet's position depends on
+// how many came before it -- which is why this has to be one pass at the end.
+const CATCH_RNG_SEED = 1337;
+// osu!lazer's Catcher.BASE_SIZE and Catcher.BASE_DASH_SPEED.
+const CATCHER_BASE_SIZE = 106.75;
+const CATCHER_BASE_DASH_SPEED = 1;
+
+/**
+ * osu!lazer's CatchBeatmapProcessor.ApplyPositionOffsets, without Hard Rock
+ * (the preview plays no mods). `objects` must be in creation order: each
+ * top-level object, then whatever it made.
+ *
+ * - A banana is thrown anywhere across the field, and three more numbers are
+ *   drawn after it for the type, rotation and colour osu!stable used to pick.
+ * - A tiny droplet is jostled up to 20px either way off its slider's path
+ *   (never off the field). This is what gives a juice stream its scatter.
+ * - A droplet draws one number for the rotation stable gave it, and moves not
+ *   at all. Fruits draw nothing.
+ */
+const applyCatchPositionOffsets = (objects) => {
+  const random = createLegacyRandom(CATCH_RNG_SEED);
+  for (const object of objects) {
+    if (object.type === 'banana') {
+      object.originalX = 0;
+      object.x = clamp(random.nextDouble() * OSU_WIDTH, 0, OSU_WIDTH);
+      random.nextUInt();
+      random.nextUInt();
+      random.nextUInt();
+    } else if (object.type === 'tinyDroplet') {
+      const offset = clamp(random.nextInRange(-20, 20), -object.originalX, OSU_WIDTH - object.originalX);
+      object.x = clamp(object.originalX + offset, 0, OSU_WIDTH);
+    } else if (object.type === 'droplet') {
+      random.nextUInt();
+    }
+  }
+};
+
+/**
+ * osu!lazer's CatchBeatmapProcessor.initialiseHyperDash, over fruits and
+ * droplets in time order. A jump the catcher cannot make at dash speed, once
+ * whatever slack the last jump left in the same direction is spent, marks the
+ * object it starts from as a hyperdash, aimed at the next one. lazer itself
+ * notes this uses the full catcher width rather than the catchable part, as
+ * stable did, so the half-width below is the whole catcher's.
+ */
+const applyCatchHyperDash = (objects, circleSize) => {
+  const palpable = objects.filter((object) => object.type === 'fruit' || object.type === 'droplet');
+  const catcherScale = 1 - ((0.7 * (numberOr(circleSize, 5) - 5)) / 5);
+  const halfCatcherWidth = (CATCHER_BASE_SIZE * Math.abs(catcherScale)) / 2;
+
+  for (const object of objects) {
+    object.hyperDash = false;
+  }
+
+  let lastDirection = 0;
+  let lastExcess = halfCatcherWidth;
+  for (let i = 0; i < palpable.length - 1; i += 1) {
+    const current = palpable[i];
+    const next = palpable[i + 1];
+    const direction = next.x > current.x ? 1 : -1;
+    // Truncated to whole milliseconds and given a quarter of a 60fps frame
+    // of grace, both as stable did.
+    const timeToNext = Math.trunc(next.time) - Math.trunc(current.time) - (1000 / 60 / 4);
+    const distanceToNext = Math.abs(next.x - current.x)
+      - (lastDirection === direction ? lastExcess : halfCatcherWidth);
+    const distanceToHyper = Math.fround((timeToNext * CATCHER_BASE_DASH_SPEED) - distanceToNext);
+
+    if (distanceToHyper < 0) {
+      current.hyperDash = true;
+      current.hyperDashTargetTime = next.time;
+      current.hyperDashTargetX = next.x;
+      lastExcess = halfCatcherWidth;
+    } else {
+      lastExcess = clamp(distanceToHyper, 0, halfCatcherWidth);
+    }
+    lastDirection = direction;
+  }
+};
+
 const buildCatchObjects = (mapData) => {
   const result = [];
   let renderId = 0;
@@ -543,7 +627,10 @@ const buildCatchObjects = (mapData) => {
     }
     result.push({
       time,
+      // CatchHitObject.EffectiveX: where the object is, held to the field.
+      // `originalX` is the unclamped position the offsets below start from.
       x: clamp(Number(x) || 0, 0, OSU_WIDTH),
+      originalX: Number(x) || 0,
       type,
       sourceObjectIndex: source.index,
       comboIndex: source.comboIndex,
@@ -675,18 +762,26 @@ const buildCatchObjects = (mapData) => {
     }
 
     if (source.kind === 'spinner' || source.kind === 'hold') {
-      const duration = Math.max(1, source.endTime - source.time);
-      const timing = getTimingState(mapData, source.time);
-      const count = Math.max(18, Math.ceil(duration / Math.max(20, timing.beatLength / 8)));
-      for (let i = 0; i <= count; i += 1) {
-        const time = source.time + ((duration * i) / count);
-        const seed = ((source.time * 0.0017) + (i * 0.61803398875)) | 0;
-        const random = createLegacyRandom(seed);
-        // The list is full: a spinner days long would otherwise go on seeding a
-        // generator for each of a hundred million bananas nobody will see.
-        if (!add(indexedSource, time, random.nextDouble() * OSU_WIDTH, 'banana')) {
+      // osu!lazer's BananaShower.createBananas: the shower's length halved
+      // until it is no more than 100ms, and a banana on every step of that
+      // from the (truncated) start to the end, inclusive. The arithmetic is
+      // single precision there, and so it is here, so a long spinner lands its
+      // last banana where lazer's does. Where each one falls is decided after
+      // the whole map is laid out (applyCatchPositionOffsets); until then they
+      // all sit at x = 0, as lazer's do.
+      const startTime = Math.trunc(source.time);
+      const endTime = Math.trunc(source.endTime);
+      let spacing = Math.fround(source.endTime - source.time);
+      while (spacing > 100) spacing = Math.fround(spacing / 2);
+      if (!(spacing > 0)) continue;
+      let bananaIndex = 0;
+      for (let time = Math.fround(startTime); time <= endTime; time = Math.fround(time + spacing)) {
+        // The list is full: a spinner days long would otherwise go on making
+        // a hundred million bananas nobody will see.
+        if (!add(indexedSource, time, 0, 'banana', { bananaIndex })) {
           break;
         }
+        bananaIndex += 1;
       }
       continue;
     }
@@ -694,7 +789,10 @@ const buildCatchObjects = (mapData) => {
     add(indexedSource, source.time, source.x, 'fruit');
   }
 
-  return result.sort((a, b) => a.time - b.time);
+  applyCatchPositionOffsets(result);
+  result.sort((a, b) => a.time - b.time);
+  applyCatchHyperDash(result, mapData.circleSize);
+  return result;
 };
 
 const normalizeNativeMania = (mapData) => {

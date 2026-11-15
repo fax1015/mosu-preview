@@ -394,6 +394,30 @@ html.is-detached-window .map-preview-follow-btn {
     pointer-events: auto;
 }
 
+/* A load that finished before the spinner was due (below) only ever showed the
+   panel's own colour. Fading that out would hold the finished preview back
+   behind it for no reason, so it is dropped at once. Set by src/popup.js. */
+.map-preview-popup.is-quick-load .map-preview-loading {
+    transition: none;
+}
+
+/* The spinner and its caption hold back for a moment (LOADING_MARK_DELAY_MS in
+   src/popup.js): a map that is already cached is in before then, and a spinner
+   that flashed for a frame or two read as a flicker rather than as progress. */
+.map-preview-popup.is-open.is-loading .map-preview-loading-spinner {
+    animation:
+        map-preview-spinner 0.72s linear infinite,
+        map-preview-loading-mark 0.16s ease 0.15s both;
+}
+
+.map-preview-popup.is-open.is-loading .map-preview-loading-label {
+    animation: map-preview-loading-mark 0.16s ease 0.15s both;
+}
+
+@keyframes map-preview-loading-mark {
+    from { opacity: 0; }
+}
+
 /* One throbber wherever the popup waits on something: the loading screen, a
    compare panel still loading its map, and the difficulty picker's list. Only
    the size and spacing differ, set by each caller. (The island's ring is its
@@ -423,10 +447,15 @@ html.is-detached-window .map-preview-follow-btn {
     }
 
     .map-preview-loading-spinner,
+    .map-preview-popup.is-open.is-loading .map-preview-loading-spinner,
     .map-preview-panel.is-loading .map-preview-panel-status::before,
     .map-preview-compare-status.is-loading::before {
         animation: none;
         border-top-color: rgba(205, 223, 255, 0.55);
+    }
+
+    .map-preview-popup.is-open.is-loading .map-preview-loading-label {
+        animation: none;
     }
 
     .map-preview-island-ring-fill {
@@ -636,19 +665,23 @@ body.is-firefox-popup .map-preview-toggle-indicator {
    free to take the whole line now, and the 8:1 weighting only decides who
    loses characters once there are none left to share. */
 .map-preview-artist {
-    flex: 0 8 auto;
-    /* Not 0: a difficulty name long enough to overrun the whole line would
-       otherwise take every pixel the artist has, and the header is the only
-       place the artist is written. A couple of characters and an ellipsis at
-       least say there is one, and the full name stays in the tooltip. */
-    min-width: 3ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+    /* Sized by its text, not by the width below. */
+    flex: 0 8 content;
+    /* A floor, not a size: a difficulty name long enough to overrun the whole
+       line would otherwise take every pixel the artist has, and the header is
+       the only place the artist is written. A couple of characters and an
+       ellipsis at least say there is one, and the full name stays in the
+       tooltip.
 
-/* ...but a floor under nothing is just an indent before the difficulty. */
-.map-preview-artist:empty {
-    min-width: 0;
+       Written as a width, with min-width left at auto, so the floor is the
+       smaller of 3ch and the name itself. A plain `min-width: 3ch` padded a
+       name narrower than that ("Lia") out to 3ch and pushed the dot away from
+       it, and put an indent before the difficulty when there was no artist.
+       That only holds for a box that is not a scroll container, so this clips
+       rather than hides: `hidden` would drop the automatic minimum to 0. */
+    width: 3ch;
+    overflow: clip;
+    text-overflow: ellipsis;
 }
 
 .map-preview-version {
@@ -2062,18 +2095,6 @@ button.map-preview-shortcut-key:focus-visible {
     fill: currentColor;
 }
 
-/* A native mania map's own count: it reads like the others but is not a
-   control, so pointing at it changes nothing. */
-.map-preview-keys-btn.is-locked {
-    cursor: default;
-    opacity: 0.72;
-}
-
-.map-preview-keys-btn.is-locked:hover {
-    color: rgb(176, 171, 192);
-    background: transparent;
-}
-
 /* Two rows, stacked upwards: Auto, 4K and 7K -- the counts nearly everyone
    plays -- on the bottom one by the button, and every other count one click
    further up. */
@@ -2174,17 +2195,6 @@ button.map-preview-shortcut-key:focus-visible {
 .map-preview-keys-more-btn:focus-visible {
     outline: 1px solid rgba(181, 164, 244, 0.9);
     outline-offset: -1px;
-}
-
-/* What Auto comes to on this map, quieter than the word itself. */
-.map-preview-keys-auto-count {
-    margin-left: 0.25em;
-    font-weight: 600;
-    opacity: 0.6;
-}
-
-.map-preview-keys-auto-count:empty {
-    display: none;
 }
 
 .map-preview-keys-option--minor {

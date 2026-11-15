@@ -10,13 +10,13 @@ import {
   getFollowLinePreemptMs,
   hasFollowPoints,
 } from '../src/core/followPoints.js';
+import { PreviewRenderer } from '../src/renderer.js';
 import {
   FOLLOW_LINE_EDGE_RADII,
   FOLLOW_LINE_MAX_ALPHA,
-  PreviewRenderer,
   getCircleRadius,
   getStandardPlayfieldLayout,
-} from '../src/renderer.js';
+} from '../src/renderers/standard.js';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
 

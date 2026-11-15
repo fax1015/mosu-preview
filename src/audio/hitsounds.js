@@ -355,12 +355,20 @@ const ROOM_CHANGE_SEC = 0.05;
 // each hit's first 150ms, through the soft clipper, against the normal bank.
 // The flourish rides at its big kat's gain. On top of that match, kats sit
 // 1.5dB under it and the don's low body 2dB over (see taikoDrum.js), so the
-// drum thumps rather than clicks.
+// drum thumps rather than clicks. TAIKO_DRUM_BOOST then lifts the whole drum
+// above the match on purpose.
 const HITSOUND_STYLE_DRUM_GAIN = Object.freeze({
   argon: Object.freeze({ centre: 0.917, rim: 0.92, strongCentre: 1.143, strongRim: 1.057 }),
   lazer: Object.freeze({ centre: 2.239, rim: 3.324, strongCentre: 4.372, strongRim: 4.183 }),
   minimal: Object.freeze({ centre: 0.996, rim: 2.702, strongCentre: 2.133, strongRim: 2.485 }),
 });
+
+// Matched to osu! mode, the drum still sat too far under the music: taiko is
+// nothing but the drum, so it wants to be heard over the song, not tucked in.
+// This lifts every strike, in every style, by about 4dB on top of the match
+// above. It is applied per voice, ahead of the soft clipper, so the hitsound
+// volume setting still means the same thing and loud stacks still round off.
+const TAIKO_DRUM_BOOST = 1.6;
 
 const getStyleBanks = (styleId) => (
   Object.hasOwn(HITSOUND_STYLE_BANKS, styleId) ? HITSOUND_STYLE_BANKS[styleId] : SAMPLE_BANKS
@@ -988,7 +996,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     if (event?.drum) {
       const part = event.drum === 'rim' ? 'rim' : 'centre';
       const kind = event.strong ? (part === 'rim' ? 'strongRim' : 'strongCentre') : part;
-      const drumScale = volumeScale * drumGain[kind];
+      const drumScale = volumeScale * drumGain[kind] * TAIKO_DRUM_BOOST;
       if (event.strong) {
         chokeDrum(part, startAt);
       }
@@ -1303,6 +1311,7 @@ export {
   HITSOUND_STYLE_BANKS,
   HITSOUND_STYLE_ROOM,
   HITSOUND_STYLE_DRUM_GAIN,
+  TAIKO_DRUM_BOOST,
   ROOM_WET_GAIN,
   MAX_CATCHUP_MS,
   SCHEDULE_LOOKAHEAD_SEC,

@@ -10,14 +10,17 @@ import { readFileSync } from 'node:fs';
 // What went wrong once: the difficulty carried `max-width: 55%`, which reads
 // like "keep it at least half the line" but means the opposite. A short artist
 // left a third of the row empty and the difficulty was clipped anyway, however
-// wide the window was pulled.
+// wide the window was pulled. And once more: the artist's floor was a fixed
+// `min-width: 3ch`, which padded a name shorter than that ("Lia") out to 3ch
+// and pushed the dot away from it.
 
 const css = readFileSync(new URL('../popup.css', import.meta.url), 'utf8');
 
 const ruleFor = (selector) => {
   const match = css.match(new RegExp(`^\\${selector}\\s*\\{([^}]*)\\}`, 'm'));
   assert.ok(match, `${selector} is styled in popup.css`);
-  return match[1];
+  // Declarations only: the comments explain old values, and would match them.
+  return match[1].replace(/\/\*[\s\S]*?\*\//g, '');
 };
 
 const artistRule = () => ruleFor('.map-preview-artist');
@@ -43,7 +46,8 @@ test('both halves can give way, and both say so with an ellipsis', () => {
   for (const [name, rule] of [['artist', artistRule()], ['difficulty', versionRule()]]) {
     assert.ok(shrinkFactor(rule) > 0, `the ${name} cannot shrink, so the row will overflow`);
     assert.match(rule, /text-overflow:\s*ellipsis/, `the ${name} cuts without an ellipsis`);
-    assert.match(rule, /overflow:\s*hidden/);
+    // An ellipsis needs overflow other than visible; either of these will do.
+    assert.match(rule, /(^|[^-])overflow:\s*(hidden|clip)/, `the ${name} does not clip its overflow`);
   }
 });
 
@@ -55,10 +59,18 @@ test('the artist gives way before the difficulty', () => {
   );
 });
 
-test('the artist keeps a stub rather than disappearing, unless it is empty', () => {
+test('the artist keeps a stub rather than disappearing, no wider than its own name', () => {
+  const rule = artistRule();
   // A difficulty name long enough to overrun the row would otherwise take
-  // every pixel: the header is the only place the artist is written.
-  assert.match(artistRule(), /min-width:\s*[1-9][\d.]*ch/);
-  // ...but a floor under no text at all is just an indent before the difficulty.
-  assert.match(css, /\.map-preview-artist:empty\s*\{\s*min-width:\s*0;\s*\}/);
+  // every pixel: the header is the only place the artist is written. The stub
+  // is a width with min-width left at auto, so a flex item's automatic minimum
+  // makes the floor the smaller of that width and the name itself.
+  assert.match(rule, /(^|[^-])width:\s*[1-9][\d.]*ch/, 'the artist has no stub to fall back to');
+  assert.doesNotMatch(rule, /min-width:\s*[1-9][\d.]*ch/,
+    'a fixed min-width pads a short artist ("Lia") out and leaves a gap before the dot');
+  // That width must not also be the size: the basis is the text.
+  assert.match(rule, /flex:\s*\d+\s+\d+\s+content\b|flex-basis:\s*content\b/,
+    'the artist is sized by its width rather than its name');
+  // A scroll container's automatic minimum is 0, which would throw the stub away.
+  assert.doesNotMatch(rule, /(^|[^-])overflow:\s*hidden/, 'overflow: hidden drops the stub to 0');
 });

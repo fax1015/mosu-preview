@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildHitsoundEvents, createHitsoundPlayer, HITSOUND_STYLE_DRUM_GAIN } from '../src/audio/hitsounds.js';
+import {
+  buildHitsoundEvents, createHitsoundPlayer, HITSOUND_STYLE_DRUM_GAIN, TAIKO_DRUM_BOOST,
+} from '../src/audio/hitsounds.js';
 import { parseMapPreviewData } from '../src/parser.js';
 import { convertMapForMode } from '../src/core/beatmapConversion.js';
 import {
@@ -391,4 +393,13 @@ test('a strike plays at its style\'s level for its kind of hit', () => {
   const atArgon = layerGain(kat, 'argon');
   const atLazer = layerGain(kat, 'lazer');
   assert.ok(Math.abs((atLazer / atArgon) - (HITSOUND_STYLE_DRUM_GAIN.lazer.rim / HITSOUND_STYLE_DRUM_GAIN.argon.rim)) < 1e-9);
+});
+
+test('the drum is boosted above the osu! match, per voice, not through the volume setting', () => {
+  assert.ok(TAIKO_DRUM_BOOST > 1);
+  const { nodes } = play([{ time: 0, drum: 'centre', strong: false, volume: 100, hitSound: 0 }], 'argon');
+  const source = sourcesOf(nodes)[0];
+  const envelope = source.outputs[0].kind === 'filter' ? source.outputs[0].outputs[0] : source.outputs[0];
+  const expected = TAIKO_DRUM.centre.drum[0].gain * HITSOUND_STYLE_DRUM_GAIN.argon.centre * TAIKO_DRUM_BOOST;
+  assert.ok(Math.abs(Math.max(...envelope.gain.history) - expected) < 1e-9);
 });

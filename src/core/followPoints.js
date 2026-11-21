@@ -66,13 +66,13 @@ const followLineAlphaAt = (fraction, line) => {
   if (fraction <= trail || fraction >= lead) {
     return 0;
   }
-  if (fraction < fadeStart) {
-    return alpha * smoothstep(clamp((fraction - trail) / (fadeStart - trail), 0, 1));
-  }
-  if (fraction > solidLead) {
-    return alpha * smoothstep(clamp((lead - fraction) / (lead - solidLead), 0, 1));
-  }
-  return alpha;
+  const fadeOut = fraction < fadeStart && fadeStart > trail
+    ? smoothstep(clamp((fraction - trail) / (fadeStart - trail), 0, 1))
+    : 1;
+  const fadeIn = fraction > solidLead && lead > solidLead
+    ? smoothstep(clamp((lead - fraction) / (lead - solidLead), 0, 1))
+    : 1;
+  return alpha * fadeOut * fadeIn;
 };
 
 /**

@@ -23,11 +23,14 @@ const createTimingController = ({
     state.playStartMapMs + ((nowPerfMs - state.playStartPerfMs) * state.playbackSpeed)
   );
 
-  const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs = performance.now()) => {
+  const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs = now()) => {
+    if (!Number.isFinite(mapTimeMs)) {
+      return;
+    }
     state.currentTimeMs = clamp(mapTimeMs, 0, state.durationMs || 1);
     if (state.isPlaying) {
       state.playStartMapMs = state.currentTimeMs;
-      state.playStartPerfMs = nowPerfMs;
+      state.playStartPerfMs = Number.isFinite(nowPerfMs) ? nowPerfMs : now();
     }
   };
 
@@ -77,7 +80,7 @@ const createTimingController = ({
 
   // The one question anything that needs "where are we?" should ask, so a rate
   // change and a render frame can never disagree about which clock is running.
-  const getEffectiveMapTimeMs = (nowPerfMs = performance.now()) => {
+  const getEffectiveMapTimeMs = (nowPerfMs = now()) => {
     if (isAudioClockAuthoritative()) {
       return getAudioMappedTimeMs();
     }
@@ -98,13 +101,20 @@ const createTimingController = ({
    * rate's accumulated drift across the change, which is exactly where the
    * desync used to be most audible.
    */
-  const applyPlaybackRate = (nextSpeed, nowPerfMs = performance.now()) => {
+  const applyPlaybackRate = (nextSpeed, nowPerfMs = now()) => {
+    if (!Number.isFinite(nextSpeed) || nextSpeed <= 0) {
+      return state.currentTimeMs;
+    }
     syncVisualClockToMapTime(getEffectiveMapTimeMs(nowPerfMs), nowPerfMs);
     state.playbackSpeed = nextSpeed;
     if (state.audio) {
       state.audio.playbackRate = nextSpeed;
     }
     return state.currentTimeMs;
+  };
+
+  const resetMediaClock = () => {
+    mediaClock.reset?.();
   };
 
   return {
@@ -115,6 +125,7 @@ const createTimingController = ({
     isAudioClockAuthoritative,
     getEffectiveMapTimeMs,
     applyPlaybackRate,
+    resetMediaClock,
   };
 };
 

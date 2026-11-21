@@ -57,26 +57,47 @@ const collectBookmarks = (mapData) => (
  */
 const collectKiaiStarts = (mapData) => {
   const points = (Array.isArray(mapData?.timingControlPoints) ? mapData.timingControlPoints : [])
-    .filter((point) => toFiniteMs(point?.time) !== null)
-    .sort((a, b) => a.time - b.time);
+    .map((point) => ({ point, timeMs: toFiniteMs(point?.time) }))
+    .filter((entry) => entry.timeMs !== null)
+    .sort((a, b) => (
+      (a.timeMs - b.timeMs)
+      || (Number(Boolean(b.point?.uninherited)) - Number(Boolean(a.point?.uninherited)))
+    ));
+
+  // Collapse control points sharing a timestamp to the final state at that
+  // instant, so a redline + kiai greenline at the same millisecond never
+  // flickers kiai off and back on as a phantom mark.
+  const collapsed = [];
+  for (const entry of points) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && last.timeMs === entry.timeMs) {
+      last.kiai = Boolean(entry.point?.kiai);
+    } else {
+      collapsed.push({ timeMs: entry.timeMs, kiai: Boolean(entry.point?.kiai) });
+    }
+  }
 
   const marks = [];
   let active = false;
-  for (const point of points) {
-    const kiai = Boolean(point.kiai);
-    if (kiai && !active) {
-      marks.push({ timeMs: Number(point.time), kind: KIAI });
+  for (const point of collapsed) {
+    if (point.kiai && !active && point.timeMs >= 0) {
+      marks.push({ timeMs: point.timeMs, kind: KIAI });
     }
-    active = kiai;
+    active = point.kiai;
   }
   return marks;
 };
 
 const collectBreakStarts = (mapData) => (
   (Array.isArray(mapData?.breaks) ? mapData.breaks : [])
-    .filter((period) => toFiniteMs(period?.start) !== null && toFiniteMs(period?.end) !== null)
-    .filter((period) => period.end > period.start)
-    .map((period) => ({ timeMs: Number(period.start), kind: BREAK }))
+    .map((period) => ({ start: toFiniteMs(period?.start), end: toFiniteMs(period?.end) }))
+    .filter((period) => (
+      period.start !== null
+      && period.end !== null
+      && period.start >= 0
+      && period.end > period.start
+    ))
+    .map((period) => ({ timeMs: period.start, kind: BREAK }))
 );
 
 /**
@@ -94,23 +115,29 @@ const buildSectionMarks = (mapData) => {
     (a.timeMs - b.timeMs) || (KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind])
   ));
 
-  const marks = [];
-  const counts = new Map();
+  const merged = [];
   for (const mark of collected) {
-    const previous = marks[marks.length - 1];
+    const previous = merged[merged.length - 1];
     if (previous && Math.abs(mark.timeMs - previous.timeMs) <= MERGE_TOLERANCE_MS) {
+      if (KIND_PRIORITY[mark.kind] < KIND_PRIORITY[previous.kind]) {
+        merged[merged.length - 1] = mark;
+      }
       continue;
     }
+    merged.push(mark);
+  }
+
+  const counts = new Map();
+  return merged.map((mark) => {
     const ordinal = (counts.get(mark.kind) ?? 0) + 1;
     counts.set(mark.kind, ordinal);
-    marks.push({
+    return {
       timeMs: mark.timeMs,
       kind: mark.kind,
       ordinal,
       label: `${KIND_LABELS[mark.kind] || mark.kind} ${ordinal}`,
-    });
-  }
-  return marks;
+    };
+  });
 };
 
 /** The first mark after `timeMs`, or null at the last one. */

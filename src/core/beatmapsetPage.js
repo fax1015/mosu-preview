@@ -11,7 +11,61 @@
 
 const MODE_IDS = Object.freeze({ osu: 0, taiko: 1, fruits: 2, mania: 3 });
 
-const JSON_SCRIPT_PATTERN = /<script[^>]*\bid=["']json-beatmapset["'][^>]*>([\s\S]*?)<\/script>/i;
+// Linear-time extractor for `<script id="json-beatmapset">...</script>` that
+// avoids polynomial regex backtracking and skips HTML comments.
+const extractBeatmapsetScriptJson = (html) => {
+  const lower = html.toLowerCase();
+  let cursor = 0;
+  while (cursor < html.length) {
+    const commentStart = lower.indexOf('<!--', cursor);
+    const scriptStart = lower.indexOf('<script', cursor);
+    if (scriptStart === -1) {
+      return null;
+    }
+    if (commentStart !== -1 && commentStart < scriptStart) {
+      const commentEnd = lower.indexOf('-->', commentStart + 4);
+      if (commentEnd === -1) {
+        return null;
+      }
+      cursor = commentEnd + 3;
+      continue;
+    }
+
+    // Find end of opening `<script ...>` tag while respecting quoted attributes.
+    let tagEnd = scriptStart + 7;
+    let quote = '';
+    while (tagEnd < html.length) {
+      const ch = html[tagEnd];
+      if (quote) {
+        if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>') {
+        break;
+      }
+      tagEnd += 1;
+    }
+    if (tagEnd >= html.length) {
+      return null;
+    }
+
+    const attrs = html.slice(scriptStart + 7, tagEnd);
+    const closeTag = lower.indexOf('</script', tagEnd + 1);
+    if (closeTag === -1) {
+      return null;
+    }
+    const closeEnd = html.indexOf('>', closeTag + 8);
+    if (closeEnd === -1) {
+      return null;
+    }
+
+    if (/(?:^|\s)id\s*=\s*(?:"json-beatmapset"|'json-beatmapset'|json-beatmapset(?:\s|$))/i.test(attrs)) {
+      return html.slice(tagEnd + 1, closeTag);
+    }
+    cursor = closeEnd + 1;
+  }
+  return null;
+};
 
 const toModeId = (entry) => {
   if (Number.isInteger(entry?.mode_int) && entry.mode_int >= 0 && entry.mode_int <= 3) {
@@ -25,18 +79,25 @@ const toId = (value) => {
   return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
 };
 
+const toStars = (value) => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return null;
+  }
+  const stars = Number(value);
+  return Number.isFinite(stars) && stars >= 0 ? stars : null;
+};
+
 const toEntry = (raw, { convert }) => {
   const id = toId(raw?.id);
   const mode = toModeId(raw);
   if (!id || mode < 0 || raw?.deleted_at) {
     return null;
   }
-  const stars = Number(raw?.difficulty_rating);
   return {
     beatmapId: id,
     mode,
     version: String(raw?.version ?? '').trim(),
-    stars: Number.isFinite(stars) && stars >= 0 ? stars : null,
+    stars: toStars(raw?.difficulty_rating),
     convert: Boolean(convert),
   };
 };
@@ -50,14 +111,14 @@ const parseBeatmapsetPage = (html) => {
   if (typeof html !== 'string') {
     return null;
   }
-  const match = html.match(JSON_SCRIPT_PATTERN);
-  if (!match) {
+  const jsonText = extractBeatmapsetScriptJson(html);
+  if (!jsonText) {
     return null;
   }
 
   let set;
   try {
-    set = JSON.parse(match[1]);
+    set = JSON.parse(jsonText);
   } catch {
     return null;
   }

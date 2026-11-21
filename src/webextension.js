@@ -23,7 +23,7 @@ export const storageGet = async (areaName, keys, { fallbackAreaName = null } = {
   }
 
   if (usesPromiseApi) {
-    return area.get(keys);
+    return (await area.get(keys)) || {};
   }
 
   return new Promise((resolve, reject) => {
@@ -259,10 +259,6 @@ export const addTabsActivatedListener = (listener) => {
   extensionApi?.tabs?.onActivated?.addListener?.(listener);
 };
 
-export const addTabsRemovedListener = (listener) => {
-  extensionApi?.tabs?.onRemoved?.addListener?.(listener);
-};
-
 export const addWindowsFocusChangedListener = (listener) => {
   extensionApi?.windows?.onFocusChanged?.addListener?.(listener);
 };
@@ -272,7 +268,7 @@ export const addStorageChangedListener = (listener) => {
 };
 
 export const addRuntimeMessageListener = (listener) => {
-  extensionApi?.runtime?.onMessage?.addListener(listener);
+  extensionApi?.runtime?.onMessage?.addListener?.(listener);
 };
 
 export const sendRuntimeMessage = async (message) => {
@@ -307,11 +303,16 @@ export const getCommandShortcut = async (name) => {
     return null;
   }
 
-  const commands = usesPromiseApi
-    ? await commandsApi.getAll()
-    : await new Promise((resolve) => {
-      commandsApi.getAll((list) => resolve(chromeApi?.runtime?.lastError ? [] : (list || [])));
-    });
+  let commands;
+  try {
+    commands = usesPromiseApi
+      ? await commandsApi.getAll()
+      : await new Promise((resolve) => {
+        commandsApi.getAll((list) => resolve(chromeApi?.runtime?.lastError ? [] : (list || [])));
+      });
+  } catch {
+    return null;
+  }
   const command = Array.isArray(commands) ? commands.find((entry) => entry?.name === name) : null;
   return command ? String(command.shortcut || '') : null;
 };

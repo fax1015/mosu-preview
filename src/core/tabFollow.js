@@ -58,17 +58,20 @@ const pickBeatmapTabInfo = (tabs, { preferredWindowId = null, excludeWindowId = 
  * ruleset, so treating that absence as a difference would reload the map that is
  * already on screen every time the check runs.
  */
-const isSameFollowTarget = (first, second) => {
+const isSameFollowTarget = (first, second, { nativeMode = null } = {}) => {
   if (!first || !second) {
     return false;
   }
 
-  if (String(first.beatmapId || '') !== String(second.beatmapId || '')) {
+  const firstId = String(first.beatmapId || '').trim();
+  const secondId = String(second.beatmapId || '').trim();
+  if (!firstId || !secondId || firstId !== secondId) {
     return false;
   }
 
-  const firstMode = first.mode ?? null;
-  const secondMode = second.mode ?? null;
+  const resolvedNativeMode = Number.isInteger(nativeMode) ? nativeMode : null;
+  const firstMode = first.mode ?? resolvedNativeMode;
+  const secondMode = second.mode ?? resolvedNativeMode;
   if (firstMode === null || secondMode === null) {
     return true;
   }

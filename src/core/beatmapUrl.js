@@ -1,10 +1,10 @@
 // Ruleset names as osu.ppy.sh spells them in URLs, indexed by mode number.
 const MODE_URL_NAMES = Object.freeze(['osu', 'taiko', 'fruits', 'mania']);
 
-/** A beatmap or beatmapset id: digits only, as a string, or '' when it is not one. */
+/** A positive beatmap or beatmapset id: digits only, > 0, or '' when invalid. */
 const normalizeNumericId = (value) => {
   const candidate = String(value ?? '').trim();
-  return /^\d+$/.test(candidate) ? candidate : '';
+  return /^[1-9]\d*$/.test(candidate) ? candidate : '';
 };
 
 /**
@@ -59,7 +59,7 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     return { valid: false, reason: 'Active tab URL is not valid.' };
   }
 
-  if (url.protocol !== 'https:' || !/^osu\.ppy\.sh$/i.test(url.hostname)) {
+  if (url.origin !== 'https://osu.ppy.sh' || url.username || url.password) {
     return {
       valid: false,
       reason: 'unsupported website :(',
@@ -67,7 +67,7 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     };
   }
 
-  const beatmapMatch = url.pathname.match(/^\/beatmaps\/(\d+)/i);
+  const beatmapMatch = url.pathname.match(/^\/beatmaps\/([1-9]\d*)(?:\/|$)/i);
   if (beatmapMatch) {
     return {
       valid: true,
@@ -78,13 +78,13 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     };
   }
 
-  const beatmapSetMatch = url.pathname.match(/^\/beatmapsets\/(\d+)/i);
+  const beatmapSetMatch = url.pathname.match(/^\/beatmapsets\/([1-9]\d*)(?:\/|$)/i);
   if (!beatmapSetMatch) {
     return { valid: false, reason: 'Open a beatmap URL like /beatmapsets/... or /beatmaps/....' };
   }
 
   const hash = (url.hash || '').replace(/^#/, '');
-  const hashBeatmapMatch = hash.match(/(osu|taiko|fruits|catch|mania)\/(\d+)/i);
+  const hashBeatmapMatch = hash.match(/^(osu|taiko|fruits|catch|mania)\/([1-9]\d*)(?:\/|$)/i);
   if (hashBeatmapMatch) {
     return {
       valid: true,
@@ -98,7 +98,7 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
   // Discussion pages embed the beatmap id in the path:
   // /beatmapsets/<setId>/discussion/<beatmapId>/...
   const discussionMatch = url.pathname.match(
-    /\/beatmapsets\/\d+\/discussion\/(\d+)/i,
+    /^\/beatmapsets\/[1-9]\d*\/discussion\/([1-9]\d*)(?:\/|$)/i,
   );
   if (discussionMatch) {
     return {
@@ -110,8 +110,8 @@ const extractBeatmapInfoFromUrl = (rawUrl) => {
     };
   }
 
-  const queryBeatmapId = url.searchParams.get('b');
-  if (queryBeatmapId && /^\d+$/.test(queryBeatmapId)) {
+  const queryBeatmapId = normalizeNumericId(url.searchParams.get('b'));
+  if (queryBeatmapId) {
     return {
       valid: true,
       beatmapId: queryBeatmapId,

@@ -118,7 +118,7 @@ const formatKeyLabel = (key) => {
   if (!token) {
     return 'Unset';
   }
-  if (KEY_LABELS[token]) {
+  if (Object.hasOwn(KEY_LABELS, token)) {
     return KEY_LABELS[token];
   }
   return token.length === 1 ? token.toUpperCase() : token.replace(/^./, (c) => c.toUpperCase());
@@ -149,8 +149,11 @@ const eventKeyToken = (event) => {
 
 /** Whether a key can be bound at all. Modifier-only presses included. */
 const isBindableKey = (key) => {
-  const token = String(key ?? '').toLowerCase();
-  if (!token || RESERVED_KEYS.has(token)) {
+  if (typeof key !== 'string') {
+    return false;
+  }
+  const token = key.toLowerCase();
+  if (!token || (token !== SPACE && token.trim() === '') || RESERVED_KEYS.has(token)) {
     return false;
   }
   return !['shift', 'control', 'alt', 'meta', 'altgraph', 'dead', 'unidentified'].includes(token);
@@ -181,6 +184,11 @@ const normalizeKeybindings = (value) => {
       continue;
     }
     const raw = stored[id];
+    // Corrupt non-array, non-string values (null, numbers, plain objects) fall
+    // back to defaults rather than unbinding the action.
+    if (!Array.isArray(raw) && typeof raw !== 'string') {
+      continue;
+    }
     // A single key is accepted as well as a list: it is what a remap writes if
     // some other build ever stores the simpler shape.
     const list = Array.isArray(raw) ? raw : [raw];
@@ -270,23 +278,25 @@ const assignKeybinding = (bindings, actionId, key) => {
 
 /** Puts one action back on its default key, taking it from whoever holds it. */
 const resetKeybinding = (bindings, actionId) => {
-  const action = ACTIONS_BY_ID[actionId];
-  if (!action) {
-    return { bindings: normalizeKeybindings(bindings), replaced: null };
+  if (!Object.hasOwn(ACTIONS_BY_ID, actionId)) {
+    return { bindings: normalizeKeybindings(bindings), replaced: null, replacedAll: [] };
   }
+  const action = ACTIONS_BY_ID[actionId];
 
   const current = normalizeKeybindings(bindings);
   const next = { ...current };
-  let replaced = null;
+  const replacedAll = [];
   for (const key of action.defaultKeys) {
     const holder = findActionByKey(next, key);
     if (holder && holder !== actionId) {
       next[holder] = next[holder].filter((candidate) => candidate !== key);
-      replaced = replaced || holder;
+      if (!replacedAll.includes(holder)) {
+        replacedAll.push(holder);
+      }
     }
   }
   next[actionId] = [...action.defaultKeys];
-  return { bindings: next, replaced };
+  return { bindings: next, replaced: replacedAll[0] ?? null, replacedAll };
 };
 
 /** Whether anything has been moved off its default. */

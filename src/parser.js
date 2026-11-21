@@ -31,7 +31,7 @@ export const parseMetadata = (content) => {
   const data = {};
   let section = '';
 
-  content.split(/\r?\n/).forEach((line) => {
+  content.split(/\r\n|\r|\n/).forEach((line) => {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('//')) {
       return;
@@ -71,10 +71,13 @@ export const parseMetadata = (content) => {
   const artistUnicode = data.ArtistUnicode || data.Artist || 'Unknown Artist';
   const creator = data.Creator || 'Unknown Creator';
   const version = data.Version || 'Unknown Version';
-  let beatmapSetID = data.BeatmapSetID || 'Unknown';
-  const idNum = parseInt(beatmapSetID, 10);
-  if (!Number.isNaN(idNum) && idNum > 0) {
-    beatmapSetID = `https://osu.ppy.sh/beatmapsets/${beatmapSetID}`;
+  const rawBeatmapSetId = String(data.BeatmapSetID || '').trim();
+  let beatmapSetID = 'Unknown';
+  if (/^\d+$/.test(rawBeatmapSetId)) {
+    const idNum = Number.parseInt(rawBeatmapSetId, 10);
+    if (Number.isSafeInteger(idNum) && idNum > 0) {
+      beatmapSetID = `https://osu.ppy.sh/beatmapsets/${String(idNum)}`;
+    }
   }
 
   return {
@@ -87,7 +90,9 @@ export const parseMetadata = (content) => {
     beatmapSetID,
     mode: Number.isFinite(data.Mode) ? Math.min(Math.max(data.Mode, 0), 3) : 0,
     audio: data.Audio || '',
-    previewTime: Number.isFinite(data.PreviewTime) ? data.PreviewTime : -1,
+    previewTime: Number.isFinite(data.PreviewTime)
+      ? clamp(data.PreviewTime, -1, MAX_OBJECT_TIME_MS)
+      : -1,
   };
 };
 
@@ -96,6 +101,8 @@ export const parseMetadata = (content) => {
 // that length by the ruleset converters, so a corrupt file could exhaust the
 // heap. Clamping at parse time keeps every downstream consumer safe.
 export const MAX_SLIDER_SLIDES = 1000;
+export const MAX_SLIDER_CONTROL_POINTS = 16384;
+export const MAX_BREAK_PERIODS = 10000;
 
 // Sample bank ids as the .osu format numbers them. 0 means "inherit from
 // whatever is further up the chain", which is why it has a name of its own.
@@ -104,17 +111,18 @@ export const SAMPLE_SET_NORMAL = 1;
 export const SAMPLE_SET_SOFT = 2;
 export const SAMPLE_SET_DRUM = 3;
 
-const SAMPLE_SET_NAMES = {
+const SAMPLE_SET_NAMES = Object.freeze({
   none: SAMPLE_SET_NONE,
   normal: SAMPLE_SET_NORMAL,
   soft: SAMPLE_SET_SOFT,
   drum: SAMPLE_SET_DRUM,
-};
+});
 
 // [General] spells the bank out; everywhere else numbers it.
-const parseSampleSetName = (value) => (
-  SAMPLE_SET_NAMES[String(value || '').trim().toLowerCase()] ?? SAMPLE_SET_NONE
-);
+const parseSampleSetName = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return Object.hasOwn(SAMPLE_SET_NAMES, key) ? SAMPLE_SET_NAMES[key] : SAMPLE_SET_NONE;
+};
 
 const parseSampleSetIndex = (value) => {
   const parsed = Number.parseInt(value, 10);
@@ -140,7 +148,7 @@ const parseSampleVolume = (value) => {
 const toTimingControlPoint = (tp) => ({
   time: tp.time,
   beatLength: tp.beatLength,
-  meter: Number.isFinite(tp.meter) && tp.meter > 0 ? tp.meter : 4,
+  meter: Number.isFinite(tp.meter) && tp.meter > 0 ? clamp(tp.meter, 1, 64) : 4,
   sampleSet: tp.sampleSet,
   sampleIndex: tp.sampleIndex,
   volume: tp.volume,
@@ -179,7 +187,7 @@ export const parseMapPreviewData = (content, options = {}) => {
   // to. Nothing in the preview is drawn from them; they are places to seek to.
   let bookmarks = [];
 
-  const lines = content.split(/\r?\n/);
+  const lines = content.split(/\r\n|\r|\n/);
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -280,18 +288,20 @@ export const parseMapPreviewData = (content, options = {}) => {
       // inherited slider-velocity multipliers). Treating those as uninherited
       // silently drops every SV change on legacy beatmaps.
       const uninherited = parts.length > 6
-        ? parts[6] === '1'
+        ? parts[6].trim() === '1'
         : rawBeatLength > 0;
       // Only a real tempo is held to the range: a negative value on a
       // greenline is a slider velocity, clamped where it is read.
       const beatLength = uninherited && rawBeatLength > 0
         ? clamp(rawBeatLength, MIN_BEAT_LENGTH, MAX_BEAT_LENGTH)
         : rawBeatLength;
+      const rawMeter = Number.parseInt(parts[2], 10);
+      const meter = Number.isFinite(rawMeter) && rawMeter > 0 ? clamp(rawMeter, 1, 64) : 4;
 
       timingPoints.push({
         time,
         beatLength,
-        meter: Number.parseInt(parts[2], 10) || 4,
+        meter,
         // Every timing point carries a sample bank and a volume, inherited ones
         // included -- greenlines are how a mapper rides hitsound dynamics
         // through a map, so these are not optional detail.
@@ -309,7 +319,7 @@ export const parseMapPreviewData = (content, options = {}) => {
     }
   }
 
-  timingPoints.sort((a, b) => a.time - b.time);
+  timingPoints.sort((a, b) => (a.time - b.time) || (Number(b.uninherited) - Number(a.uninherited)));
   // Built before the hit objects so slider durations are timed by the same
   // lookup the converters and the renderer use afterwards.
   const timingControlPoints = timingPoints.map(toTimingControlPoint);
@@ -330,12 +340,9 @@ export const parseMapPreviewData = (content, options = {}) => {
     };
   };
 
-  for (const hitObjectLine of hitObjectLines) {
-    if (objects.length >= maxObjects) {
-      break;
-    }
-
-    const parts = hitObjectLine.split(',');
+  let truncatedAtIndex = -1;
+  for (let lineIndex = 0; lineIndex < hitObjectLines.length; lineIndex += 1) {
+    const parts = hitObjectLines[lineIndex].split(',');
     if (parts.length < 5) {
       continue;
     }
@@ -352,6 +359,12 @@ export const parseMapPreviewData = (content, options = {}) => {
     ) {
       continue;
     }
+
+    if (objects.length >= maxObjects) {
+      truncatedAtIndex = lineIndex;
+      break;
+    }
+
     const x = clampCoordinate(rawX);
     const y = clampCoordinate(rawY);
 
@@ -376,14 +389,22 @@ export const parseMapPreviewData = (content, options = {}) => {
         sliderCurveType = firstToken.trim().charAt(0).toUpperCase() || 'B';
         slides = Math.min(MAX_SLIDER_SLIDES, Math.max(1, parseInt(parts[6], 10) || 1));
         length = clamp(parseFloat(parts[7]) || 0, 0, MAX_COORDINATE);
-        sliderEdgeSounds = (parts[8] || '')
-          .split('|')
-          .map((value) => Number.parseInt(value, 10))
-          .filter((value) => Number.isFinite(value));
-        sliderEdgeSets = (parts[9] || '')
-          .split('|')
-          .map((value) => value.split(':').map((component) => Number.parseInt(component, 10)))
-          .filter((set) => set.length >= 2 && set.every((component) => Number.isFinite(component)));
+        const rawEdgeSounds = (parts[8] || '').trim();
+        sliderEdgeSounds = rawEdgeSounds
+          ? rawEdgeSounds.split('|').map((value) => {
+            const parsed = Number.parseInt(value, 10);
+            return Number.isFinite(parsed) ? parsed : undefined;
+          })
+          : [];
+        const rawEdgeSets = (parts[9] || '').trim();
+        sliderEdgeSets = rawEdgeSets
+          ? rawEdgeSets.split('|').map((value) => {
+            const components = value.split(':').map((component) => Number.parseInt(component, 10));
+            return components.length >= 2 && Number.isFinite(components[0]) && Number.isFinite(components[1])
+              ? [components[0], components[1]]
+              : null;
+          })
+          : [];
         sampleData = parseSampleData(parts[10]);
 
         const timing = getTimingStateAt(timingControlPoints, time);
@@ -395,12 +416,15 @@ export const parseMapPreviewData = (content, options = {}) => {
           .map((point) => ({ x: clampCoordinate(point.x), y: clampCoordinate(point.y) }));
       }
     } else if (isSpinner) {
-      endTime = parseInt(parts[5], 10) || time;
+      const parsedEndTime = parseInt(parts[5], 10);
+      endTime = Number.isFinite(parsedEndTime) ? parsedEndTime : time;
       sampleData = parseSampleData(parts[6]);
     } else if (isHold) {
       const holdData = parts[5] || '';
-      endTime = parseInt(holdData.split(':')[0], 10) || time;
-      sampleData = parseSampleData(holdData);
+      const firstColon = holdData.indexOf(':');
+      const parsedEndTime = parseInt(firstColon >= 0 ? holdData.slice(0, firstColon) : holdData, 10);
+      endTime = Number.isFinite(parsedEndTime) ? parsedEndTime : time;
+      sampleData = parseSampleData(firstColon >= 0 ? holdData.slice(firstColon + 1) : '');
     } else {
       sampleData = parseSampleData(parts[5]);
     }
@@ -442,6 +466,8 @@ export const parseMapPreviewData = (content, options = {}) => {
     });
   }
 
+  objects.sort((a, b) => a.time - b.time);
+
   let maxObjectTime = 0;
   for (const object of objects) {
     if (object.endTime > maxObjectTime) {
@@ -453,11 +479,25 @@ export const parseMapPreviewData = (content, options = {}) => {
   // beatmap: deriving the duration from the last *kept* object left the second
   // half of a marathon unreachable by the scrubber. Reading just the timestamp
   // of the dropped lines is cheap and keeps the duration honest.
-  const isTruncated = objects.length < hitObjectLines.length;
+  const isTruncated = truncatedAtIndex !== -1;
   if (isTruncated) {
-    for (let index = objects.length; index < hitObjectLines.length; index += 1) {
-      const time = Number.parseInt(hitObjectLines[index].split(',')[2], 10);
-      if (Number.isFinite(time) && time > maxObjectTime && time <= MAX_OBJECT_TIME_MS) {
+    for (let index = truncatedAtIndex; index < hitObjectLines.length; index += 1) {
+      const parts = hitObjectLines[index].split(',');
+      if (parts.length < 5) {
+        continue;
+      }
+      const rawX = parseFloat(parts[0]);
+      const rawY = parseFloat(parts[1]);
+      const time = Number.parseInt(parts[2], 10);
+      const type = Number.parseInt(parts[3], 10);
+      if (
+        !Number.isFinite(rawX) || !Number.isFinite(rawY)
+        || !Number.isFinite(time) || !Number.isFinite(type)
+        || Math.abs(time) > MAX_OBJECT_TIME_MS
+      ) {
+        continue;
+      }
+      if (time > maxObjectTime) {
         maxObjectTime = time;
       }
     }
@@ -475,9 +515,13 @@ export const parseMapPreviewData = (content, options = {}) => {
     .filter((tp) => Number.isFinite(tp.bpm) && tp.bpm > 0);
 
   if (uninheritedTimingPoints.length > 0) {
-    const uninheritedBpms = uninheritedTimingPoints.map((tp) => tp.bpm);
-    bpmMin = Math.min(...uninheritedBpms);
-    bpmMax = Math.max(...uninheritedBpms);
+    bpmMin = uninheritedTimingPoints[0].bpm;
+    bpmMax = uninheritedTimingPoints[0].bpm;
+    for (let i = 1; i < uninheritedTimingPoints.length; i += 1) {
+      const { bpm } = uninheritedTimingPoints[i];
+      if (bpm < bpmMin) bpmMin = bpm;
+      if (bpm > bpmMax) bpmMax = bpm;
+    }
 
     let longestSectionDuration = -1;
     for (let i = 0; i < uninheritedTimingPoints.length; i += 1) {
@@ -497,14 +541,29 @@ export const parseMapPreviewData = (content, options = {}) => {
     }
   }
 
+  const normalizedMode = Number.isFinite(mode) ? clamp(mode, 0, 3) : 0;
+  const normalizedOverallDifficulty = clamp(Number.isFinite(overallDifficulty) ? overallDifficulty : 5, 0, 10);
+  const normalizedApproachRate = clamp(
+    Number.isFinite(approachRate) ? approachRate : normalizedOverallDifficulty,
+    0,
+    10,
+  );
+  const normalizedHpDrainRate = clamp(Number.isFinite(hpDrainRate) ? hpDrainRate : 5, 0, 10);
+  const normalizedStackLeniency = clamp(Number.isFinite(stackLeniency) ? stackLeniency : 0.7, 0, 1);
+  const normalizedCircleSize = clamp(
+    Number.isFinite(circleSize) ? circleSize : 5,
+    normalizedMode === 3 ? 1 : 0,
+    normalizedMode === 3 ? 20 : 10,
+  );
+
   return {
     objects,
-    circleSize: Number.isFinite(circleSize) ? circleSize : 5,
-    approachRate: Number.isFinite(approachRate) ? approachRate : (Number.isFinite(overallDifficulty) ? overallDifficulty : 5),
-    overallDifficulty: Number.isFinite(overallDifficulty) ? overallDifficulty : 5,
-    hpDrainRate: Number.isFinite(hpDrainRate) ? hpDrainRate : 5,
-    stackLeniency: Number.isFinite(stackLeniency) ? stackLeniency : 0.7,
-    mode: Number.isFinite(mode) ? Math.min(Math.max(mode, 0), 3) : 0,
+    circleSize: normalizedCircleSize,
+    approachRate: normalizedApproachRate,
+    overallDifficulty: normalizedOverallDifficulty,
+    hpDrainRate: normalizedHpDrainRate,
+    stackLeniency: normalizedStackLeniency,
+    mode: normalizedMode,
     beatmapVersion: Number.isFinite(beatmapVersion) ? beatmapVersion : 14,
     sliderMultiplier: Number.isFinite(sliderMultiplier) ? sliderMultiplier : 1.0,
     sliderTickRate: Number.isFinite(sliderTickRate) ? sliderTickRate : 1.0,
@@ -525,8 +584,8 @@ export const parseMapPreviewData = (content, options = {}) => {
 
 export const parseBreakPeriods = (content) => {
   let inEvents = false;
-  const breaks = [];
-  const lines = content.split(/\r?\n/);
+  const rawBreaks = [];
+  const lines = content.split(/\r\n|\r|\n/);
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -553,21 +612,41 @@ export const parseBreakPeriods = (content) => {
       continue;
     }
 
-    const startTime = Number.parseInt(parts[1], 10);
-    const endTime = Number.parseInt(parts[2], 10);
-    if (Number.isFinite(startTime) && Number.isFinite(endTime) && endTime > startTime) {
-      breaks.push({ start: startTime, end: endTime });
+    const rawStart = Number.parseInt(parts[1], 10);
+    const rawEnd = Number.parseInt(parts[2], 10);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+      continue;
+    }
+
+    const startTime = clamp(rawStart, 0, MAX_OBJECT_TIME_MS);
+    const endTime = clamp(rawEnd, 0, MAX_OBJECT_TIME_MS);
+    if (endTime > startTime) {
+      rawBreaks.push({ start: startTime, end: endTime });
+      if (rawBreaks.length >= MAX_BREAK_PERIODS) {
+        break;
+      }
     }
   }
 
-  return breaks;
+  rawBreaks.sort((a, b) => (a.start - b.start) || (a.end - b.end));
+  const merged = [];
+  for (const period of rawBreaks) {
+    const last = merged[merged.length - 1];
+    if (last && period.start <= last.end) {
+      last.end = Math.max(last.end, period.end);
+    } else {
+      merged.push(period);
+    }
+  }
+
+  return merged;
 };
 
 export const parseSliderPath = (pathString) => {
   if (!pathString) return [];
 
   const points = [];
-  const parts = pathString.split('|');
+  const parts = pathString.split('|', MAX_SLIDER_CONTROL_POINTS + 1);
 
   for (let i = 1; i < parts.length; i += 1) {
     const coords = parts[i].split(':');
@@ -585,7 +664,7 @@ export const parseSliderPath = (pathString) => {
 export const parseColours = (content) => {
   const colours = [];
   let inColours = false;
-  const lines = content.split(/\r?\n/);
+  const lines = content.split(/\r\n|\r|\n/);
 
   for (const line of lines) {
     const commentIndex = line.indexOf('//');

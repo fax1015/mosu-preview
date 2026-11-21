@@ -8,12 +8,16 @@
 // (takeInitialMapRequest), and asks for another for each map after it.
 import { hasStorageArea, queryTabs, storageGet, storageSet } from './webextension.js';
 import { registry } from './core/cleanup.js';
-import { extractBeatmapInfoFromUrl } from './core/beatmapUrl.js';
+import { extractBeatmapInfoFromUrl, normalizeNumericId } from './core/beatmapUrl.js';
 import { buildBeatmapSourceUrl, readDetachedParams } from './core/detachedWindow.js';
 
 const CACHE_KEY = 'mosuPreviewCacheV1';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
+const CACHE_FUTURE_SKEW_MS = 60 * 1000;
 const BEATMAP_FETCH_TIMEOUT_MS = 15000;
+const MAX_OSU_FILE_BYTES = 16 * 1024 * 1024;
+const HIT_OBJECTS_SECTION_RE = /\[hitobjects\]/i;
+const UTF8_DECODER = new TextDecoder('utf-8');
 
 // Whether this page is the toolbar popup or a detached window, and for a
 // window, the map it was opened on.
@@ -24,13 +28,65 @@ const queryActiveTab = async () => {
   return Array.isArray(tabs) ? tabs[0] : null;
 };
 
+const readTextWithLimit = async (response, maxBytes) => {
+  const contentLength = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    void response.body?.cancel?.().catch(() => {});
+    throw new Error('Beatmap file exceeds maximum supported size.');
+  }
+
+  if (response.body && typeof response.body.getReader === 'function') {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (!value || value.byteLength === 0) {
+          continue;
+        }
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new Error('Beatmap file exceeds maximum supported size.');
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+
+    const combined = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return UTF8_DECODER.decode(combined);
+  }
+
+  const text = await response.text();
+  if (text.length > maxBytes) {
+    throw new Error('Beatmap file exceeds maximum supported size.');
+  }
+  return text;
+};
+
 const fetchBeatmapFile = async (beatmapId) => {
+  const normalizedId = normalizeNumericId(beatmapId);
+  if (!normalizedId) {
+    throw new Error('Invalid beatmap ID.');
+  }
+
   const controller = registry.createAbortController();
   // A .osu file is a few hundred KB at most. Without a deadline a stalled
   // request left "Fetching beatmap" on screen until the popup was closed.
   const timeout = registry.addTimeout(setTimeout(() => controller.abort(), BEATMAP_FETCH_TIMEOUT_MS));
   try {
-    const response = await fetch(`https://osu.ppy.sh/osu/${beatmapId}`, {
+    const response = await fetch(`https://osu.ppy.sh/osu/${normalizedId}`, {
       method: 'GET',
       credentials: 'omit',
       cache: 'no-store',
@@ -43,8 +99,8 @@ const fetchBeatmapFile = async (beatmapId) => {
 
     // Reading the body has to stay inside the controller's lifetime, otherwise
     // closing the popup mid-download leaves the read running unaborted.
-    const text = await response.text();
-    if (!text.includes('[HitObjects]')) {
+    const text = await readTextWithLimit(response, MAX_OSU_FILE_BYTES);
+    if (!HIT_OBJECTS_SECTION_RE.test(text)) {
       throw new Error('Fetched data is not a valid .osu beatmap file.');
     }
 
@@ -73,28 +129,55 @@ const readCachedPreview = async () => {
   }
 };
 
-const writeCachedPreview = async (value) => {
-  if (!hasStorageArea('session', 'local')) {
-    return false;
-  }
+let cacheWriteInFlight = null;
+let queuedCacheWrite = null;
 
+const drainCacheWrite = async (value) => {
   try {
     await storageSet('session', { [CACHE_KEY]: value }, { fallbackAreaName: 'local' });
     return true;
   } catch {
     return false;
+  } finally {
+    const next = queuedCacheWrite;
+    queuedCacheWrite = null;
+    if (next !== null) {
+      cacheWriteInFlight = drainCacheWrite(next);
+    } else {
+      cacheWriteInFlight = null;
+    }
   }
 };
 
-const isCachedPreviewUsable = (cached, beatmapId) => Boolean(
-  cached
-  && cached.version === 1
-  && cached.beatmapId === beatmapId
-  && Number.isFinite(cached.savedAt)
-  && (Date.now() - cached.savedAt) <= CACHE_MAX_AGE_MS
-  && typeof cached.osuContent === 'string'
-  && cached.osuContent.includes('[HitObjects]'),
-);
+const writeCachedPreview = (value) => {
+  if (!hasStorageArea('session', 'local')) {
+    return Promise.resolve(false);
+  }
+  if (cacheWriteInFlight) {
+    queuedCacheWrite = value;
+    return cacheWriteInFlight;
+  }
+  cacheWriteInFlight = drainCacheWrite(value);
+  return cacheWriteInFlight;
+};
+
+const isCachedPreviewUsable = (cached, beatmapId) => {
+  if (
+    !cached
+    || cached.version !== 1
+    || cached.beatmapId !== beatmapId
+    || !Number.isFinite(cached.savedAt)
+    || typeof cached.osuContent !== 'string'
+  ) {
+    return false;
+  }
+  const ageMs = Date.now() - cached.savedAt;
+  return (
+    ageMs >= -CACHE_FUTURE_SKEW_MS
+    && ageMs <= CACHE_MAX_AGE_MS
+    && HIT_OBJECTS_SECTION_RE.test(cached.osuContent)
+  );
+};
 
 // The .osu file for a beatmap page, from the session cache when it holds this
 // map and from osu.ppy.sh otherwise.

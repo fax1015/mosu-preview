@@ -3,6 +3,17 @@ import {
   normalizePreviewSettings,
 } from '../settings.js';
 
+// Per-session monotonic seed with a random sub-millisecond offset so two
+// windows opened in the same millisecond do not collide, and resetState() never
+// rolls the counter back to an earlier job id.
+let nextFullAudioJobId = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+const allocateFullAudioJobId = () => {
+  nextFullAudioJobId = Math.max(nextFullAudioJobId + 1, Date.now() * 1000);
+  return nextFullAudioJobId;
+};
+
+const createAudioElement = () => (typeof Audio === 'function' ? new Audio() : null);
+
 // `audio` is injectable so resetState() can carry the live media element across
 // a reset instead of constructing (and immediately discarding) a new one.
 const createInitialState = ({ audio = null } = {}) => {
@@ -31,7 +42,7 @@ const createInitialState = ({ audio = null } = {}) => {
     rafId: null,
     timelineAnimationRafId: null,
     indicatorTimer: null,
-    audio: audio ?? new Audio(),
+    audio: audio ?? createAudioElement(),
     audioSyncEnabled: false,
     audioAnchorMapMs: 0,
     // The source `audioAnchorMapMs` describes. An element keeps reporting the
@@ -43,10 +54,10 @@ const createInitialState = ({ audio = null } = {}) => {
     fullAudioStatus: 'idle',
     fullAudioCacheKey: '',
     // The service worker addresses extraction progress by this id and the popup
-    // filters on it. A per-page-load base keeps a reply meant for an earlier
-    // popup instance (closed mid-download) from matching this one's first job
-    // and painting its "fetching from ..." badge over a cache hit.
-    fullAudioJobId: Date.now(),
+    // filters on it. A monotonic per-page-load base keeps a reply meant for an
+    // earlier popup instance (closed mid-download) from matching this one's
+    // first job and painting its "fetching from ..." badge over a cache hit.
+    fullAudioJobId: allocateFullAudioJobId(),
     fullAudioObjectUrl: null,
     // An MP3 or Ogg Vorbis track plays from a slice of itself after each seek
     // (see audio/frameSeeker.js); this is the slice playing now, and the
@@ -107,10 +118,12 @@ const createInitialState = ({ audio = null } = {}) => {
 };
 
 const state = createInitialState();
-state.audio.preload = 'auto';
-// Before any source is assigned, so every load runs in CORS mode: WebAudio hears
-// only silence from a cross-origin source that was not fetched that way.
-state.audio.crossOrigin = 'anonymous';
+if (state.audio) {
+  state.audio.preload = 'auto';
+  // Before any source is assigned, so every load runs in CORS mode: WebAudio hears
+  // only silence from a cross-origin source that was not fetched that way.
+  state.audio.crossOrigin = 'anonymous';
+}
 
 const setPlaybackState = (patch = {}) => {
   if (Object.hasOwn(patch, 'isPlaying')) state.isPlaying = Boolean(patch.isPlaying);
@@ -144,13 +157,13 @@ const setFullAudioState = (patch = {}) => {
   if (Object.hasOwn(patch, 'fullAudioCacheKey')) state.fullAudioCacheKey = String(patch.fullAudioCacheKey || '');
   if (Object.hasOwn(patch, 'fullAudioError')) state.fullAudioError = String(patch.fullAudioError || '');
   if (Object.hasOwn(patch, 'fullAudioSetId')) {
-    state.fullAudioSetId = patch.fullAudioSetId === null ? null : String(patch.fullAudioSetId);
+    state.fullAudioSetId = patch.fullAudioSetId == null ? null : String(patch.fullAudioSetId);
   }
   if (Object.hasOwn(patch, 'previewSetId')) {
-    state.previewSetId = patch.previewSetId === null ? null : String(patch.previewSetId);
+    state.previewSetId = patch.previewSetId == null ? null : String(patch.previewSetId);
   }
   if (Object.hasOwn(patch, 'activeSetId')) {
-    state.activeSetId = patch.activeSetId === null ? null : String(patch.activeSetId);
+    state.activeSetId = patch.activeSetId == null ? null : String(patch.activeSetId);
   }
 };
 
@@ -158,7 +171,9 @@ const resetState = () => {
   // Callers are responsible for cancelling in-flight work first: this only
   // clears the handles, so cancel rAF/timers before calling it.
   Object.assign(state, createInitialState({ audio: state.audio }));
-  state.audio.preload = 'auto';
+  if (state.audio) {
+    state.audio.preload = 'auto';
+  }
 };
 
 export {

@@ -36,13 +36,16 @@ const getCanvasContext = (canvas, { transparent = false, lowLatency = true } = {
     canvasContextCache.set(canvas, cached);
   }
 
-  const dpr = Math.min(window.devicePixelRatio || 1, MAX_CANVAS_DPR);
-  const width = Math.max(1, canvas.clientWidth);
-  const height = Math.max(1, canvas.clientHeight);
+  const rawDpr = Number(window.devicePixelRatio);
+  const dpr = Number.isFinite(rawDpr) && rawDpr > 0 ? Math.min(rawDpr, MAX_CANVAS_DPR) : 1;
+  const width = Math.max(1, Number(canvas.clientWidth) || 0);
+  const height = Math.max(1, Number(canvas.clientHeight) || 0);
+  const backingWidth = Math.max(1, Math.floor(width * dpr));
+  const backingHeight = Math.max(1, Math.floor(height * dpr));
 
-  if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
+  if (canvas.width !== backingWidth || canvas.height !== backingHeight) {
+    canvas.width = backingWidth;
+    canvas.height = backingHeight;
   }
 
   const { ctx } = cached;

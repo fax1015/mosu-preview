@@ -207,7 +207,7 @@ const bezierSubdivide = (span, left, right, midpoints, count) => {
 // A span flat enough to stop subdividing contributes one point per control
 // point, each the weighted mean of its neighbours across both halves. `left`
 // holds 2 * count - 1 points, the two halves laid end to end.
-const bezierApproximate = (span, output, left, right, midpoints, count) => {
+const bezierApproximate = (span, output, left, right, midpoints, count, pointLimit) => {
   bezierSubdivide(span, left, right, midpoints, count);
 
   for (let i = 0; i < count - 1; i += 1) {
@@ -215,8 +215,11 @@ const bezierApproximate = (span, output, left, right, midpoints, count) => {
     left[((count + i) * 2) + 1] = right[((i + 1) * 2) + 1];
   }
 
+  if (output.length >= pointLimit) {
+    return;
+  }
   output.push({ x: span[0], y: span[1] });
-  for (let i = 1; i < count - 1; i += 1) {
+  for (let i = 1; i < count - 1 && output.length < pointLimit; i += 1) {
     const index = 2 * i;
     output.push({
       x: 0.25 * (left[(index - 1) * 2] + (2 * left[index * 2]) + left[(index + 1) * 2]),
@@ -225,14 +228,18 @@ const bezierApproximate = (span, output, left, right, midpoints, count) => {
   }
 };
 
-const sampleBezierSegment = (controlPoints, budget = { work: 0 }) => {
+const sampleBezierSegment = (controlPoints, budget = { work: 0, points: 0 }) => {
   if (!Array.isArray(controlPoints) || controlPoints.length < 2) {
+    return [];
+  }
+  const pointLimit = Math.max(0, MAX_BEZIER_POINTS - (budget.points || 0));
+  if (pointLimit === 0) {
     return [];
   }
   // A two-point Bezier is exactly a line, and subdividing one only ever hands
   // back its own endpoints.
   if (controlPoints.length === 2) {
-    return [controlPoints[0], controlPoints[1]];
+    return pointLimit === 1 ? [controlPoints[0]] : [controlPoints[0], controlPoints[1]];
   }
 
   const count = controlPoints.length;
@@ -250,19 +257,24 @@ const sampleBezierSegment = (controlPoints, budget = { work: 0 }) => {
   const freeSpans = [];
   const workPerHalving = count * count;
 
-  while (toFlatten.length > 0 && output.length < MAX_BEZIER_POINTS) {
+  while (toFlatten.length > 0 && output.length < pointLimit) {
     const span = toFlatten.pop();
     budget.work += workPerHalving;
     if (budget.work > MAX_BEZIER_WORK) {
       // Out of budget: what is left is drawn as its control polygon, which is
       // where the curve was heading anyway, rather than not at all.
-      for (let i = 0; i < count - 1; i += 1) {
+      const remaining = pointLimit - output.length;
+      if (remaining <= 0) {
+        break;
+      }
+      const stride = Math.max(1, Math.ceil((count - 1) / remaining));
+      for (let i = 0; i < count - 1 && output.length < pointLimit; i += stride) {
         output.push({ x: span[i * 2], y: span[(i * 2) + 1] });
       }
       continue;
     }
     if (bezierIsFlatEnough(span, count)) {
-      bezierApproximate(span, output, left, right, midpoints, count);
+      bezierApproximate(span, output, left, right, midpoints, count, pointLimit);
       freeSpans.push(span);
       continue;
     }
@@ -277,7 +289,9 @@ const sampleBezierSegment = (controlPoints, budget = { work: 0 }) => {
     toFlatten.push(rightSpan, span);
   }
 
-  output.push(controlPoints[count - 1]);
+  if (output.length < pointLimit) {
+    output.push(controlPoints[count - 1]);
+  }
   return output;
 };
 
@@ -300,6 +314,11 @@ const distanceToSegmentSquared = (point, start, end, scaleX, scaleY) => {
   const deltaY = pointY - (projection * segmentY);
   return (deltaX * deltaX) + (deltaY * deltaY);
 };
+
+// Worst-case RDP on an adversarial monotonic polyline degrades to O(M^2).
+// Once this inner-loop budget is spent, remaining unsimplified ranges keep
+// their vertices rather than stalling the frame.
+const MAX_RDP_WORK = 2_000_000;
 
 // Ramer–Douglas–Peucker in rendered-pixel space. The canonical slider path is
 // kept intact for timing, ticks, and the slider ball; this smaller polyline is
@@ -329,9 +348,28 @@ const simplifyPathForRendering = (
   const pending = [[0, points.length - 1]];
   kept[0] = 1;
   kept[points.length - 1] = 1;
+  let work = 0;
 
   while (pending.length) {
     const [startIndex, endIndex] = pending.pop();
+    const spanSize = endIndex - startIndex - 1;
+    if (spanSize <= 0) {
+      continue;
+    }
+    work += spanSize;
+    if (work > MAX_RDP_WORK) {
+      for (let i = startIndex + 1; i < endIndex; i += 1) {
+        kept[i] = 1;
+      }
+      while (pending.length) {
+        const [remStart, remEnd] = pending.pop();
+        for (let i = remStart + 1; i < remEnd; i += 1) {
+          kept[i] = 1;
+        }
+      }
+      break;
+    }
+
     const start = points[startIndex];
     const end = points[endIndex];
     let furthestIndex = -1;
@@ -368,9 +406,9 @@ const sampleBezierPath = (pathPoints) => {
   }
 
   const segments = [];
-  let current = [pathPoints[0]];
+  let current = [];
 
-  for (let i = 1; i < pathPoints.length; i += 1) {
+  for (let i = 0; i < pathPoints.length; i += 1) {
     const point = pathPoints[i];
     current.push(point);
 
@@ -378,8 +416,7 @@ const sampleBezierPath = (pathPoints) => {
       if (current.length >= 2) {
         segments.push(current);
       }
-      current = [point];
-      i += 1;
+      current = [];
     }
   }
 
@@ -393,8 +430,12 @@ const sampleBezierPath = (pathPoints) => {
 
   const sampled = [];
   // One budget for the whole slider, however many spans it is cut into.
-  const budget = { work: 0 };
+  const budget = { work: 0, points: 0 };
   for (const segment of segments) {
+    if (sampled.length >= MAX_BEZIER_POINTS) {
+      break;
+    }
+    budget.points = sampled.length;
     const partial = sampleBezierSegment(segment, budget);
     if (!partial.length) {
       continue;
@@ -402,7 +443,7 @@ const sampleBezierPath = (pathPoints) => {
     // Appended one at a time: spreading a span of a hundred thousand points
     // into push() overflows the call stack.
     const skipFirst = sampled.length && pointsEqual(sampled[sampled.length - 1], partial[0]);
-    for (let i = skipFirst ? 1 : 0; i < partial.length; i += 1) {
+    for (let i = skipFirst ? 1 : 0; i < partial.length && sampled.length < MAX_BEZIER_POINTS; i += 1) {
       sampled.push(partial[i]);
     }
   }
@@ -411,14 +452,28 @@ const sampleBezierPath = (pathPoints) => {
 };
 
 // osu!lazer's PathApproximator.catmull_detail: a fixed subdivision count per
-// span, not one scaled to the span's length.
+// span, scaled down only when an anchor-dense Catmull slider would otherwise
+// exceed the slider-wide point ceiling.
 const CATMULL_DETAIL = 50;
+const MAX_CATMULL_POINTS = 65536;
 
 const sampleCatmullPath = (pathPoints) => {
   if (!Array.isArray(pathPoints) || pathPoints.length < 2) {
     return pathPoints || [];
   }
 
+  let workingPoints = pathPoints;
+  if (workingPoints.length > MAX_CATMULL_POINTS) {
+    const stride = (workingPoints.length - 1) / (MAX_CATMULL_POINTS - 1);
+    workingPoints = Array.from({ length: MAX_CATMULL_POINTS }, (_, idx) => (
+      idx === MAX_CATMULL_POINTS - 1
+        ? pathPoints[pathPoints.length - 1]
+        : pathPoints[Math.floor(idx * stride)]
+    ));
+  }
+
+  const spanCount = workingPoints.length - 1;
+  const detail = Math.max(1, Math.min(CATMULL_DETAIL, Math.floor((MAX_CATMULL_POINTS - 1) / spanCount)));
   const sampled = [];
   const catmull = (p0, p1, p2, p3, t) => {
     const t2 = t * t;
@@ -429,19 +484,19 @@ const sampleCatmullPath = (pathPoints) => {
     };
   };
 
-  for (let i = 0; i < pathPoints.length - 1; i += 1) {
-    const p0 = i === 0 ? pathPoints[i] : pathPoints[i - 1];
-    const p1 = pathPoints[i];
-    const p2 = pathPoints[i + 1];
+  for (let i = 0; i < spanCount && sampled.length < MAX_CATMULL_POINTS; i += 1) {
+    const p0 = i === 0 ? workingPoints[i] : workingPoints[i - 1];
+    const p1 = workingPoints[i];
+    const p2 = workingPoints[i + 1];
     // Past the last control point lazer extrapolates the final tangent rather
     // than holding the endpoint still; clamping to p2 instead flattened the
     // tail of every Catmull slider.
-    const p3 = (i + 2 < pathPoints.length)
-      ? pathPoints[i + 2]
+    const p3 = (i + 2 < workingPoints.length)
+      ? workingPoints[i + 2]
       : { x: (2 * p2.x) - p1.x, y: (2 * p2.y) - p1.y };
 
-    for (let step = 0; step <= CATMULL_DETAIL; step += 1) {
-      const t = step / CATMULL_DETAIL;
+    for (let step = 0; step <= detail && sampled.length < MAX_CATMULL_POINTS; step += 1) {
+      const t = step / detail;
       const point = catmull(p0, p1, p2, p3, t);
       if (!sampled.length || !pointsEqual(sampled[sampled.length - 1], point)) {
         sampled.push(point);
@@ -456,6 +511,7 @@ const sampleCatmullPath = (pathPoints) => {
 // ceiling so a near-degenerate circumcircle cannot ask for an endless arc.
 const CIRCULAR_ARC_TOLERANCE = 0.1;
 const MAX_CIRCULAR_ARC_STEPS = 2048;
+const MAX_CIRCULAR_ARC_RADIUS = 1e7;
 
 const samplePerfectCirclePath = (pathPoints) => {
   if (!Array.isArray(pathPoints) || pathPoints.length < 3) {
@@ -484,12 +540,11 @@ const samplePerfectCirclePath = (pathPoints) => {
   ) / d;
 
   const radius = pointDistance({ x: ux, y: uy }, p0);
-  if (!Number.isFinite(radius) || radius <= 0) {
+  if (!Number.isFinite(radius) || radius <= 0 || radius > MAX_CIRCULAR_ARC_RADIUS) {
     return null;
   }
 
   const angle0 = Math.atan2(p0.y - uy, p0.x - ux);
-  const angle1 = Math.atan2(p1.y - uy, p1.x - ux);
   const angle2 = Math.atan2(p2.y - uy, p2.x - ux);
 
   const angleDistance = (start, end, direction) => {
@@ -503,24 +558,33 @@ const samplePerfectCirclePath = (pathPoints) => {
     return delta;
   };
 
-  let direction = 1;
-  const ccwStartMid = angleDistance(angle0, angle1, 1);
-  const ccwStartEnd = angleDistance(angle0, angle2, 1);
-  if (ccwStartMid > ccwStartEnd + 0.0001) {
-    direction = -1;
-  }
+  // `d` is twice the 2D cross product (p1 - p0) x (p2 - p0), so its sign gives
+  // the exact orientation of the arc p0 -> p1 -> p2 without floating-point
+  // angle-wraparound tolerance errors on flat arcs.
+  const direction = d > 0 ? 1 : -1;
 
   // osu!lazer's PathApproximator.CircularArcToPiecewiseLinear: exactly enough
   // chords that none strays further than the tolerance from the arc, which on a
   // wide arc is fewer points than a length-based guess and on a tight one more.
   const arcAngle = angleDistance(angle0, angle2, direction);
-  const steps = (2 * radius) <= CIRCULAR_ARC_TOLERANCE
-    ? 1
-    : clamp(
-      Math.ceil(arcAngle / (2 * Math.acos(1 - (CIRCULAR_ARC_TOLERANCE / radius)))) - 1,
-      1,
-      MAX_CIRCULAR_ARC_STEPS,
-    );
+  if (!Number.isFinite(arcAngle) || !(arcAngle > 0)) {
+    return null;
+  }
+
+  let steps;
+  if ((2 * radius) <= CIRCULAR_ARC_TOLERANCE) {
+    steps = 1;
+  } else {
+    const chordAngle = 2 * Math.acos(1 - (CIRCULAR_ARC_TOLERANCE / radius));
+    if (!Number.isFinite(chordAngle) || !(chordAngle > 0)) {
+      return null;
+    }
+    const rawSteps = Math.ceil(arcAngle / chordAngle) - 1;
+    if (!Number.isFinite(rawSteps)) {
+      return null;
+    }
+    steps = clamp(rawSteps, 1, MAX_CIRCULAR_ARC_STEPS);
+  }
 
   const sampled = [];
   for (let i = 0; i <= steps; i += 1) {
@@ -578,10 +642,14 @@ const buildSliderCurvePoints = (object, offset = { x: 0, y: 0 }) => {
 
   const lastTwoCoincide = rawPoints.length >= 2
     && pointsEqual(rawPoints[rawPoints.length - 1], rawPoints[rawPoints.length - 2]);
+  const hasExplicitZeroOrTinyLength = Number.isFinite(object.length) && object.length <= 0.001;
   const fitted = fitPathToExpectedDistance(sampled, object.length, {
     allowExtension: !lastTwoCoincide,
   });
-  return fitted.length >= 2 ? fitted : sampled;
+  if (fitted.length >= 2 || (hasExplicitZeroOrTinyLength && fitted.length > 0)) {
+    return fitted;
+  }
+  return sampled;
 };
 
 /**

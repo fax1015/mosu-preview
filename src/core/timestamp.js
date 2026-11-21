@@ -19,9 +19,14 @@ const MANIA_MODE = 3;
 
 const pad = (value, width) => String(value).padStart(width, '0');
 
+const toNonNegativeInt = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+};
+
 /** `mm:ss:mmm` -- the time half of an editor timestamp, and on its own a whole one. */
 const formatEditorTime = (timeMs) => {
-  const total = Math.max(0, Math.floor(Number(timeMs) || 0));
+  const total = toNonNegativeInt(timeMs);
   const minutes = Math.floor(total / 60000);
   const seconds = Math.floor((total % 60000) / 1000);
   return `${pad(minutes, 2)}:${pad(seconds, 2)}:${pad(total % 1000, 3)}`;
@@ -30,8 +35,8 @@ const formatEditorTime = (timeMs) => {
 const formatManiaReference = (objects) => {
   const notes = objects
     .map((object) => ({
-      time: Math.max(0, Math.floor(Number(object?.time) || 0)),
-      column: Math.max(0, Math.floor(Number(object?.column) || 0)),
+      time: toNonNegativeInt(object?.time),
+      column: toNonNegativeInt(object?.column),
     }))
     // Simultaneous notes reach here in whichever order the converter built
     // them; the editor lists a chord left to right.

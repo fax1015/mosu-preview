@@ -147,12 +147,16 @@ export const PROVIDER_SCORE_WEIGHTS = Object.freeze({
 });
 
 export const computeProviderScore = (provider, stats, userPriorityIndex = -1) => {
-  const totalAttempts = (stats?.successes ?? 0) + (stats?.failures ?? 0);
+  const successes = Number.isFinite(stats?.successes) ? stats.successes : 0;
+  const failures = Number.isFinite(stats?.failures) ? stats.failures : 0;
+  const timedSuccesses = Number.isFinite(stats?.timedSuccesses) ? stats.timedSuccesses : 0;
+  const totalSuccessMs = Number.isFinite(stats?.totalSuccessMs) ? stats.totalSuccessMs : 0;
+  const totalAttempts = successes + failures;
   const reliability = totalAttempts > 0
-    ? (stats.successes / totalAttempts)
+    ? (successes / totalAttempts)
     : (provider.expectedReliability ?? 0.5);
-  const avgSpeed = (stats?.timedSuccesses ?? 0) > 0
-    ? (stats.totalSuccessMs / stats.timedSuccesses)
+  const avgSpeed = timedSuccesses > 0
+    ? (totalSuccessMs / timedSuccesses)
     : (provider.averageStartupLatency ?? 3000);
   const speedScore = Math.max(0, 1 - (avgSpeed / 30000));
   const userPreferenceScore = userPriorityIndex >= 0
@@ -170,8 +174,10 @@ export const computeProviderScore = (provider, stats, userPriorityIndex = -1) =>
 };
 
 export const normalizeProviderOverride = (value) => {
-  const candidate = String(value || 'auto');
-  const normalizedCandidate = LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate] || candidate;
+  const candidate = String(value ?? 'auto').trim().toLowerCase() || 'auto';
+  const normalizedCandidate = Object.hasOwn(LEGACY_PROVIDER_OVERRIDE_ALIASES, candidate)
+    ? LEGACY_PROVIDER_OVERRIDE_ALIASES[candidate]
+    : candidate;
   return ALLOWED_PROVIDER_OVERRIDES.has(normalizedCandidate) ? normalizedCandidate : 'auto';
 };
 
@@ -196,8 +202,19 @@ export const POPUP_SIZE_PRESETS = Object.freeze({
   }),
 });
 
-export const normalizeManiaScrollSpeed = (value) => {
+const toFiniteSettingNumber = (value) => {
+  if (value === null || value === undefined || typeof value === 'boolean') {
+    return Number.NaN;
+  }
+  if (typeof value === 'string' && value.trim() === '') {
+    return Number.NaN;
+  }
   const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : Number.NaN;
+};
+
+export const normalizeManiaScrollSpeed = (value) => {
+  const numeric = toFiniteSettingNumber(value);
   if (!Number.isFinite(numeric)) {
     return DEFAULT_MANIA_SCROLL_SPEED;
   }
@@ -264,7 +281,7 @@ export const normalizeDisabledProviders = (value) => {
 export const normalizeAutoFallback = (value) => normalizeBooleanSetting(value, DEFAULT_AUTO_FALLBACK);
 
 const normalizeUnitRange = (value, fallback) => {
-  const numeric = Number(value);
+  const numeric = toFiniteSettingNumber(value);
   if (!Number.isFinite(numeric)) {
     return fallback;
   }
@@ -289,7 +306,7 @@ export const normalizeProviderPriority = (value) => {
     return ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id);
   }
   const validIds = new Set(ARCHIVE_DOWNLOAD_SOURCES.map((s) => s.id));
-  const prioritized = value.filter((id) => validIds.has(id));
+  const prioritized = [...new Set(value.filter((id) => validIds.has(id)))];
   const remaining = ARCHIVE_DOWNLOAD_SOURCES
     .map((s) => s.id)
     .filter((id) => !prioritized.includes(id));

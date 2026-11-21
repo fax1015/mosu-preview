@@ -23,17 +23,26 @@ const PANEL_ASPECT = 4 / 3;
  * which one won used to come down to rounding: side by side keeps the labels in
  * a row, as they always have been in the popup.
  */
+const MAX_GRID_PANELS = 64;
+
 const choosePanelGrid = (count, width, height, { gap = 0, aspect = PANEL_ASPECT } = {}) => {
-  const panels = Math.max(1, Math.floor(Number(count) || 1));
-  const areaWidth = Math.max(0, Number(width) || 0);
-  const areaHeight = Math.max(0, Number(height) || 0);
+  const rawCount = Number(count);
+  const panels = Number.isFinite(rawCount)
+    ? Math.min(MAX_GRID_PANELS, Math.max(1, Math.floor(rawCount)))
+    : 1;
+  const rawWidth = Number(width);
+  const rawHeight = Number(height);
+  const areaWidth = Number.isFinite(rawWidth) ? Math.max(0, rawWidth) : 0;
+  const areaHeight = Number.isFinite(rawHeight) ? Math.max(0, rawHeight) : 0;
+  const safeGap = Number.isFinite(gap) && gap >= 0 ? gap : 0;
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : PANEL_ASPECT;
 
   let best = null;
   for (let cols = 1; cols <= panels; cols += 1) {
     const rows = Math.ceil(panels / cols);
-    const cellWidth = Math.max(0, (areaWidth - (gap * (cols - 1))) / cols);
-    const cellHeight = Math.max(0, (areaHeight - (gap * (rows - 1))) / rows);
-    const fit = Math.min(cellWidth / aspect, cellHeight);
+    const cellWidth = Math.max(0, (areaWidth - (safeGap * (cols - 1))) / cols);
+    const cellHeight = Math.max(0, (areaHeight - (safeGap * (rows - 1))) / rows);
+    const fit = Math.min(cellWidth / safeAspect, cellHeight);
     const empty = (cols * rows) - panels;
     // Columns are tried in ascending order, so on a full tie the later one wins.
     if (!best || fit > best.fit + 0.5 || (Math.abs(fit - best.fit) <= 0.5 && empty <= best.empty)) {

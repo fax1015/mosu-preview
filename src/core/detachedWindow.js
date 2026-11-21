@@ -150,13 +150,21 @@ const buildDetachedPageUrl = ({ beatmapId, setId, mode, resumeTimeMs, resumePaus
   return `${DETACHED_PAGE}?${params.toString()}`;
 };
 
+const toFiniteNumber = (value) => {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
+    return Number.NaN;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : Number.NaN;
+};
+
 /**
  * Clamps stored window geometry back into a usable range. `left`/`top` are only
  * emitted when both are present, since the window APIs treat them as a pair.
  */
 const normalizeDetachedBounds = (bounds = {}) => {
-  const width = Number(bounds?.width);
-  const height = Number(bounds?.height);
+  const width = toFiniteNumber(bounds?.width);
+  const height = toFiniteNumber(bounds?.height);
   const normalized = {
     width: Number.isFinite(width)
       ? Math.round(clamp(width, MIN_DETACHED_WIDTH, MAX_DETACHED_DIMENSION))
@@ -166,8 +174,8 @@ const normalizeDetachedBounds = (bounds = {}) => {
       : DEFAULT_DETACHED_BOUNDS.height,
   };
 
-  const left = Number(bounds?.left);
-  const top = Number(bounds?.top);
+  const left = toFiniteNumber(bounds?.left);
+  const top = toFiniteNumber(bounds?.top);
   if (Number.isFinite(left) && Number.isFinite(top)) {
     normalized.left = Math.round(clamp(left, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
     normalized.top = Math.round(clamp(top, MIN_DETACHED_COORDINATE, MAX_DETACHED_DIMENSION));
@@ -185,16 +193,21 @@ const normalizeDetachedBounds = (bounds = {}) => {
  * that looks impossible may be perfectly valid on a second monitor. So the
  * browser is left to be the authority, and this recognises it saying no.
  */
-const isBoundsRejection = (error) => /bounds/i.test(String(error?.message || error || ''));
+const isBoundsRejection = (error) => /(?:bounds|off[- ]?screen|outside.*screen|invalid.*(?:left|top|position))/i.test(
+  String(error?.message || error || ''),
+);
 
 /** The same geometry with the position dropped, leaving the browser to place it. */
 const withoutDetachedPosition = (bounds = {}) => {
+  if (!bounds || typeof bounds !== 'object') {
+    return {};
+  }
   const { left, top, ...size } = bounds;
   return size;
 };
 
 const hasDetachedPosition = (bounds = {}) => (
-  Number.isFinite(Number(bounds?.left)) && Number.isFinite(Number(bounds?.top))
+  Number.isFinite(toFiniteNumber(bounds?.left)) && Number.isFinite(toFiniteNumber(bounds?.top))
 );
 
 export {

@@ -1,4 +1,4 @@
-import { MAX_SLIDER_SLIDES } from '../parser.js';
+import { MAX_OBJECT_TIME_MS, MAX_SLIDER_SLIDES } from '../parser.js';
 import { getTimingStateAt } from './controlPoints.js';
 import {
   buildSliderCurvePoints, getPathLength, measurePath, positionOnMeasuredPath,
@@ -11,10 +11,11 @@ const TAIKO_VELOCITY_MULTIPLIER = 1.4;
 const SWELL_HIT_MULTIPLIER = 1.65;
 // Below this a drumroll's tick spacing is a corrupt beat length, not a roll.
 const MIN_DRUMROLL_TICK_MS = 10;
-// A dense slider-heavy map can generate a droplet every ~45ms across every
-// slider span. Without a ceiling the converted object list (and the per-frame
-// render scan over it) grows without bound.
-const MAX_CATCH_OBJECTS = 60000;
+// A dense slider-heavy map can expand into tens of thousands of converted
+// objects across Taiko, Catch, and Mania. Without a shared ceiling, a crafted
+// beatmap can exhaust memory or stall every frame scan.
+const MAX_CONVERTED_OBJECTS = 60000;
+const MAX_CATCH_OBJECTS = MAX_CONVERTED_OBJECTS;
 
 const numberOr = (value, fallback) => {
   const numeric = Number(value);
@@ -64,10 +65,12 @@ const getSliderSpanTimes = (object) => {
   // Clamped defensively: this allocates an array of `slides + 1` entries, so an
   // unvalidated repeat count from a corrupt .osu file would exhaust the heap.
   const slides = clamp(Number.parseInt(object?.slides, 10) || 1, 1, MAX_SLIDER_SLIDES);
-  const duration = Math.max(0, (object?.endTime || object?.time || 0) - (object?.time || 0));
+  const startTime = Number.isFinite(object?.time) ? object.time : 0;
+  const endTime = Number.isFinite(object?.endTime) ? object.endTime : startTime;
+  const duration = Math.max(0, endTime - startTime);
   const spanDuration = duration / slides;
   return Array.from({ length: slides + 1 }, (_, index) => (
-    (object?.time || 0) + (spanDuration * index)
+    startTime + (spanDuration * index)
   ));
 };
 
@@ -164,7 +167,15 @@ const isManiaKeyMod = (keyCount) => (
   Number.isInteger(keyCount) && keyCount >= MIN_MANIA_KEY_MOD && keyCount <= MAX_MANIA_KEY_MOD
 );
 
-const getNativeManiaKeyCount = (mapData) => Math.max(1, roundToEven(Number(mapData?.circleSize) || 4));
+const MIN_NATIVE_MANIA_KEYS = 1;
+const MAX_NATIVE_MANIA_KEYS = 20;
+
+const getNativeManiaKeyCount = (mapData) => {
+  const raw = mapData?.circleSize;
+  const parsed = (raw === '' || raw == null || typeof raw === 'boolean') ? Number.NaN : Number(raw);
+  const circleSize = Number.isFinite(parsed) ? parsed : 4;
+  return clamp(roundToEven(circleSize), MIN_NATIVE_MANIA_KEYS, MAX_NATIVE_MANIA_KEYS);
+};
 
 /**
  * The column count osu!lazer's ManiaBeatmapConverter gives a convert with no key
@@ -280,12 +291,12 @@ const getConversionDifficulty = (mapData) => {
   const first = objects[0];
   const last = objects[objects.length - 1];
 
-  // Truncated to whole seconds, and treated as 10000 when it collapses to zero,
-  // both of which lazer relies on to keep the ratio below from blowing up.
+  // Truncated to whole seconds, and treated as 10000 when it collapses to zero
+  // or goes negative, both of which keep the density ratio from blowing up.
   let drainTime = Math.trunc(
     (numberOr(last?.time, 0) - numberOr(first?.time, 0) - getTotalBreakTime(mapData)) / 1000,
   );
-  if (drainTime === 0) {
+  if (!Number.isFinite(drainTime) || drainTime <= 0) {
     drainTime = 10000;
   }
 
@@ -293,7 +304,7 @@ const getConversionDifficulty = (mapData) => {
   const approachRate = clamp(numberOr(mapData?.approachRate, 5), 4, 7);
   const difficulty = ((((drainRate + approachRate) / 1.5) + ((objects.length / drainTime) * 9)) / 38) * 5 / 1.15;
 
-  return Math.min(Number.isFinite(difficulty) ? difficulty : 0, 12);
+  return Number.isFinite(difficulty) ? clamp(difficulty, 0, 12) : 0;
 };
 
 const getManiaNoteCount = (keys, difficulty, source, random, type) => {
@@ -424,9 +435,13 @@ const convertToTaiko = (mapData) => {
   const convertedObjects = [];
 
   for (const source of mapData.objects || []) {
+    if (convertedObjects.length >= MAX_CONVERTED_OBJECTS) {
+      break;
+    }
+
     if (source.kind === 'slider') {
       const spanTimes = getSliderSpanTimes(source);
-      const spans = Math.max(1, Number.parseInt(source.slides, 10) || 1);
+      const spans = clamp(Number.parseInt(source.slides, 10) || 1, 1, MAX_SLIDER_SLIDES);
       const timing = getTimingState(mapData, source.time);
       const sliderDistance = getSliderDistance(source);
       const sliderMultiplier = Math.max(0.1, Number(mapData.sliderMultiplier) || 1.4);
@@ -439,6 +454,7 @@ const convertToTaiko = (mapData) => {
       const adjustedBeatLength = timing.beatLength
         * (Math.min(10000, Math.max(10, 100 / svMultiplier)) / 100);
       const conversionDuration = Math.max(1, Math.floor((distance / taikoVelocity) * adjustedBeatLength));
+      const clampedEndTime = clamp(source.time + conversionDuration, source.time, MAX_OBJECT_TIME_MS);
       const beatmapVersion = Number(mapData.beatmapVersion) || 14;
       const tickBeatLength = beatmapVersion >= 8 ? timing.beatLength : adjustedBeatLength;
       const osuVelocity = taikoVelocity * (1000 / adjustedBeatLength);
@@ -451,29 +467,37 @@ const convertToTaiko = (mapData) => {
 
       if (shouldSplitIntoHits) {
         let edgeIndex = 0;
-        for (let time = source.time; time <= source.time + conversionDuration + (tickSpacing / 8); time += tickSpacing) {
-          const clampedTime = Math.min(time, source.time + conversionDuration);
+        const limitTime = clampedEndTime + (tickSpacing / 8);
+        for (let time = source.time; time <= limitTime;) {
+          if (convertedObjects.length >= MAX_CONVERTED_OBJECTS) {
+            break;
+          }
+          const clampedTime = Math.min(time, clampedEndTime);
+          const edgeHitSound = getSliderEdgeSound(source, edgeIndex);
           convertedObjects.push(createConvertedObject(source, {
             time: clampedTime,
             endTime: clampedTime,
             kind: 'circle',
             taikoType: 'hit',
-            taikoStrong: hasSample(source, 'finish'),
-            hitSound: getSliderEdgeSound(source, edgeIndex),
+            taikoStrong: (edgeHitSound & HIT_SOUND_FLAGS.finish) !== 0,
+            hitSound: edgeHitSound,
             ...getSliderEdgeSampleSets(source, edgeIndex),
             newCombo: edgeIndex === 0 && Boolean(source.newCombo),
             comboSkip: edgeIndex === 0 ? source.comboSkip : 0,
           }));
           edgeIndex = (edgeIndex + 1) % Math.max(1, spanTimes.length);
-          if (clampedTime >= source.time + conversionDuration) break;
+          if (clampedTime >= clampedEndTime) break;
+          const nextTime = time + tickSpacing;
+          if (!(nextTime > time)) break;
+          time = nextTime;
         }
       } else {
         convertedObjects.push(createConvertedObject(source, {
-          endTime: source.time + conversionDuration,
+          endTime: clampedEndTime,
           kind: 'hold',
           taikoType: 'drumroll',
           taikoTickSpacing: tickSpacing,
-          taikoRequiredHits: Math.max(1, Math.ceil(conversionDuration / Math.max(1, tickSpacing))),
+          taikoRequiredHits: Math.max(1, Math.ceil((clampedEndTime - source.time) / Math.max(1, tickSpacing))),
           taikoDrumrollTickMs: getDrumrollTickMs(mapData, source.time),
           hitSound: getSliderEdgeSound(source, 0),
           ...getSliderEdgeSampleSets(source, 0),
@@ -586,7 +610,8 @@ const applyCatchPositionOffsets = (objects) => {
  */
 const applyCatchHyperDash = (objects, circleSize) => {
   const palpable = objects.filter((object) => object.type === 'fruit' || object.type === 'droplet');
-  const catcherScale = 1 - ((0.7 * (numberOr(circleSize, 5) - 5)) / 5);
+  const clampedCircleSize = clamp(numberOr(circleSize, 5), 0, 10);
+  const catcherScale = 1 - ((0.7 * (clampedCircleSize - 5)) / 5);
   const halfCatcherWidth = (CATCHER_BASE_SIZE * Math.abs(catcherScale)) / 2;
 
   for (const object of objects) {
@@ -736,17 +761,22 @@ const buildCatchObjects = (mapData) => {
       for (const event of events) {
         if (lastEvent) {
           const sinceLastTick = Math.trunc(event.time) - Math.trunc(lastEvent.time);
-          if (sinceLastTick > 80) {
+          if (Number.isFinite(sinceLastTick) && sinceLastTick > 80) {
             let tinyInterval = sinceLastTick;
             while (tinyInterval > 100) tinyInterval /= 2;
-            for (let offset = tinyInterval; offset < sinceLastTick; offset += tinyInterval) {
-              if (result.length >= MAX_CATCH_OBJECTS) break;
-              const progress = lastEvent.pathProgress
-                + ((offset / sinceLastTick) * (event.pathProgress - lastEvent.pathProgress));
-              const position = getPathPosition(source, progress);
-              add(indexedSource, lastEvent.time + offset, position.x, 'tinyDroplet', {
-                sliderSpan: event.sliderSpan,
-              });
+            if (Number.isFinite(tinyInterval) && tinyInterval > 0) {
+              for (let offset = tinyInterval; offset < sinceLastTick;) {
+                if (result.length >= MAX_CATCH_OBJECTS) break;
+                const progress = lastEvent.pathProgress
+                  + ((offset / sinceLastTick) * (event.pathProgress - lastEvent.pathProgress));
+                const position = getPathPosition(source, progress);
+                add(indexedSource, lastEvent.time + offset, position.x, 'tinyDroplet', {
+                  sliderSpan: event.sliderSpan,
+                });
+                const nextOffset = offset + tinyInterval;
+                if (!(nextOffset > offset)) break;
+                offset = nextOffset;
+              }
             }
           }
         }
@@ -771,17 +801,28 @@ const buildCatchObjects = (mapData) => {
       // all sit at x = 0, as lazer's do.
       const startTime = Math.trunc(source.time);
       const endTime = Math.trunc(source.endTime);
+      if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime < startTime) {
+        continue;
+      }
       let spacing = Math.fround(source.endTime - source.time);
+      if (!Number.isFinite(spacing) || !(spacing > 0)) {
+        continue;
+      }
       while (spacing > 100) spacing = Math.fround(spacing / 2);
-      if (!(spacing > 0)) continue;
+      if (!Number.isFinite(spacing) || !(spacing > 0)) continue;
       let bananaIndex = 0;
-      for (let time = Math.fround(startTime); time <= endTime; time = Math.fround(time + spacing)) {
+      for (let time = Math.fround(startTime); time <= endTime;) {
         // The list is full: a spinner days long would otherwise go on making
         // a hundred million bananas nobody will see.
         if (!add(indexedSource, time, 0, 'banana', { bananaIndex })) {
           break;
         }
         bananaIndex += 1;
+        const nextTime = Math.fround(time + spacing);
+        if (!(nextTime > time)) {
+          break;
+        }
+        time = nextTime;
       }
       continue;
     }
@@ -825,11 +866,16 @@ const normalizeNativeMania = (mapData) => {
 const convertToMania = (mapData, { keyCount } = {}) => {
   const autoKeys = getAutoManiaKeyCount(mapData);
   const keys = isManiaKeyMod(keyCount) ? keyCount : autoKeys;
-  const random = createLegacyRandom(getManiaConversionSeed(mapData));
+  const randomSeed = getManiaConversionSeed(mapData);
+  const random = createLegacyRandom(randomSeed);
   const pattern = createManiaPatternGenerator(mapData, keys, random);
+  const conversionDifficulty = getConversionDifficulty(mapData);
   const convertedObjects = [];
 
   const pushNote = (source, time, endTime, kind, column, metadata = {}) => {
+    if (convertedObjects.length >= MAX_CONVERTED_OBJECTS) {
+      return false;
+    }
     convertedObjects.push(createConvertedObject(source, {
       x: getColumnX(column, keys),
       y: 192,
@@ -840,9 +886,13 @@ const convertToMania = (mapData, { keyCount } = {}) => {
       kind,
       ...metadata,
     }));
+    return true;
   };
 
   for (const source of mapData.objects || []) {
+    if (convertedObjects.length >= MAX_CONVERTED_OBJECTS) {
+      break;
+    }
     if (source.kind === 'spinner') {
       const duration = Math.max(0, source.endTime - source.time);
       const column = pattern.chooseColumns(source, source.time, 1)[0];
@@ -879,28 +929,34 @@ const convertToMania = (mapData, { keyCount } = {}) => {
         for (let span = 0; span <= spans; span += 1) {
           const time = spanTimes[span];
           const column = pattern.chooseColumns(sourcePosition, time, 1, true)[0];
-          pushNote(source, time, time, 'circle', column, {
+          if (!pushNote(source, time, time, 'circle', column, {
             maniaSourceType: 'slider',
             sliderSpanIndex: span,
             sliderSpanCount: spans,
-          });
+          })) {
+            break;
+          }
         }
       } else {
         const column = pattern.chooseColumns(sourcePosition, source.time, 1)[0];
-        pushNote(source, source.time, source.endTime, 'hold', column, {
+        if (!pushNote(source, source.time, source.endTime, 'hold', column, {
           maniaSourceType: 'slider',
           sliderSpanCount: spans,
           sliderSegmentDuration: segmentDuration,
-        });
+        })) {
+          break;
+        }
         if (spans > 1 && segmentDuration <= 200) {
           for (let span = 1; span < spans; span += 1) {
             const time = spanTimes[span];
             const extraColumn = pattern.chooseColumns(sourcePosition, time, 1, true)[0];
-            pushNote(source, time, time, 'circle', extraColumn, {
+            if (!pushNote(source, time, time, 'circle', extraColumn, {
               maniaSourceType: 'slider',
               sliderSpanIndex: span,
               sliderSpanCount: spans,
-            });
+            })) {
+              break;
+            }
           }
         }
       }
@@ -909,17 +965,19 @@ const convertToMania = (mapData, { keyCount } = {}) => {
 
     const noteCount = getManiaNoteCount(
       keys,
-      getConversionDifficulty(mapData),
+      conversionDifficulty,
       source,
       random,
       'circle',
     );
     const columns = pattern.chooseColumns(source, source.time, noteCount);
     for (const column of columns) {
-      pushNote(source, source.time, source.time, 'circle', column, {
+      if (!pushNote(source, source.time, source.time, 'circle', column, {
         maniaSourceType: 'circle',
         maniaStrong: columns.length > 1,
-      });
+      })) {
+        break;
+      }
     }
   }
 
@@ -939,7 +997,7 @@ const convertToMania = (mapData, { keyCount } = {}) => {
       keyMod: isManiaKeyMod(keyCount) ? keyCount : null,
       stageCount: 1,
       columnsPerStage: keys,
-      randomSeed: getManiaConversionSeed(mapData),
+      randomSeed,
     },
   };
 };

@@ -15,7 +15,9 @@ const DEFAULT_METER = 4;
 
 const timingIndexCache = new WeakMap();
 
-const isTimingPoint = (point) => Boolean(point?.uninherited) && point.beatLength > 0;
+const isTimingPoint = (point) => (
+  Boolean(point?.uninherited) && Number.isFinite(point.beatLength) && point.beatLength > 0
+);
 
 /**
  * The state in force from each control point onwards, plus how many beats have
@@ -31,13 +33,30 @@ const buildTimingIndex = (controlPoints) => {
   const points = Array.isArray(controlPoints)
     ? controlPoints.filter((point) => point && Number.isFinite(point.time))
     : [];
+  let needsSort = false;
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    if (
+      curr.time < prev.time
+      || (curr.time === prev.time && isTimingPoint(curr) && !isTimingPoint(prev))
+    ) {
+      needsSort = true;
+      break;
+    }
+  }
+  if (needsSort) {
+    points.sort((a, b) => (a.time - b.time) || (Number(isTimingPoint(b)) - Number(isTimingPoint(a))));
+  }
   const count = points.length;
   const firstTimingPoint = points.find(isTimingPoint) || null;
   const fallback = {
     beatLength: firstTimingPoint ? firstTimingPoint.beatLength : DEFAULT_BEAT_LENGTH,
     svMultiplier: 1,
     kiai: false,
-    meter: firstTimingPoint?.meter > 0 ? firstTimingPoint.meter : DEFAULT_METER,
+    meter: Number.isFinite(firstTimingPoint?.meter) && firstTimingPoint.meter > 0
+      ? firstTimingPoint.meter
+      : DEFAULT_METER,
     sectionStart: firstTimingPoint ? firstTimingPoint.time : 0,
     omitFirstBarLine: false,
   };
@@ -77,10 +96,10 @@ const buildTimingIndex = (controlPoints) => {
     if (isTimingPoint(point)) {
       beatLength = point.beatLength;
       svMultiplier = 1;
-      meter = point.meter > 0 ? point.meter : DEFAULT_METER;
+      meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : DEFAULT_METER;
       sectionStart = point.time;
       omitFirstBarLine = Boolean(point.omitFirstBarLine);
-    } else if (!point.uninherited && point.svMultiplier > 0) {
+    } else if (!point.uninherited && Number.isFinite(point.svMultiplier) && point.svMultiplier > 0) {
       svMultiplier = point.svMultiplier;
     }
 

@@ -56,9 +56,15 @@ class CleanupRegistry {
   }
 
   cleanup() {
-    this.timers.forEach(clearTimeout);
-    this.intervals.forEach(clearInterval);
-    this.controllers.forEach((c) => c.abort());
+    this.timers.forEach((id) => clearTimeout(id));
+    this.intervals.forEach((id) => clearInterval(id));
+    this.controllers.forEach((controller) => {
+      try {
+        controller.abort();
+      } catch {
+        // Continue aborting remaining controllers.
+      }
+    });
     this.timers.clear();
     this.intervals.clear();
     this.controllers.clear();

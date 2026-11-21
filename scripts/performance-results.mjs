@@ -1,12 +1,25 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
+const execFileAsync = promisify(execFile);
 const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const resultsPath = resolve(projectRoot, 'performance-results', 'results.jsonl');
+const GIT_MAX_BUFFER = 32 * 1024 * 1024;
+const MAX_UNTRACKED_FINGERPRINT_BYTES = 16 * 1024 * 1024;
+
+const runGit = async (args, { encoding = 'utf8' } = {}) => {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: projectRoot,
+    encoding,
+    maxBuffer: GIT_MAX_BUFFER,
+  });
+  return stdout;
+};
 
 const readBuildInfo = async () => {
   let version = 'unknown';
@@ -22,35 +35,33 @@ const readBuildInfo = async () => {
   let workingTreeClean = null;
   let workingTreeFingerprint = null;
   try {
-    gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    gitBranch = execFileSync('git', ['branch', '--show-current'], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || null;
-    const trackedChanges = execFileSync('git', [
-      'diff', 'HEAD', '--binary', '--', '.', ':(exclude)performance-results/results.jsonl',
-    ], {
-      cwd: projectRoot,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const untrackedPaths = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).split(/\r?\n/).filter((path) => (
-      path && path.replaceAll('\\', '/') !== 'performance-results/results.jsonl'
-    ));
+    gitCommit = (await runGit(['rev-parse', 'HEAD'])).trim();
+    gitBranch = (await runGit(['branch', '--show-current'])).trim() || null;
+    const trackedChanges = await runGit(
+      ['diff', 'HEAD', '--binary', '--', '.', ':(exclude)performance-results/results.jsonl'],
+      { encoding: 'buffer' },
+    );
+    const untrackedPaths = (await runGit(['ls-files', '--others', '--exclude-standard']))
+      .split(/\r?\n/)
+      .filter((filePath) => (
+        filePath && filePath.replaceAll('\\', '/') !== 'performance-results/results.jsonl'
+      ));
     workingTreeClean = trackedChanges.length === 0 && untrackedPaths.length === 0;
     if (!workingTreeClean) {
       const fingerprint = createHash('sha256').update(trackedChanges);
-      for (const path of untrackedPaths.sort()) {
-        fingerprint.update(path);
-        fingerprint.update(await readFile(resolve(projectRoot, path)));
+      for (const filePath of untrackedPaths.sort()) {
+        fingerprint.update(filePath);
+        try {
+          const fullPath = resolve(projectRoot, filePath);
+          const info = await lstat(fullPath);
+          if (info.isFile() && info.size <= MAX_UNTRACKED_FINGERPRINT_BYTES) {
+            fingerprint.update(await readFile(fullPath));
+          } else {
+            fingerprint.update(`meta:${info.size}:${info.mtimeMs}`);
+          }
+        } catch {
+          fingerprint.update('unreadable');
+        }
       }
       workingTreeFingerprint = fingerprint.digest('hex');
     }
@@ -78,6 +89,7 @@ export const appendPerformanceResult = async (kind, result) => {
   };
 
   await mkdir(dirname(resultsPath), { recursive: true });
-  await appendFile(resultsPath, `${JSON.stringify(record)}${os.EOL}`, 'utf8');
+  // Always LF so results.jsonl obeys .gitattributes across Windows and POSIX.
+  await appendFile(resultsPath, `${JSON.stringify(record)}\n`, 'utf8');
   return relative(projectRoot, resultsPath).split(sep).join('/');
 };

@@ -237,40 +237,63 @@ const formatDelta = (current, baseline) => {
   return `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
 };
 
+const makeTextEl = (tag, text, className = '') => {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  element.textContent = text;
+  return element;
+};
+
 const renderResults = (results, baseline) => {
   const passes = [
     ['Visual only', results.visual, baseline?.visual],
     ['Visual + audio', results.audio, baseline?.audio],
   ];
-  const rows = passes.map(([name, value, old]) => `
-    <tr>
-      <td>${name}</td>
-      <td>${value.fps.toFixed(1)}</td>
-      <td>${formatMs(value.intervalP50)}</td>
-      <td>${formatMs(value.intervalP95)}</td>
-      <td>${formatMs(value.intervalP99)}</td>
-      <td>${formatMs(value.workP95)}</td>
-      <td>${value.droppedPercent.toFixed(1)}%</td>
-      <td>${formatDelta(value.intervalP95, old?.intervalP95)}</td>
-    </tr>`).join('');
 
   let summary = 'Save this run as a baseline to compare code changes on this device.';
   if (baseline?.visual && baseline?.audio) {
-    const frameDelta = ((results.audio.intervalP95 / baseline.audio.intervalP95) - 1) * 100;
-    const workDelta = ((results.audio.workP95 / baseline.audio.workP95) - 1) * 100;
-    const frameLabel = `${frameDelta > 0 ? '+' : ''}${frameDelta.toFixed(1)}%`;
-    const workLabel = `${workDelta > 0 ? '+' : ''}${workDelta.toFixed(1)}%`;
+    const frameLabel = formatDelta(results.audio.intervalP95, baseline.audio.intervalP95);
+    const workLabel = formatDelta(results.audio.workP95, baseline.audio.workP95);
     summary = `Audio-pass p95 frame interval vs baseline: ${frameLabel}; p95 JS work: ${workLabel}. `
-    + 'Negative percentages mean faster. Compare on the same device and browser.';
+      + 'Negative percentages mean faster. Compare on the same device and browser.';
   }
 
-  resultsElement.innerHTML = `
-    <p><strong>${summary}</strong></p>
-    <table>
-      <thead><tr><th>Pass</th><th>FPS</th><th>Frame p50</th><th>Frame p95</th><th>Frame p99</th><th>JS work p95</th><th>Dropped</th><th>p95 vs baseline</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <p class="note">Device: ${navigator.userAgent} · DPR ${window.devicePixelRatio || 1} · ${results.benchmark.description} · ${results.visual.frameCount.toLocaleString()} measured frames per pass</p>`;
+  const summaryParagraph = document.createElement('p');
+  summaryParagraph.append(makeTextEl('strong', summary));
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const label of ['Pass', 'FPS', 'Frame p50', 'Frame p95', 'Frame p99', 'JS work p95', 'Dropped', 'p95 vs baseline']) {
+    headerRow.append(makeTextEl('th', label));
+  }
+  thead.append(headerRow);
+  const tbody = document.createElement('tbody');
+  for (const [name, value, old] of passes) {
+    const row = document.createElement('tr');
+    for (const cellText of [
+      name,
+      value.fps.toFixed(1),
+      formatMs(value.intervalP50),
+      formatMs(value.intervalP95),
+      formatMs(value.intervalP99),
+      formatMs(value.workP95),
+      `${value.droppedPercent.toFixed(1)}%`,
+      formatDelta(value.intervalP95, old?.intervalP95),
+    ]) {
+      row.append(makeTextEl('td', cellText));
+    }
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+
+  const note = makeTextEl(
+    'p',
+    `Device: ${navigator.userAgent} · DPR ${window.devicePixelRatio || 1} · ${results.benchmark.description} · `
+      + `${results.visual.frameCount.toLocaleString()} visual / ${results.audio.frameCount.toLocaleString()} audio measured frames`,
+    'note',
+  );
+  resultsElement.replaceChildren(summaryParagraph, table, note);
 };
 
 // Both anchor-heavy scenarios can be run straight from the URL, which is how
@@ -307,10 +330,15 @@ const runAutomaticVisualBenchmark = async (scenarioKey) => {
       audioEnabled: false,
       fixedMapTimeMs: scenario.fixedMapTimeMs,
     });
-    resultsElement.innerHTML = `
-      <p><strong>${scenario.title} FPS: ${visual.fps.toFixed(1)}</strong></p>
-      <p>Frame interval p50/p95/p99: ${formatMs(visual.intervalP50)} / ${formatMs(visual.intervalP95)} / ${formatMs(visual.intervalP99)}. JS work p95: ${formatMs(visual.workP95)}. Dropped frames: ${visual.droppedPercent.toFixed(1)}%.</p>
-      <p class="note">${scenario.note}</p>`;
+    const heading = document.createElement('p');
+    heading.append(makeTextEl('strong', `${scenario.title} FPS: ${visual.fps.toFixed(1)}`));
+    const metrics = makeTextEl(
+      'p',
+      `Frame interval p50/p95/p99: ${formatMs(visual.intervalP50)} / ${formatMs(visual.intervalP95)} / ${formatMs(visual.intervalP99)}. `
+        + `JS work p95: ${formatMs(visual.workP95)}. Dropped frames: ${visual.droppedPercent.toFixed(1)}%.`,
+    );
+    const note = makeTextEl('p', scenario.note, 'note');
+    resultsElement.replaceChildren(heading, metrics, note);
     statusElement.textContent = `Visual benchmark complete (${visual.frameCount.toLocaleString()} frames).`;
   } catch (error) {
     statusElement.textContent = `Benchmark failed: ${error?.message || error}`;
@@ -320,7 +348,7 @@ const runAutomaticVisualBenchmark = async (scenarioKey) => {
 };
 
 const autoBenchmark = new URLSearchParams(window.location.search).get('autobench');
-if (autoBenchmark && AUTO_BENCHMARK_SCENARIOS[autoBenchmark]) {
+if (autoBenchmark && Object.hasOwn(AUTO_BENCHMARK_SCENARIOS, autoBenchmark)) {
   scenarioElement.value = autoBenchmark;
   void runAutomaticVisualBenchmark(autoBenchmark);
 }

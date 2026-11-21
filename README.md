@@ -77,7 +77,7 @@ the preview reports to the browser's media controls, with the map's title, artis
 - `s` cycle speed, `m` mute, `r` restart
 - `k` cycle a mania convert's key count: auto, 4k, 7k
 - `?` show the shortcuts list
-- `+` / `-` zoom the timeline in and out around the playhead, `esc` zooms back out
+- `=` / `-` (or `+`) zoom the timeline in and out around the playhead, `esc` zooms back out
 - hovering the timeline shows the timestamp under the cursor, to the millisecond once zoomed in
 - `alt` + `shift` + `o` opens the preview from any tab. the browser owns this one: change or clear it at `chrome://extensions/shortcuts` (firefox: `about:addons`, manage extension shortcuts). the shortcuts list shows whatever it is set to
 
@@ -114,7 +114,7 @@ the manifest requests only two extension permissions:
 - `activeTab`
   reads the current tab URL so the popup can detect supported osu! beatmap pages.
 - `storage`
-  reads and writes user settings, short-lived preview cache data, and cache prune metadata.
+  reads and writes user settings (`storage.sync`), provider stats, view history, detached window geometry, cache prune metadata (`storage.local`), and short-lived preview/compare cache data (`storage.session`). full audio blobs are stored in the browser Cache API (`mosuPreviewFullAudioV1`).
 
 ### cache limits
 
@@ -144,17 +144,21 @@ host permissions are scoped to the services the extension actually fetches from:
 - `https://api.nerinyan.moe/*`
 - `https://dl.nerinyan.moe/*` (download redirect target)
 - `https://txy1.sayobot.cn/*`
-- `https://tc1.sayobot.cn:25225/*` (download redirect target)
+- `https://tc1.sayobot.cn/*` (download redirect target, including port `:25225`)
 
-the extension does not inject content scripts into arbitrary pages. it runs from the popup and makes network requests only to the hosts above.
+mapset cover thumbnails and media-session artwork are also loaded as images from `https://assets.ppy.sh` (allowed via `img-src`, no host permission needed).
+
+the extension does not inject content scripts into arbitrary pages. it runs in the popup, options page, and background service worker / event page (`src/background.js`), making network requests only to the hosts above.
 
 ## supported url formats
 
 - `https://osu.ppy.sh/beatmapsets/{setId}#osu/{beatmapId}`
 - `https://osu.ppy.sh/beatmapsets/{setId}#taiko/{beatmapId}`
-- `https://osu.ppy.sh/beatmapsets/{setId}#fruits/{beatmapId}`
+- `https://osu.ppy.sh/beatmapsets/{setId}#fruits/{beatmapId}` (or `#catch/{beatmapId}`)
 - `https://osu.ppy.sh/beatmapsets/{setId}#mania/{beatmapId}`
-- `https://osu.ppy.sh/beatmaps/{beatmapId}`
+- `https://osu.ppy.sh/beatmapsets/{setId}/discussion/{beatmapId}/...`
+- `https://osu.ppy.sh/beatmapsets/{setId}?b={beatmapId}`
+- `https://osu.ppy.sh/beatmaps/{beatmapId}` (optional `?mode=` or `?m=` ruleset override)
 - `https://osu.ppy.sh/beatmapsets/{setId}`, and its discussion pages, which name no difficulty
 
 a set URL with no difficulty in it — what a search result, a forum link or the modding queue opens — has nothing to preview yet, so the popup lists the set's difficulties instead: grouped by ruleset where the set has more than one, easiest first, each with its star rating, in the ruleset the link asked for where it asked for one. picking one moves the tab to that difficulty's discussion page and loads its preview. the list is read from the set's own page, so it costs one fetch; if it cannot be read, the cached mapsets list is shown as on any other page. the detached window still follows only URLs that name a difficulty.
@@ -166,13 +170,14 @@ a set URL with no difficulty in it — what a search result, a forum link or the
 1. open chrome and go to `chrome://extensions`.
 2. enable **Developer mode**.
 3. click **Load unpacked**.
-4. select the `mosu-preview` folder.
+4. select the `mosu!-preview` folder (or run `npm run package:chrome` and unpack `dist/mosu!-preview-chrome v{version}.zip` to omit Firefox-only manifest keys).
 
 ### firefox
 
-1. open firefox and go to `about:debugging#/runtime/this-firefox`.
-2. click **Load Temporary Add-on...**.
-3. select the `mosu-preview` zip file/xpi file.
+1. run `npm run package:firefox` to build `dist/mosu!-preview-firefox v{version}.xpi`.
+2. open firefox and go to `about:debugging#/runtime/this-firefox`.
+3. click **Load Temporary Add-on...**.
+4. select `dist/mosu!-preview-firefox v{version}.xpi` (or `manifest.json` from the `mosu!-preview` folder).
 
 ## package
 
@@ -187,9 +192,9 @@ to build just one target, run `npm run package:chrome` or `npm run package:firef
 
 run `npm run performance:micro` for the Node microbenchmarks. Run `npm run performance` to open the browser benchmark, then press **Run 8-second tests**. Each completed run is appended to `performance-results/results.jsonl` with its timestamp, benchmark metrics, build revision, and environment details. Keep this file with the build history to compare results across revisions. The browser benchmark's **Save result as baseline** button separately stores a same-device comparison baseline in that browser's local storage.
 
-the scenario list has three workloads: 8,000 mixed objects, a synthetic 4,344-anchor slider, and `aspire-conic`, which replays osu! beatmap 5839914 ("conic", Aspire) at 01:23 from the bundled `scripts/benchmark-maps/5839914.osu`. That moment is the slider-body worst case, because 7,427-anchor decorative sliders are on screen. Append `?autobench=aspire-conic` or `?autobench=anchor-heavy-slider` to the page URL to run that scenario's visual pass straight away.
+the scenario list has three workloads: 8,000 mixed objects, a synthetic 4,344-anchor slider, and `aspire-conic`, which replays osu! beatmap 5839914 ("conic", Aspire) at 01:23 from the bundled `scripts/benchmark-maps/5839914.osu`. That moment is the slider-body worst case, because 7,427-anchor decorative sliders are on screen. Append `?autobench=aspire-conic` or `?autobench=anchor-heavy-slider` to the page URL to run that scenario's visual-only pass straight away (autobench does not append to `results.jsonl`, and does not support `object-stress`).
 
-the benchmark server only listens on this machine. to run it from a phone or another device on the same network, start it with `MOSU_PERF_LAN=1 npm run performance`.
+the benchmark server only listens on this machine. to run it from a phone or another device on the same network, start it with `MOSU_PERF_LAN=1 npm run performance` (PowerShell: `$env:MOSU_PERF_LAN='1'; npm run performance`). Pass `--no-save` to `npm run performance:micro -- --no-save` to skip appending to `performance-results/results.jsonl`.
 
 ## development
 

@@ -127,12 +127,14 @@ const benchmarks = [
   },
 ];
 
+const skipSave = process.argv.includes('--no-save');
 let logSpeedup = 0;
 let passed = true;
 const benchmarkResults = [];
 for (const benchmark of benchmarks) {
-  const speedup = benchmark.referenceMs / benchmark.optimizedMs;
-  logSpeedup += Math.log(speedup);
+  const safeOptimizedMs = Math.max(benchmark.optimizedMs, Number.EPSILON);
+  const speedup = benchmark.referenceMs / safeOptimizedMs;
+  logSpeedup += Math.log(Math.max(speedup, Number.EPSILON));
   const benchmarkPassed = speedup >= benchmark.minimumSpeedup;
   passed &&= benchmarkPassed;
   benchmarkResults.push({ ...benchmark, speedup, passed: benchmarkPassed });
@@ -145,16 +147,18 @@ for (const benchmark of benchmarks) {
 
 const overallSpeedup = Math.exp(logSpeedup / benchmarks.length);
 console.log(`${passed ? 'PASS' : 'FAIL'} overall geometric-mean speedup: ${overallSpeedup.toFixed(2)}×`);
-try {
-  const resultsPath = await appendPerformanceResult('micro', {
-    benchmarks: benchmarkResults,
-    overallSpeedup,
-    passed,
-  });
-  console.log(`Saved run to ${resultsPath}`);
-} catch (error) {
-  console.error(`Could not save benchmark results: ${error?.message || error}`);
-  process.exitCode = 1;
+if (!skipSave) {
+  try {
+    const resultsPath = await appendPerformanceResult('micro', {
+      benchmarks: benchmarkResults,
+      overallSpeedup,
+      passed,
+    });
+    console.log(`Saved run to ${resultsPath}`);
+  } catch (error) {
+    console.error(`Could not save benchmark results: ${error?.message || error}`);
+    process.exitCode = 1;
+  }
 }
 if (!passed) {
   process.exitCode = 1;

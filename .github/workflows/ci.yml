@@ -4,20 +4,30 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm test
-      # Builds both archives and runs the package validator over them.
+      # Builds both archives with a fixed epoch and runs the package validator over them.
       - run: npm run package
+        env:
+          SOURCE_DATE_EPOCH: '1700000000'

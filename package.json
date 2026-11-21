@@ -3,12 +3,14 @@
   "version": "0.7.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "package": "node scripts/package.mjs",
     "package:chrome": "node scripts/package.mjs chrome",
     "package:firefox": "node scripts/package.mjs firefox",
     "performance": "node scripts/performance-server.mjs",
-    "performance:serve": "node scripts/performance-server.mjs",
     "performance:micro": "node scripts/performance.mjs",
     "test": "node --test",
     "lint": "eslint ."

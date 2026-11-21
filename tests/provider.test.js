@@ -116,20 +116,25 @@ test('provider runtime state serializes stats and live cooldowns', () => {
   assert.equal(snapshot.cooldowns.unknown, undefined);
 });
 
-// Headers arrive at once; the body takes `bodyDelayMs`, the way a large archive
-// does on a real connection.
-const withSlowArchiveFetch = async (bodyDelayMs, run) => {
+// Headers arrive at once; the body resolves only after `releaseBody()` is
+// called, while `performance.now` is advanced deterministically so the test
+// never depends on wall-clock sleeps or event-loop jitter.
+const withControlledArchiveFetch = async (bodyDelayMs, run) => {
   const originalFetch = globalThis.fetch;
+  const originalNow = performance.now;
+  let fakeNow = 1000;
+  performance.now = () => fakeNow;
   globalThis.fetch = async () => new Response(new ReadableStream({
-    async start(controller) {
-      await new Promise((resolve) => { setTimeout(resolve, bodyDelayMs); });
+    pull(controller) {
+      fakeNow += bodyDelayMs;
       controller.enqueue(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]));
       controller.close();
     },
-  }), { status: 200, headers: { 'content-type': 'application/zip' } });
+  }, { highWaterMark: 0 }), { status: 200, headers: { 'content-type': 'application/zip' } });
   try {
     return await run();
   } finally {
+    performance.now = originalNow;
     globalThis.fetch = originalFetch;
   }
 };
@@ -143,7 +148,7 @@ test('a success is timed to the response headers, not the end of the body', asyn
   resetProviderRuntimeState();
   const bodyDelayMs = 300;
 
-  const result = await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
+  const result = await withControlledArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
     providerOverride: 'mino',
   }));
 
@@ -161,7 +166,7 @@ test('the multi-provider path also times a success to the headers', async () => 
   resetProviderRuntimeState();
   const bodyDelayMs = 300;
 
-  await withSlowArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
+  await withControlledArchiveFetch(bodyDelayMs, () => downloadBeatmapArchive('123', {
     userPriority: ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
   }));
 
@@ -224,4 +229,81 @@ test('a provider that answers 5xx gets its second attempt', async () => {
   resetProviderRuntimeState();
   const calls = await countFetches(503, () => downloadBeatmapArchive('123', { providerOverride: 'mino' }));
   assert.equal(calls, 2);
+});
+
+test('autoFallback false sticks to the top provider even while it is in cooldown', () => {
+  resetProviderRuntimeState();
+  const cooldownUntil = Date.now() + 60_000;
+  providerCooldowns.mino = cooldownUntil;
+
+  const singleCooldown = getProviderSequenceForDownload(
+    'auto',
+    ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
+    [],
+    false,
+  );
+  assert.deepEqual(singleCooldown.map((s) => s.id), ['mino']);
+
+  providerCooldowns.osu_direct = cooldownUntil;
+  providerCooldowns.nerinyan = cooldownUntil;
+  providerCooldowns.sayobot = cooldownUntil;
+  const allCooldown = getProviderSequenceForDownload(
+    'auto',
+    ['mino', 'osu_direct', 'nerinyan', 'sayobot'],
+    [],
+    false,
+  );
+  assert.deepEqual(allCooldown.map((s) => s.id), ['mino']);
+});
+
+test('downloadBeatmapArchive validates setId and rejects unsafe redirect targets', async () => {
+  resetProviderRuntimeState();
+  await assert.rejects(downloadBeatmapArchive('../evil'), /Invalid beatmapset ID/);
+  await assert.rejects(downloadBeatmapArchive('0'), /Invalid beatmapset ID/);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    url: 'http://evil.example/archive.osz',
+    headers: new Headers({ 'content-type': 'application/zip' }),
+    body: { cancel: async () => {} },
+  });
+  try {
+    await assert.rejects(
+      downloadBeatmapArchive('123', { providerOverride: 'mino' }),
+      /redirect target is not allowed/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('downloadBeatmapArchive fails over to the next provider after 404 or non-zip responses', async () => {
+  resetProviderRuntimeState();
+  const originalFetch = globalThis.fetch;
+  const triedHosts = [];
+  globalThis.fetch = async (url) => {
+    const host = new URL(url).hostname;
+    triedHosts.push(host);
+    if (triedHosts.length === 1) {
+      return new Response('not found', { status: 404 });
+    }
+    return new Response(new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]), {
+      status: 200,
+      headers: { 'content-type': 'application/zip' },
+    });
+  };
+  try {
+    const result = await downloadBeatmapArchive('123', {
+      userPriority: ['mino', 'osu_direct'],
+      disabledProviders: ['nerinyan', 'sayobot'],
+      autoFallback: true,
+    });
+    assert.equal(triedHosts.length, 2);
+    assert.notEqual(triedHosts[0], triedHosts[1]);
+    assert.equal(result.archiveBuffer.byteLength, 8);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

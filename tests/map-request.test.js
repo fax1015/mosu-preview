@@ -15,6 +15,9 @@ const browser = {
   respond: () => ({ ok: true, status: 200, text: async () => OSU_FILE }),
 };
 
+const originalChrome = globalThis.chrome;
+const originalFetch = globalThis.fetch;
+
 globalThis.chrome = {
   runtime: { lastError: null },
   tabs: {
@@ -36,7 +39,15 @@ globalThis.fetch = async (url) => {
   return browser.respond(url);
 };
 
+test.after(() => {
+  if (originalChrome === undefined) delete globalThis.chrome;
+  else globalThis.chrome = originalChrome;
+  if (originalFetch === undefined) delete globalThis.fetch;
+  else globalThis.fetch = originalFetch;
+});
+
 const {
+  fetchBeatmapFile,
   isCachedPreviewUsable,
   requestBeatmapForLoad,
   takeInitialMapRequest,
@@ -146,4 +157,38 @@ test('a refused request fails the load with the status it came back with', async
   browser.respond = () => ({ ok: false, status: 404, text: async () => '' });
   const { content } = await requestBeatmapForLoad({ sourceUrlOverride: 'https://osu.ppy.sh/beatmaps/789' });
   await assert.rejects(content, /Beatmap request failed \(404\)/);
+});
+
+test('fetchBeatmapFile validates beatmapId, accepts case-insensitive [HitObjects], and enforces size cap', async () => {
+  reset();
+  await assert.rejects(fetchBeatmapFile('../evil'), /Invalid beatmap ID/);
+  await assert.rejects(fetchBeatmapFile('0'), /Invalid beatmap ID/);
+
+  browser.respond = () => ({
+    ok: true,
+    status: 200,
+    text: async () => 'osu file format v14\n[hitobjects]\n256,192,1000,1,0\n',
+  });
+  const text = await fetchBeatmapFile('789');
+  assert.match(text, /\[hitobjects\]/i);
+
+  let cancelled = false;
+  browser.respond = () => ({
+    ok: true,
+    status: 200,
+    headers: new Headers({ 'content-length': String(32 * 1024 * 1024) }),
+    body: { cancel: async () => { cancelled = true; } },
+  });
+  await assert.rejects(fetchBeatmapFile('789'), /exceeds maximum supported size/);
+  assert.equal(cancelled, true);
+});
+
+test('isCachedPreviewUsable rejects far-future savedAt timestamps', () => {
+  const futureEntry = {
+    version: 1,
+    beatmapId: '789',
+    savedAt: Date.now() + (10 * 60 * 1000),
+    osuContent: OSU_FILE,
+  };
+  assert.equal(isCachedPreviewUsable(futureEntry, '789'), false);
 });

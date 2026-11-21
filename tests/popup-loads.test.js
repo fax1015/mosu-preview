@@ -1,20 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pathToFileURL } from 'node:url';
 
-// Proves popup.js actually evaluates.
+// Proves popup.js and options.js actually evaluate from top to bottom.
 //
-// Nothing else in the suite loads it -- it needs a DOM -- so every other test can
-// pass against a popup that is dead on arrival. `node --check` does not help: an
-// identifier that is referenced but never bound is valid syntax and throws only
-// at evaluation, and in an extension that means the CSS renders, nothing
-// responds, and the error sits in a devtools console no test ever opens. That
-// shipped once, when a range-based deletion removed a function that was still
-// referenced.
-//
-// The stub only has to be good enough to get through module evaluation. Anything
-// that fails past that point is this file falling short of a real browser rather
-// than a defect, so only a binding error fails the test.
+// Nothing else in the suite loads them -- they need a DOM -- so every other
+// test can pass against a page that is dead on arrival. Previously this test
+// built URLs via pathToFileURL(new URL(...).pathname), which produced invalid
+// file:///C:/C:/... URLs on Windows and silently swallowed ERR_MODULE_NOT_FOUND.
 const noop = () => {};
 
 const makeElement = () => ({
@@ -24,19 +16,32 @@ const makeElement = () => ({
   },
   dataset: {},
   textContent: '',
+  innerHTML: '',
   value: '',
   hidden: false,
+  inert: false,
   disabled: false,
   checked: false,
   children: [],
+  clientWidth: 800,
+  clientHeight: 600,
+  scrollWidth: 800,
+  scrollHeight: 600,
+  scrollTop: 0,
+  offsetWidth: 100,
+  offsetHeight: 20,
+  offsetParent: null,
+  parentElement: null,
   addEventListener: noop,
   removeEventListener: noop,
+  append: noop,
   appendChild: noop,
   removeChild: noop,
   remove: noop,
   setAttribute: noop,
   removeAttribute: noop,
   getAttribute: () => null,
+  contains: () => false,
   focus: noop,
   blur: noop,
   click: noop,
@@ -65,7 +70,31 @@ const storageArea = {
 };
 
 const installStubs = () => {
+  const keys = [
+    'window', 'document', 'addEventListener', 'removeEventListener', 'matchMedia',
+    'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',
+    'ResizeObserver', 'MutationObserver', 'HTMLElement',
+    'localStorage', 'sessionStorage', 'HTMLMediaElement', 'Audio',
+    'chrome', 'browser', 'caches', 'fetch',
+  ];
+  const saved = Object.fromEntries(keys.map((key) => [key, globalThis[key]]));
+  const savedCreateObjectURL = globalThis.URL.createObjectURL;
+  const savedRevokeObjectURL = globalThis.URL.revokeObjectURL;
+
   globalThis.window = globalThis;
+  globalThis.HTMLElement = class {};
+  globalThis.ResizeObserver = class {
+    observe() {}
+
+    unobserve() {}
+
+    disconnect() {}
+  };
+  globalThis.MutationObserver = class {
+    observe() {}
+
+    disconnect() {}
+  };
   globalThis.document = {
     documentElement: makeElement(),
     body: makeElement(),
@@ -76,12 +105,20 @@ const installStubs = () => {
     addEventListener: noop,
     removeEventListener: noop,
     createElement: () => makeElement(),
+    createElementNS: () => makeElement(),
+    createTextNode: () => ({}),
     createDocumentFragment: () => makeElement(),
     querySelector: () => makeElement(),
     querySelectorAll: () => [],
     getElementById: () => makeElement(),
+    contains: () => false,
   };
-  globalThis.addEventListener = noop;
+  const pagehideListeners = [];
+  globalThis.addEventListener = (type, listener) => {
+    if (type === 'pagehide' && typeof listener === 'function') {
+      pagehideListeners.push(listener);
+    }
+  };
   globalThis.removeEventListener = noop;
   globalThis.matchMedia = () => ({ matches: false, addEventListener: noop, removeEventListener: noop });
   globalThis.getComputedStyle = () => ({ getPropertyValue: () => '' });
@@ -123,17 +160,19 @@ const installStubs = () => {
       onMessage: { addListener: noop, removeListener: noop },
       lastError: null,
     },
-    storage: { sync: storageArea, local: storageArea, onChanged: { addListener: noop } },
+    storage: { sync: storageArea, local: storageArea, session: storageArea, onChanged: { addListener: noop } },
     tabs: {
       query: () => Promise.resolve([]),
       create: () => Promise.resolve({}),
       update: () => Promise.resolve({}),
       onUpdated: { addListener: noop },
+      onActivated: { addListener: noop },
     },
     windows: {
       getCurrent: () => Promise.resolve({}),
       create: () => Promise.resolve({}),
       onRemoved: { addListener: noop },
+      onFocusChanged: { addListener: noop },
     },
     action: { setBadgeText: noop },
   };
@@ -147,50 +186,55 @@ const installStubs = () => {
     }),
   };
   globalThis.fetch = () => Promise.resolve({ ok: false, status: 0, headers: { get: () => null } });
+
+  return async () => {
+    // Allow startup microtasks to settle, then fire pagehide so timers/intervals
+    // registered by popup.js/options.js are cleaned up before removing globals.
+    await new Promise((resolve) => { setImmediate(resolve); });
+    for (const listener of pagehideListeners) {
+      try {
+        listener();
+      } catch {
+        // Ignore teardown noise from minimal stubs.
+      }
+    }
+    await new Promise((resolve) => { setImmediate(resolve); });
+    for (const key of keys) {
+      if (saved[key] === undefined) {
+        delete globalThis[key];
+      } else {
+        globalThis[key] = saved[key];
+      }
+    }
+    globalThis.URL.createObjectURL = savedCreateObjectURL;
+    globalThis.URL.revokeObjectURL = savedRevokeObjectURL;
+  };
 };
 
-test('popup.js evaluates without an unbound reference', async () => {
-  installStubs();
-  // The popup kicks off async work on load that the stubs cannot satisfy; those
-  // rejections are not what this test is about.
+test('popup.js evaluates cleanly end-to-end without unbound references or import errors', async () => {
+  const restore = installStubs();
   const ignoreRejection = () => {};
   process.on('unhandledRejection', ignoreRejection);
 
-  let failure = null;
   try {
-    await import(pathToFileURL(new URL('../src/popup.js', import.meta.url).pathname).href);
-  } catch (error) {
-    failure = error;
+    await import(new URL('../src/popup.js', import.meta.url).href);
   } finally {
+    await restore();
     process.off('unhandledRejection', ignoreRejection);
   }
-
-  if (failure && (failure instanceof ReferenceError || / is not defined/.test(failure.message))) {
-    assert.fail(`popup.js throws at evaluation: ${failure.name}: ${failure.message}`);
-  }
-  // Anything else means the stub ran out of browser, which is fine here.
   assert.ok(true);
 });
 
-// Same reasoning for the options page, which has the same failure mode and is
-// even easier to miss: nothing there animates, so a page that threw on load
-// looks like a page whose controls simply do nothing.
-test('options.js evaluates without an unbound reference', async () => {
-  installStubs();
+test('options.js evaluates cleanly end-to-end without unbound references or import errors', async () => {
+  const restore = installStubs();
   const ignoreRejection = () => {};
   process.on('unhandledRejection', ignoreRejection);
 
-  let failure = null;
   try {
-    await import(pathToFileURL(new URL('../src/options.js', import.meta.url).pathname).href);
-  } catch (error) {
-    failure = error;
+    await import(new URL('../src/options.js', import.meta.url).href);
   } finally {
+    await restore();
     process.off('unhandledRejection', ignoreRejection);
-  }
-
-  if (failure && (failure instanceof ReferenceError || / is not defined/.test(failure.message))) {
-    assert.fail(`options.js throws at evaluation: ${failure.name}: ${failure.message}`);
   }
   assert.ok(true);
 });

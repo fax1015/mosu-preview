@@ -5,18 +5,32 @@ import {
   shouldRetryExtractionInPopup,
 } from '../src/audio/fullAudioExtractionCore.js';
 
+const crc32 = (bytes) => {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc ^= bytes[i];
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) ? ((crc >>> 1) ^ 0xedb88320) : (crc >>> 1);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
 // A single stored (uncompressed) entry with a real central directory, enough for
 // the whole parse-pick-extract pipeline to run.
 const buildStoredZip = (name, data) => {
   const nameBytes = Buffer.from(name);
+  const checksum = crc32(data);
   const local = Buffer.alloc(30);
   local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt32LE(checksum, 14);
   local.writeUInt32LE(data.length, 18);
   local.writeUInt32LE(data.length, 22);
   local.writeUInt16LE(nameBytes.length, 26);
 
   const central = Buffer.alloc(46);
   central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt32LE(checksum, 16);
   central.writeUInt32LE(data.length, 20);
   central.writeUInt32LE(data.length, 24);
   central.writeUInt16LE(nameBytes.length, 28);

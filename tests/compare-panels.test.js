@@ -106,6 +106,8 @@ class FakeElement {
   }
 }
 
+const originalDocument = globalThis.document;
+const originalHTMLCanvasElement = globalThis.HTMLCanvasElement;
 globalThis.document = {
   createElement: (tag) => new FakeElement(tag),
   createTextNode: (text) => Object.assign(new FakeElement('#text'), { textContent: text }),
@@ -114,6 +116,13 @@ globalThis.document = {
   styleSheets: [],
 };
 globalThis.HTMLCanvasElement = FakeElement;
+
+test.after(() => {
+  if (originalDocument === undefined) delete globalThis.document;
+  else globalThis.document = originalDocument;
+  if (originalHTMLCanvasElement === undefined) delete globalThis.HTMLCanvasElement;
+  else globalThis.HTMLCanvasElement = originalHTMLCanvasElement;
+});
 
 const { createComparePanels, SELECTION_KEY } = await import('../src/ui/comparePanels.js');
 
@@ -316,12 +325,18 @@ test('the picker adds and removes difficulties, up to four in all', async () => 
   assert.deepEqual(session.get(SELECTION_KEY).ids, ['4', '1', '3']);
 });
 
-test('un-ticking a difficulty lets its check leave before the tag changes', async () => {
+test('un-ticking a difficulty lets its check leave before the tag changes', async (t) => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  const originalCancelRaf = globalThis.cancelAnimationFrame;
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let panels = null;
   try {
     const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1'] }]]);
-    const { panels, control, listElement } = makePanels({ session, allowMotion: () => true });
+    const built = makePanels({ session, allowMotion: () => true });
+    panels = built.panels;
+    const { control, listElement } = built;
     await panels.setLead(LEAD);
     await flush();
     control.classList.add('is-compare-open');
@@ -337,13 +352,14 @@ test('un-ticking a difficulty lets its check leave before the tag changes', asyn
     assert.equal(tag.children[0], check, 'it is still there on the way out');
     assert.ok(check.classList.contains('is-leaving'));
 
-    await new Promise((resolve) => { setTimeout(resolve, 180); });
+    t.mock.timers.tick(200);
     assert.equal(tag.children.length, 0, 'and the tag is cleared once it has gone');
   } finally {
-    // Left as no-ops, not removed: the motion's safety timer can still fire
-    // after the test and cancels its frame.
-    globalThis.requestAnimationFrame = () => 0;
-    globalThis.cancelAnimationFrame = () => {};
+    panels?.dispose();
+    if (originalRaf === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = originalRaf;
+    if (originalCancelRaf === undefined) delete globalThis.cancelAnimationFrame;
+    else globalThis.cancelAnimationFrame = originalCancelRaf;
   }
 });
 
@@ -357,15 +373,21 @@ test('every panel draws at the lead\'s time', async () => {
   assert.ok(renderers.every((renderer) => renderer.time === 12345 && renderer.frames === 1));
   // The longest of them, for a timeline that has to reach their ends.
   assert.equal(panels.getLongestMappedDurationMs(), 4000);
+  panels.dispose();
 });
 
 test('a removed difficulty stays in the grid until it has slid back under the lead', async () => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  const originalCancelRaf = globalThis.cancelAnimationFrame;
   const frames = [];
   globalThis.requestAnimationFrame = (callback) => frames.push(callback);
   globalThis.cancelAnimationFrame = () => {};
+  let panels = null;
   try {
     const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1', '2'] }]]);
-    const { panels, shownIds, control, listElement } = makePanels({ session, allowMotion: () => true });
+    const built = makePanels({ session, allowMotion: () => true });
+    panels = built.panels;
+    const { shownIds, control, listElement } = built;
     await panels.setLead(LEAD);
     await flush();
     control.classList.add('is-compare-open');
@@ -391,19 +413,25 @@ test('a removed difficulty stays in the grid until it has slid back under the le
     }
     assert.deepEqual(shownIds(), ['2']);
   } finally {
-    // Left as no-ops, not removed: the motion's safety timer can still fire
-    // after the test and cancels its frame.
-    globalThis.requestAnimationFrame = () => 0;
-    globalThis.cancelAnimationFrame = () => {};
+    panels?.dispose();
+    if (originalRaf === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = originalRaf;
+    if (originalCancelRaf === undefined) delete globalThis.cancelAnimationFrame;
+    else globalThis.cancelAnimationFrame = originalCancelRaf;
   }
 });
 
 test('changing the panels again mid-exit finishes the exit at once', async () => {
+  const originalRaf = globalThis.requestAnimationFrame;
+  const originalCancelRaf = globalThis.cancelAnimationFrame;
   globalThis.requestAnimationFrame = () => 1;
   globalThis.cancelAnimationFrame = () => {};
+  let panels = null;
   try {
     const session = new Map([[SELECTION_KEY, { setId: '9', mode: 1, leadId: '4', ids: ['4', '1'] }]]);
-    const { panels, shownIds, control, listElement } = makePanels({ session, allowMotion: () => true });
+    const built = makePanels({ session, allowMotion: () => true });
+    panels = built.panels;
+    const { shownIds, control, listElement } = built;
     await panels.setLead(LEAD);
     await flush();
     control.classList.add('is-compare-open');
@@ -416,10 +444,11 @@ test('changing the panels again mid-exit finishes the exit at once', async () =>
     await flush();
     assert.deepEqual(shownIds(), ['3']);
   } finally {
-    // Left as no-ops, not removed: the motion's safety timer can still fire
-    // after the test and cancels its frame.
-    globalThis.requestAnimationFrame = () => 0;
-    globalThis.cancelAnimationFrame = () => {};
+    panels?.dispose();
+    if (originalRaf === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = originalRaf;
+    if (originalCancelRaf === undefined) delete globalThis.cancelAnimationFrame;
+    else globalThis.cancelAnimationFrame = originalCancelRaf;
   }
 });
 

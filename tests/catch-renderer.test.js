@@ -85,10 +85,11 @@ test('autoplay walks, dashes, and stands still where lazer\'s does', () => {
   close(getCatcherXAt(frames, 687), 256);
   close(getCatcherXAt(frames, 1000 - 156), 178);
   close(getCatcherXAt(frames, 1000), 100);
-  // 300px in 500ms is too fast to walk: dash for 50ms, then walk.
+  // 300px in 500ms is too fast to walk (would take 600ms): dash for 100ms at
+  // 1px/ms (100 -> 200), then walk 400ms at 0.5px/ms (200 -> 400).
   assert.equal(frames.dashing[Array.from(frames.times).indexOf(1001)], 1);
-  close(getCatcherXAt(frames, 1050), 130);
-  close(getCatcherXAt(frames, 1275), 265);
+  close(getCatcherXAt(frames, 1100), 200);
+  close(getCatcherXAt(frames, 1300), 300);
   close(getCatcherXAt(frames, 1500), 400);
   // 20px away is already under the plate.
   close(getCatcherXAt(frames, 1600), 400);

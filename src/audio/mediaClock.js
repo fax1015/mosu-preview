@@ -87,7 +87,18 @@ const createMediaClockSmoother = ({ now = () => performance.now() } = {}) => {
     return lastOutputMs;
   };
 
-  return { read };
+  const reset = () => {
+    identity = null;
+    lastRawMs = null;
+    seenAtMs = 0;
+    stepMs = 0;
+    stepped = false;
+    lastOutputMs = null;
+    lastReadAtMs = null;
+    frameMs = 0;
+  };
+
+  return { read, reset };
 };
 
 export { MAX_PLAYBACK_STEP_MS, createMediaClockSmoother };

@@ -1,3 +1,4 @@
+import { normalizeNumericId } from '../core/beatmapUrl.js';
 import { getAudioMimeType, normalizePath, writeCachedFullAudioBlob } from './cache.js';
 import { downloadBeatmapArchive } from './provider.js';
 import {
@@ -23,7 +24,7 @@ const extractFullBeatmapAudio = async ({
   onDownloadProgress,
   signal,
 } = {}) => {
-  const normalizedSetId = String(setId || '').trim();
+  const normalizedSetId = normalizeNumericId(setId);
   const normalizedAudio = String(audioFilename || '').trim();
   const normalizedOverride = String(providerOverride || 'auto');
 
@@ -91,6 +92,7 @@ const extractFullBeatmapAudioToCache = async (options = {}) => {
     result.requestedAudioFilename,
     audioBlob,
     options.mapsetInfo,
+    { awaitPrune: true },
   );
   if (!wroteRequested) {
     // The download worked, so this is no verdict on the mirrors: the audio just

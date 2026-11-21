@@ -441,7 +441,10 @@ const resolveEventSamples = (events, samplePoints, defaultSampleSet) => {
       index += 1;
     }
 
-    const pointVolume = Number(active?.volume);
+    const rawPointVolume = active?.volume;
+    const pointVolume = typeof rawPointVolume === 'number'
+      ? rawPointVolume
+      : (typeof rawPointVolume === 'string' && rawPointVolume.trim() !== '' ? Number(rawPointVolume) : Number.NaN);
     const normalSet = normalizeSampleSet(event.normalSet)
       || normalizeSampleSet(active?.sampleSet)
       || beatmapSet
@@ -475,6 +478,9 @@ const collectObjectEvents = (list) => {
   const events = [];
 
   for (const object of list) {
+    if (events.length >= MAX_HITSOUND_EVENTS) {
+      break;
+    }
     if (!object || !Number.isFinite(object.time)) {
       continue;
     }
@@ -562,6 +568,9 @@ const collectTaikoDrumEvents = (list) => {
   };
 
   for (const object of list) {
+    if (events.length >= MAX_HITSOUND_EVENTS) {
+      break;
+    }
     if (!object || !Number.isFinite(object.time)) {
       continue;
     }
@@ -811,6 +820,16 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     return Number.isFinite(baseLatency) && baseLatency > 0 ? baseLatency : 0;
   };
 
+  // disconnect() throws when a node has no connections left, which is the state
+  // the caller wanted anyway.
+  const disconnectQuietly = (node) => {
+    try {
+      node?.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+  };
+
   /**
    * Every voice hangs off a per-generation bus, so a seek, a pause or a rate
    * change can silence everything already placed ahead of the playhead with one
@@ -830,6 +849,23 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     return voiceBus;
   };
 
+  const pruneExpiredDrumBuses = (now = audioContext?.currentTime) => {
+    if (!Number.isFinite(now) || drumGeneration.length === 0) {
+      return;
+    }
+    let writeIndex = 0;
+    for (let i = 0; i < drumGeneration.length; i += 1) {
+      const entry = drumGeneration[i];
+      if (now > entry.expiresAt) {
+        disconnectQuietly(entry.bus);
+      } else {
+        drumGeneration[writeIndex] = entry;
+        writeIndex += 1;
+      }
+    }
+    drumGeneration.length = writeIndex;
+  };
+
   /**
    * One bus per half of the taiko drum, plus one for flourishes. The drum is
    * fitted dry, so these skip the room whichever style is chosen.
@@ -838,28 +874,32 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
    * still sounding before it plays the strong voice, so a run of big notes does
    * not pile up their long tails. The half's bus fades out where the big note
    * lands, and the big note starts a new one. Flourishes play apart, as lazer
-   * plays them, so the next big kat does not cut one short. Every bus of the
-   * generation is kept, choked or not, so a seek still silences what was queued
-   * ahead of a choke.
+   * plays them, so the next big kat does not cut one short. Every live bus of
+   * the generation is kept until its choke fade finishes, so a seek still
+   * silences what was queued ahead of a choke without leaking nodes forever.
    */
   const ensureDrumBus = (part) => {
+    pruneExpiredDrumBuses();
     if (!drumBuses[part]) {
       const bus = audioContext.createGain();
       bus.gain.value = 1;
       bus.connect(mixBus);
-      drumBuses[part] = bus;
-      drumGeneration.push(bus);
+      const entry = { bus, expiresAt: Infinity };
+      drumBuses[part] = entry;
+      drumGeneration.push(entry);
     }
-    return drumBuses[part];
+    return drumBuses[part].bus;
   };
 
   const chokeDrum = (part, atSec) => {
-    const bus = drumBuses[part];
-    if (!bus) {
+    const entry = drumBuses[part];
+    if (!entry) {
       return;
     }
-    bus.gain.setValueAtTime(1, atSec);
-    bus.gain.linearRampToValueAtTime(0, atSec + VOICE_BUS_FADE_SEC);
+    const fadeEnd = atSec + VOICE_BUS_FADE_SEC;
+    entry.bus.gain.setValueAtTime(1, atSec);
+    entry.bus.gain.linearRampToValueAtTime(0, fadeEnd);
+    entry.expiresAt = fadeEnd;
     drumBuses[part] = null;
   };
 
@@ -869,7 +909,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     }
 
     const now = audioContext.currentTime;
-    for (const bus of [voiceBus, ...drumGeneration]) {
+    pruneExpiredDrumBuses(now);
+    const activeBuses = [voiceBus, ...drumGeneration.map((entry) => entry.bus)];
+    for (const bus of activeBuses) {
       if (!bus) {
         continue;
       }
@@ -983,7 +1025,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     return played;
   };
 
-  const playHit = (event, startAt, destination) => {
+  const playHit = (event, startAt) => {
     const mapVolume = Number(event?.volume);
     const volumeScale = (Number.isFinite(mapVolume) ? Math.min(100, Math.max(0, mapVolume)) : 100)
       / 100;
@@ -1008,6 +1050,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       return played;
     }
 
+    const destination = ensureVoiceBus();
     const flags = Number.isFinite(event?.hitSound) ? event.hitSound : 0;
     // hitnormal plays under every object and takes the normal bank; the
     // additions layered on top take the addition bank.
@@ -1078,11 +1121,19 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       return 0;
     }
 
-    // A suspended context (autoplay policy, or a tab that was backgrounded)
-    // silently swallows everything until it is resumed.
-    if (audioContext.state === 'suspended') {
-      void audioContext.resume().catch(() => {});
+    // A suspended or otherwise non-running context (autoplay policy, or a tab
+    // that was backgrounded) freezes currentTime so queued voices would pile up
+    // and detonate together on resume. Advance past expired events and wait
+    // until the context is actually running before scheduling anything.
+    if (audioContext.state !== 'running') {
+      if (audioContext.state === 'suspended') {
+        void audioContext.resume?.().catch(() => {});
+      }
+      cursor = Math.max(cursor, findFirstIndexAtOrAfter(list, currentTimeMs));
+      return 0;
     }
+
+    pruneExpiredDrumBuses();
 
     const { due, nextCursor } = collectScheduledEvents(list, cursor, currentTimeMs, horizonMapMs);
     cursor = nextCursor;
@@ -1092,7 +1143,6 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
 
     const contextNowSec = audioContext.currentTime;
     const latencySec = getOutputLatencySec();
-    const destination = ensureVoiceBus();
 
     // Logged from the first real schedule rather than from context creation:
     // the device does not report a latency worth reading until it is running.
@@ -1111,7 +1161,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
       const leadSec = ((object.time - currentTimeMs) / 1000) / speed;
       const startAt = Math.max(contextNowSec, (contextNowSec + leadSec) - latencySec);
       try {
-        playHit(object, startAt, destination);
+        playHit(object, startAt);
       } catch {
         // One bad voice must not stop the rest of the frame.
       }
@@ -1181,13 +1231,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     return musicGain;
   };
 
-  // disconnect() throws when a node has no connections left, which is the state
-  // the caller wanted anyway.
-  const disconnectQuietly = (node) => {
-    try {
-      node?.disconnect();
-    } catch {
-      // Already disconnected.
+  const resumeContext = () => {
+    if (audioContext?.state === 'suspended') {
+      void audioContext.resume?.().catch(() => {});
     }
   };
 
@@ -1203,6 +1249,9 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
    */
   const attachMediaElement = (audioElement) => {
     if (!audioElement || attachedMediaElement === audioElement) {
+      if (audioElement && attachedMediaElement === audioElement) {
+        resumeContext();
+      }
       return Boolean(musicSource);
     }
     if (!ensureContext()) {
@@ -1237,6 +1286,7 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
     // element's own volume in place would attenuate the music twice.
     audioElement.volume = 1;
     gain.gain.value = musicVolume;
+    resumeContext();
     onLog?.(`webaudio: media element attached (shared context, ${Math.round(audioContext.sampleRate)}Hz, `
       + `latency ${(attachedLatencySec * 1000).toFixed(1)}ms, ${latencyHint || 'interactive'} buffers)`);
     return true;
@@ -1255,15 +1305,13 @@ const createHitsoundPlayer = ({ getAudioContext, onLog, latencyHint } = {}) => {
   // graph adds to the music while it is routed through the shared context.
   const getOutputLatencySecExposed = () => getOutputLatencySec();
 
-  const resumeContext = () => {
-    if (audioContext?.state === 'suspended') {
-      void audioContext.resume().catch(() => {});
-    }
-  };
-
   const dispose = () => {
     disconnectQuietly(musicSource);
     disconnectQuietly(musicGain);
+    disconnectQuietly(voiceBus);
+    for (const entry of drumGeneration) {
+      disconnectQuietly(entry.bus);
+    }
     musicSource = null;
     attachedMediaElement = null;
     attachedLatencySec = 0;

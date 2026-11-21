@@ -35,6 +35,28 @@ const CP437_HIGH_CHARS = [
   '\u00b0', '\u2219', '\u00b7', '\u221a', '\u207f', '\u00b2', '\u25a0', '\u00a0',
 ];
 
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: false });
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let crc = i;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) ? ((crc >>> 1) ^ 0xedb88320) : (crc >>> 1);
+    }
+    table[i] = crc >>> 0;
+  }
+  return table;
+})();
+
+const computeCrc32 = (bytes) => {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
 const decodeCp437 = (bytes) => Array.from(bytes, (value) => (
   value < 0x80 ? String.fromCharCode(value) : CP437_HIGH_CHARS[value - 0x80]
 )).join('');
@@ -49,7 +71,7 @@ const decodeZipName = (nameBytes, isUtf8) => {
   }
 
   // Non-fatal, so malformed bytes become U+FFFD rather than an exception.
-  return new TextDecoder('utf-8', { fatal: false }).decode(nameBytes);
+  return UTF8_DECODER.decode(nameBytes);
 };
 
 const findZipEocdOffset = (bytes) => {
@@ -134,6 +156,7 @@ const parseZipEntries = (archiveBytes) => {
 
     const flags = view.getUint16(cursor + 8, true);
     const compressionMethod = view.getUint16(cursor + 10, true);
+    const crc32 = view.getUint32(cursor + 16, true);
     const compressedSize = view.getUint32(cursor + 20, true);
     const uncompressedSize = view.getUint32(cursor + 24, true);
     const fileNameLength = view.getUint16(cursor + 28, true);
@@ -150,8 +173,8 @@ const parseZipEntries = (archiveBytes) => {
 
     const nameStart = cursor + 46;
     const nameEnd = nameStart + fileNameLength;
-    if (nameEnd > archiveBytes.length) {
-      break;
+    if (nameEnd > centralDirectoryEnd || nameEnd > archiveBytes.length) {
+      throw new Error('ZIP central directory entry filename is truncated.');
     }
 
     const nameBytes = archiveBytes.subarray(nameStart, nameEnd);
@@ -159,6 +182,8 @@ const parseZipEntries = (archiveBytes) => {
 
     entries.push({
       name,
+      flags,
+      crc32,
       compressionMethod,
       compressedSize,
       uncompressedSize,
@@ -201,30 +226,53 @@ const inflateWithFormat = async (compressedBytes, format, maxBytes) => {
   const reader = new Blob([compressedBytes]).stream()
     .pipeThrough(new DecompressionStream(format))
     .getReader();
-  const output = new Uint8Array(limit);
+  // Size the initial buffer from the compressed input rather than allocating
+  // up to 150MB upfront for an entry whose header lies about its size. Real
+  // audio barely compresses (~1:1) so 2x compressed size usually fits in one
+  // allocation without reallocating.
+  const initialCapacity = Math.min(
+    limit,
+    Math.max(64 * 1024, Math.min(MAX_ZIP_AUDIO_ENTRY_BYTES, (compressedBytes?.byteLength || 0) * 2)),
+  );
+  let output = new Uint8Array(initialCapacity);
   let written = 0;
+  let finished = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
+        finished = true;
         break;
       }
+      if (!value || value.byteLength === 0) {
+        continue;
+      }
       if (written + value.byteLength > limit) {
-        await reader.cancel();
+        await reader.cancel().catch(() => {});
+        finished = true;
         throw Object.assign(
           new Error(`Inflated ZIP entry exceeds its declared size (${limit} bytes).`),
           { name: INFLATE_LIMIT_ERROR_NAME },
         );
       }
+      if (written + value.byteLength > output.byteLength) {
+        const nextCapacity = Math.min(limit, Math.max(output.byteLength * 2, written + value.byteLength));
+        const grown = new Uint8Array(nextCapacity);
+        grown.set(output.subarray(0, written));
+        output = grown;
+      }
       output.set(value, written);
       written += value.byteLength;
     }
   } finally {
+    if (!finished) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 
-  return written === limit ? output : output.subarray(0, written);
+  return written === output.byteLength ? output : output.subarray(0, written);
 };
 
 const inflateDeflateRaw = async (compressedBytes, maxBytes) => {
@@ -350,6 +398,7 @@ const readResponseArrayBufferLimited = async (response, {
   const cap = Number.isFinite(maxBytes) && maxBytes > 0 ? Math.floor(maxBytes) : MAX_ARCHIVE_DOWNLOAD_BYTES;
   const contentLength = Number.parseInt(response.headers.get('content-length') || '', 10);
   if (Number.isFinite(contentLength) && contentLength > cap) {
+    void response.body?.cancel?.().catch(() => {});
     throw new Error(`archive too large (${contentLength} bytes)`);
   }
   const totalHint = Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null;
@@ -371,53 +420,83 @@ const readResponseArrayBufferLimited = async (response, {
   }
 
   const reader = response.body.getReader();
-  const sink = createByteSink(totalHint ?? 0);
+  // Defer large Content-Length allocation until after confirming the 2-byte PK
+  // signature so a 200 HTML error page advertising 200MB cannot trigger a huge
+  // upfront allocation before being cancelled.
+  let sink = requireZipSignature ? null : createByteSink(totalHint ?? 0);
+  let pendingChunks = requireZipSignature ? [] : null;
+  let totalRead = 0;
   const head = [];
-  let probing = requireZipSignature || probeDeadline !== null;
+  let checkingSignature = requireZipSignature;
+  let waitingForProbeBytes = probeDeadline !== null;
+  let finishedReading = false;
 
   try {
     while (true) {
       const now = performance.now();
       const remainingMs = Math.min(
         bodyDeadline === null ? Number.POSITIVE_INFINITY : bodyDeadline - now,
-        probing && probeDeadline !== null ? probeDeadline - now : Number.POSITIVE_INFINITY,
+        waitingForProbeBytes && probeDeadline !== null ? probeDeadline - now : Number.POSITIVE_INFINITY,
       );
       const { done, value } = remainingMs === Number.POSITIVE_INFINITY
         ? await reader.read()
         : await readStreamChunkWithDeadline(reader, remainingMs);
       if (done) {
+        finishedReading = true;
         break;
       }
       if (!(value instanceof Uint8Array) || value.byteLength <= 0) {
         continue;
       }
 
-      if (sink.length + value.byteLength > cap) {
-        await reader.cancel();
-        throw new Error(`archive exceeds limit (${sink.length + value.byteLength} bytes)`);
+      if (totalRead + value.byteLength > cap) {
+        await reader.cancel().catch(() => {});
+        finishedReading = true;
+        throw new Error(`archive exceeds limit (${totalRead + value.byteLength} bytes)`);
       }
-      sink.push(value);
-      emitArchiveBodyProgress(onProgress, sink.length, totalHint);
 
-      if (probing) {
+      if (checkingSignature) {
         for (let i = 0; i < value.byteLength && head.length < 2; i += 1) {
           head.push(value[i]);
         }
+        pendingChunks.push(value);
+        totalRead += value.byteLength;
+        emitArchiveBodyProgress(onProgress, totalRead, totalHint);
+
         if (head.length >= 2) {
+          waitingForProbeBytes = false;
           if (!startsWithZipSignature(head)) {
             // The caller sees the non-ZIP header and reports it as such.
-            await reader.cancel();
+            await reader.cancel().catch(() => {});
+            finishedReading = true;
             break;
           }
-          probing = false;
+          checkingSignature = false;
+          sink = createByteSink(totalHint ?? 0);
+          for (const buffered of pendingChunks) {
+            sink.push(buffered);
+          }
+          pendingChunks = null;
         }
+        continue;
       }
+
+      waitingForProbeBytes = false;
+      sink.push(value);
+      totalRead += value.byteLength;
+      emitArchiveBodyProgress(onProgress, totalRead, totalHint);
     }
   } finally {
+    if (!finishedReading) {
+      await reader.cancel().catch(() => {});
+    }
     reader.releaseLock();
   }
 
-  emitArchiveBodyProgress(onProgress, sink.length, totalHint ?? sink.length);
+  emitArchiveBodyProgress(onProgress, totalRead, totalHint ?? totalRead);
+  if (!sink) {
+    return mergeUint8Chunks(pendingChunks || [], totalRead);
+  }
   return sink.toArrayBuffer();
 };
 
@@ -463,6 +542,11 @@ const extractZipEntry = async (archiveBytes, entry) => {
     throw new Error('ZIP local file header is invalid.');
   }
 
+  const localFlags = view.getUint16(localOffset + 6, true);
+  if (((entry.flags || 0) & 0x0001) !== 0 || (localFlags & 0x0001) !== 0) {
+    throw new Error('Encrypted ZIP entries are not supported.');
+  }
+
   const localFileNameLength = view.getUint16(localOffset + 26, true);
   const localExtraLength = view.getUint16(localOffset + 28, true);
   const dataStart = localOffset + 30 + localFileNameLength + localExtraLength;
@@ -473,23 +557,28 @@ const extractZipEntry = async (archiveBytes, entry) => {
   }
 
   const compressed = archiveBytes.subarray(dataStart, dataEnd);
+  let extracted;
   if (entry.compressionMethod === 0) {
     if (compressed.byteLength !== uncompressedSize) {
       throw new Error('Stored ZIP entry size mismatch.');
     }
-    return new Uint8Array(compressed);
-  }
-  if (entry.compressionMethod === 8) {
+    extracted = new Uint8Array(compressed);
+  } else if (entry.compressionMethod === 8) {
     // The declared size was already held to MAX_ZIP_AUDIO_ENTRY_BYTES above, so
     // bounding the inflate by it bounds it by the global ceiling too.
     const inflated = await inflateDeflateRaw(compressed, uncompressedSize);
     if (inflated.byteLength !== uncompressedSize) {
       throw new Error('Inflated ZIP entry size mismatch.');
     }
-    return inflated;
+    extracted = inflated;
+  } else {
+    throw new Error(`ZIP compression method ${entry.compressionMethod} is unsupported.`);
   }
 
-  throw new Error(`ZIP compression method ${entry.compressionMethod} is unsupported.`);
+  if (Number.isInteger(entry.crc32) && computeCrc32(extracted) !== (entry.crc32 >>> 0)) {
+    throw new Error('ZIP entry CRC-32 checksum mismatch.');
+  }
+  return extracted;
 };
 
 const AUDIO_ENTRY_EXTENSIONS = ['.mp3', '.ogg', '.wav', '.flac', '.opus'];
@@ -508,9 +597,8 @@ const findOversizedAudioEntries = (entries) => (entries || []).filter((entry) =>
 
 const pickAudioEntryFromZip = (entries, requestedAudioFilename) => {
   const targetBaseName = getPathBaseName(requestedAudioFilename);
-  const isAudioName = isAudioEntryName;
   const safeEntries = entries.filter((entry) => (
-    isAudioName(entry.name)
+    isAudioEntryName(entry.name)
     && Number.isFinite(entry.uncompressedSize)
     && entry.uncompressedSize > 0
     && entry.uncompressedSize <= MAX_ZIP_AUDIO_ENTRY_BYTES
@@ -528,6 +616,19 @@ const pickAudioEntryFromZip = (entries, requestedAudioFilename) => {
     const exactBaseMatch = safeEntries.find((entry) => getPathBaseName(entry.name) === targetBaseName);
     if (exactBaseMatch) {
       return exactBaseMatch;
+    }
+  }
+
+  // If the requested audio file exists in the archive but was rejected for
+  // exceeding MAX_ZIP_AUDIO_ENTRY_BYTES, return null so callers report the
+  // size limit instead of falling back to an unrelated hitsound .wav.
+  if (requestedPath || targetBaseName) {
+    const oversizedMatch = findOversizedAudioEntries(entries).some((entry) => (
+      (requestedPath && normalizePath(entry.name).toLowerCase() === requestedPath)
+      || (targetBaseName && getPathBaseName(entry.name) === targetBaseName)
+    ));
+    if (oversizedMatch) {
+      return null;
     }
   }
 

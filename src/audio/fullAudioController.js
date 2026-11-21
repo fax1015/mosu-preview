@@ -17,7 +17,11 @@ import {
   writeCachedFullAudioBlob,
 } from './cache.js';
 import { extractFullBeatmapAudio, shouldRetryExtractionInPopup } from './fullAudioExtractionCore.js';
-import { waitForAudioElementReady, waitForAudioElementSeek } from './mediaEvents.js';
+import {
+  AUDIO_SEEK_SETTLE_TOLERANCE_SEC,
+  waitForAudioElementReady,
+  waitForAudioElementSeek,
+} from './mediaEvents.js';
 import { createTrackFrameSeeker } from './frameSeeker.js';
 import {
   FETCH_TIMEOUT_FAILOVER_MS,
@@ -66,9 +70,32 @@ const createFullAudioController = ({
   syncPlaybackDuration,
   renderFrame,
   getCurrentMapsetInfo,
+  // Optional overrides for unit tests; production callers rely on the defaults.
+  deps = {},
 }) => {
+  const {
+    sendMessage = sendRuntimeMessage,
+    readCachedBlob = readCachedFullAudioBlob,
+    writeCachedBlob = writeCachedFullAudioBlob,
+    ensureCachedInfo = ensureCachedMapsetInfo,
+    extractAudio = extractFullBeatmapAudio,
+    createFrameSeeker = createTrackFrameSeeker,
+    waitForReady = waitForAudioElementReady,
+    waitForSeek = waitForAudioElementSeek,
+    createAudio = () => new Audio(),
+  } = deps;
+
   // Set while the full track is an MP3 or Ogg Vorbis (see audio/frameSeeker.js).
   let frameSeeker = null;
+  let activePopupExtractionController = null;
+
+  const abortPopupExtraction = () => {
+    if (activePopupExtractionController) {
+      activePopupExtractionController.abort();
+      registry.releaseAbortController(activePopupExtractionController);
+      activePopupExtractionController = null;
+    }
+  };
 
   const releaseFrameSeeker = () => {
     frameSeeker?.dispose();
@@ -146,6 +173,8 @@ const createFullAudioController = ({
   };
 
   const configureAudioPreview = (setId, previewTimeMs, { skipPreviewClip = false } = {}) => {
+    state.fullAudioJobId += 1;
+    abortPopupExtraction();
     setFullAudioState({
       previewSetId: null,
       activeSetId: null,
@@ -160,13 +189,13 @@ const createFullAudioController = ({
 
     setFullAudioObjectUrl(null);
 
-    if (!normalizeNumericId(setId)) {
+    const normalizedSetId = normalizeNumericId(setId);
+    if (!normalizedSetId) {
       setAudioElementSource('', 0);
       hideAudioBadge();
       return;
     }
 
-    const normalizedSetId = String(setId);
     setFullAudioState({
       previewSetId: normalizedSetId,
       activeSetId: normalizedSetId,
@@ -242,23 +271,31 @@ const createFullAudioController = ({
     // Only used for the preflight probe below, which just needs *some* valid
     // position. The real commit re-reads the playhead (see commitMapTimeMs).
     const preflightMapTimeMs = state.currentTimeMs;
-    const wasPlaying = state.isPlaying;
     const fullAudioUrl = URL.createObjectURL(audioBlob);
 
+    let testAudio = null;
+    const releaseTestAudio = () => {
+      if (!testAudio) {
+        return;
+      }
+      try {
+        testAudio.removeAttribute?.('src');
+        testAudio.load?.();
+      } catch {
+        // Ignore cleanup failures on detached or mock audio elements.
+      }
+      testAudio = null;
+    };
+
     try {
-      const testAudio = new Audio();
-      const releaseTestAudio = () => {
-        testAudio.removeAttribute('src');
-        testAudio.load();
-      };
+      testAudio = createAudio();
       testAudio.preload = 'auto';
       testAudio.src = fullAudioUrl;
       testAudio.load();
 
-      const ready = await waitForAudioElementReady(testAudio);
+      const ready = await waitForReady(testAudio);
       if (!ready || jobId !== state.fullAudioJobId) {
         addDebugLog('audio: hotswap failed, media element not ready');
-        releaseTestAudio();
         URL.revokeObjectURL(fullAudioUrl);
         return false;
       }
@@ -272,7 +309,6 @@ const createFullAudioController = ({
 
       if (!testSeekOk) {
         addDebugLog('audio: hotswap failed, preflight seek rejected');
-        releaseTestAudio();
         URL.revokeObjectURL(fullAudioUrl);
         return false;
       }
@@ -280,10 +316,9 @@ const createFullAudioController = ({
       const testSeekTargetSec = Math.max(0, Number.isFinite(testAudio.duration)
         ? Math.min(preflightMapTimeMs / 1000, testAudio.duration)
         : preflightMapTimeMs / 1000);
-      const testSeekSettled = await waitForAudioElementSeek(testAudio, {
+      const testSeekSettled = await waitForSeek(testAudio, {
         expectedTimeSec: testSeekTargetSec,
       });
-      releaseTestAudio();
       if (!testSeekSettled || jobId !== state.fullAudioJobId) {
         addDebugLog('audio: hotswap failed, preflight seek did not settle');
         URL.revokeObjectURL(fullAudioUrl);
@@ -293,9 +328,11 @@ const createFullAudioController = ({
       addDebugLog(`audio: hotswap preflight failed (${error?.message || 'unknown error'})`);
       URL.revokeObjectURL(fullAudioUrl);
       return false;
+    } finally {
+      releaseTestAudio();
     }
 
-    const nextFrameSeeker = await createTrackFrameSeeker({
+    const nextFrameSeeker = await createFrameSeeker({
       state,
       blob: audioBlob,
       filename: sourceAudioFilename,
@@ -305,6 +342,7 @@ const createFullAudioController = ({
       return null;
     });
     if (jobId !== state.fullAudioJobId) {
+      nextFrameSeeker?.dispose();
       URL.revokeObjectURL(fullAudioUrl);
       return false;
     }
@@ -318,27 +356,55 @@ const createFullAudioController = ({
       state.audio.pause();
     }
 
+    const previousFrameSeeker = frameSeeker;
     const previousAudioState = {
       src: state.audio?.src || '',
       anchorMapMs: state.audioAnchorMapMs,
       syncEnabled: state.audioSyncEnabled,
       fullAudioObjectUrl: state.fullAudioObjectUrl,
+      fullAudioSliceUrl: state.fullAudioSliceUrl,
+      fullAudioDurationMs: state.fullAudioDurationMs,
+    };
+    const cleanupSupersededSwap = () => {
+      if (previousFrameSeeker && previousFrameSeeker !== frameSeeker) {
+        previousFrameSeeker.dispose();
+      }
+      if (nextFrameSeeker && nextFrameSeeker !== frameSeeker) {
+        nextFrameSeeker.dispose();
+      }
+      if (state.fullAudioObjectUrl !== fullAudioUrl && state.audio?.src !== fullAudioUrl) {
+        URL.revokeObjectURL(fullAudioUrl);
+      }
     };
     const rollbackCommittedSwap = () => {
       URL.revokeObjectURL(fullAudioUrl);
-      releaseFrameSeeker();
+      if (frameSeeker === nextFrameSeeker) {
+        frameSeeker?.dispose();
+        frameSeeker = previousFrameSeeker;
+      } else {
+        nextFrameSeeker?.dispose();
+      }
+      state.fullAudioSliceUrl = previousAudioState.fullAudioSliceUrl || null;
+      state.fullAudioDurationMs = previousAudioState.fullAudioDurationMs || 0;
       state.fullAudioObjectUrl = previousAudioState.fullAudioObjectUrl || null;
       setAudioElementSource(previousAudioState.src, previousAudioState.anchorMapMs);
       state.audioSyncEnabled = previousAudioState.syncEnabled;
     };
 
-    releaseFrameSeeker();
+    // Keep previousFrameSeeker intact until the new swap commits so a rollback
+    // can restore its slice URL without pointing the element at a revoked blob.
     frameSeeker = nextFrameSeeker;
+    state.fullAudioSliceUrl = null;
     state.fullAudioDurationMs = nextFrameSeeker?.durationMs ?? 0;
     state.fullAudioObjectUrl = fullAudioUrl;
     const sourceChanged = setAudioElementSource(fullAudioUrl, 0);
-    const realReady = await waitForAudioElementReady(state.audio, { requireFreshEvent: sourceChanged });
-    if (!realReady || jobId !== state.fullAudioJobId) {
+    const realReady = await waitForReady(state.audio, { requireFreshEvent: sourceChanged });
+    if (jobId !== state.fullAudioJobId) {
+      addDebugLog('audio: hotswap superseded while waiting for media element');
+      cleanupSupersededSwap();
+      return false;
+    }
+    if (!realReady) {
       addDebugLog('audio: hotswap failed, media element not ready after commit');
       rollbackCommittedSwap();
       return false;
@@ -363,6 +429,7 @@ const createFullAudioController = ({
     const commitToken = beginAudioOperation();
     holdForAudioSeek(commitMapTimeMs);
 
+    const prevSrc = state.audio?.src || '';
     let hasSyncedSeek = false;
     try {
       // Full audio may be marginally shorter than the mapped duration, so clamp
@@ -377,20 +444,55 @@ const createFullAudioController = ({
 
     if (!hasSyncedSeek) {
       addDebugLog('audio: hotswap failed, seek sync rejected after commit');
-      rollbackCommittedSwap();
-      releaseAudioClock();
+      if (jobId === state.fullAudioJobId) {
+        rollbackCommittedSwap();
+        releaseAudioClock();
+      } else {
+        cleanupSupersededSwap();
+      }
       return false;
     }
 
-    const rawSeekTargetSec = (
-      commitMapTimeMs + getAudioOutputLatencyMapMs() - state.audioAnchorMapMs
-    ) / 1000;
-    const seekTargetSec = Math.max(0, Number.isFinite(state.audio.duration)
-      ? Math.min(rawSeekTargetSec, state.audio.duration)
-      : rawSeekTargetSec);
-    const seekSettled = await waitForAudioElementSeek(state.audio, {
-      expectedTimeSec: seekTargetSec,
-    });
+    const usedFrameSeekerSlice = Boolean(
+      state.audio?.src
+      && state.audio.src !== prevSrc
+      && state.fullAudioSliceUrl
+      && state.audio.src === state.fullAudioSliceUrl,
+    );
+    let seekSettled = false;
+    if (usedFrameSeekerSlice) {
+      // FrameSeeker loads a fresh Blob slice (audio.load()), so no `seeked`
+      // event fires and playback starts at currentTime === 0 anchored at
+      // state.audioAnchorMapMs.
+      seekSettled = await waitForReady(state.audio, {
+        requireFreshEvent: true,
+        timeoutMs: 2500,
+      });
+      if (seekSettled && jobId === state.fullAudioJobId && isCurrentAudioOperation(commitToken)) {
+        const rawSliceTimeSec = Number(state.audio?.currentTime) || 0;
+        seekSettled = state.audio.src === state.audioAnchorSrc
+          && Math.abs(rawSliceTimeSec) <= AUDIO_SEEK_SETTLE_TOLERANCE_SEC;
+      }
+    } else {
+      const rawSeekTargetSec = (
+        commitMapTimeMs + getAudioOutputLatencyMapMs() - state.audioAnchorMapMs
+      ) / 1000;
+      const seekTargetSec = Math.max(0, Number.isFinite(state.audio.duration)
+        ? Math.min(rawSeekTargetSec, state.audio.duration)
+        : rawSeekTargetSec);
+      seekSettled = await waitForSeek(state.audio, {
+        expectedTimeSec: seekTargetSec,
+      });
+    }
+
+    // Check job supersession unconditionally before touching state/badge, even
+    // when a newer audio operation (from the new map) also bumped commitToken.
+    if (jobId !== state.fullAudioJobId) {
+      addDebugLog('audio: hotswap superseded before seek settled');
+      cleanupSupersededSwap();
+      return false;
+    }
+
     const landedMapMs = getAudioMappedTimeMs();
     if (Math.abs(landedMapMs - commitMapTimeMs) > 1) {
       addDebugLog(
@@ -402,13 +504,16 @@ const createFullAudioController = ({
     // playhead. Its own continuation will position and resume it, so the swap
     // stops here rather than rolling back a source that is perfectly good.
     const isSupersededCommit = !isCurrentAudioOperation(commitToken);
-    if (!isSupersededCommit && (!seekSettled || jobId !== state.fullAudioJobId)) {
+    if (!isSupersededCommit && !seekSettled) {
       addDebugLog('audio: hotswap failed, seek did not settle after commit');
       rollbackCommittedSwap();
       releaseAudioClock();
       return false;
     }
 
+    if (previousFrameSeeker && previousFrameSeeker !== frameSeeker) {
+      previousFrameSeeker.dispose();
+    }
     if (previousAudioState.fullAudioObjectUrl && previousAudioState.fullAudioObjectUrl !== fullAudioUrl) {
       URL.revokeObjectURL(previousAudioState.fullAudioObjectUrl);
     }
@@ -431,8 +536,7 @@ const createFullAudioController = ({
       return true;
     }
 
-    const shouldResumePlayback = wasPlaying || state.isPlaying;
-    if (!shouldResumePlayback) {
+    if (!state.isPlaying) {
       releaseAudioClock();
       addDebugLog('audio: hotswap success (paused state)');
       renderFrame();
@@ -442,6 +546,9 @@ const createFullAudioController = ({
     try {
       state.audio.playbackRate = state.playbackSpeed;
       await state.audio.play();
+      if (jobId !== state.fullAudioJobId) {
+        return false;
+      }
       if (!isCurrentAudioOperation(commitToken)) {
         addDebugLog('audio: hotswap resume superseded by a newer seek');
         return true;
@@ -452,7 +559,7 @@ const createFullAudioController = ({
       addDebugLog('audio: hotswap success, playback resumed');
       return true;
     } catch {
-      if (!isCurrentAudioOperation(commitToken)) {
+      if (jobId !== state.fullAudioJobId || !isCurrentAudioOperation(commitToken)) {
         return false;
       }
       setPlaybackState({ isPlaying: true });
@@ -463,7 +570,8 @@ const createFullAudioController = ({
   };
 
   const upgradeToFullAudioIfPossible = async (setId, audioFilename) => {
-    if (!audioFilename || !normalizeNumericId(setId)) {
+    const normalizedSetId = normalizeNumericId(setId);
+    if (!audioFilename || !normalizedSetId) {
       return;
     }
 
@@ -472,7 +580,7 @@ const createFullAudioController = ({
       return;
     }
 
-    const cacheKey = `${setId}:${normalizePath(audioFileName).toLowerCase()}`;
+    const cacheKey = `${normalizedSetId}:${normalizePath(audioFileName).toLowerCase()}`;
     if (
       state.fullAudioStatus === 'loading'
       && state.fullAudioCacheKey === cacheKey
@@ -483,13 +591,17 @@ const createFullAudioController = ({
     if (
       state.fullAudioStatus === 'ready'
       && state.fullAudioCacheKey === cacheKey
-      && state.fullAudioSetId === String(setId)
+      && state.fullAudioSetId === normalizedSetId
     ) {
       return;
     }
 
     state.fullAudioJobId += 1;
     const jobId = state.fullAudioJobId;
+    abortPopupExtraction();
+    // Capture mapset metadata synchronously before any awaits so a rapid map
+    // switch cannot poison this track's cache headers with the next map's info.
+    const mapsetInfo = getCurrentMapsetInfo?.();
     setFullAudioState({
       fullAudioStatus: 'loading',
       fullAudioCacheKey: cacheKey,
@@ -508,11 +620,11 @@ const createFullAudioController = ({
       CACHE_AUDIO_PROVIDER_LABEL,
       'Checking the audio cache',
     );
-    addDebugLog(`audio: full-load start set=${setId} file=${audioFileName}`);
+    addDebugLog(`audio: full-load start set=${normalizedSetId} file=${audioFileName}`);
 
     try {
       const cacheLookupStartedMs = performance.now();
-      const cachedBlob = await readCachedFullAudioBlob(setId, audioFileName);
+      const cachedBlob = await readCachedBlob(normalizedSetId, audioFileName);
       const cacheLookupMs = Math.round(performance.now() - cacheLookupStartedMs);
 
       // Staleness is checked on its own, before the cache result is interpreted.
@@ -534,8 +646,17 @@ const createFullAudioController = ({
         addDebugLog(`audio: cache hit (${Math.round(cachedBlob.size / 1024)} KB, looked up in ${cacheLookupMs} ms)`);
         // Entries cached before names were stored only ever get one chance to pick
         // theirs up, since the write path is skipped for a hit.
-        void ensureCachedMapsetInfo(setId, audioFileName, getCurrentMapsetInfo(), cachedBlob);
-        await hotswapToFullAudio(cachedBlob, setId, audioFileName, jobId, CACHE_AUDIO_PROVIDER_LABEL);
+        void ensureCachedInfo(normalizedSetId, audioFileName, mapsetInfo, cachedBlob);
+        const swapped = await hotswapToFullAudio(
+          cachedBlob,
+          normalizedSetId,
+          audioFileName,
+          jobId,
+          CACHE_AUDIO_PROVIDER_LABEL,
+        );
+        if (!swapped && jobId === state.fullAudioJobId && state.fullAudioStatus !== 'ready') {
+          throw new Error('Failed to load cached full audio.');
+        }
         return;
       }
       addDebugLog(`audio: cache miss (${cacheLookupMs} ms)`);
@@ -556,12 +677,12 @@ const createFullAudioController = ({
       // popup's own download exists for.
       let extractionResult = null;
       try {
-        extractionResult = await sendRuntimeMessage({
+        extractionResult = await sendMessage({
           type: 'extractFullAudio',
           jobId,
-          setId,
+          setId: normalizedSetId,
           audioFilename: audioFileName,
-          mapsetInfo: getCurrentMapsetInfo(),
+          mapsetInfo,
           providerOverride: state.providerOverride,
           providerPriority: state.providerPriority,
           disabledProviders: state.disabledProviders,
@@ -571,13 +692,43 @@ const createFullAudioController = ({
         addDebugLog(`audio: service worker message failed (${swMessageError?.message || swMessageError})`);
       }
 
+      if (jobId !== state.fullAudioJobId) {
+        addDebugLog('audio: full-load superseded while waiting for worker');
+        return;
+      }
+
       if (shouldRetryExtractionInPopup(extractionResult)) {
+        // Re-check the cache once before re-downloading: the service worker may
+        // have been terminated right after writing the extracted audio to cache.
+        const recoveredBlob = await readCachedBlob(normalizedSetId, audioFileName);
+        if (jobId !== state.fullAudioJobId) {
+          return;
+        }
+        if (recoveredBlob) {
+          setProviderState({ currentArchiveProviderLabel: CACHE_AUDIO_PROVIDER_LABEL });
+          setAudioBadgeWithProvider('loading', 'Loading full audio', CACHE_AUDIO_PROVIDER_LABEL, 'Using cached full audio');
+          addDebugLog(`audio: cache recovered after worker disconnect (${Math.round(recoveredBlob.size / 1024)} KB)`);
+          void ensureCachedInfo(normalizedSetId, audioFileName, mapsetInfo, recoveredBlob);
+          const swapped = await hotswapToFullAudio(
+            recoveredBlob,
+            normalizedSetId,
+            audioFileName,
+            jobId,
+            CACHE_AUDIO_PROVIDER_LABEL,
+          );
+          if (!swapped && jobId === state.fullAudioJobId && state.fullAudioStatus !== 'ready') {
+            throw new Error('Failed to load recovered cached full audio.');
+          }
+          return;
+        }
+
         addDebugLog(extractionResult?.cacheWriteFailed
           ? 'audio: worker could not cache the audio; retry download in popup'
           : 'audio: worker unreachable; retry download in popup');
-        // Tied to this job, so a map switch in the detached window stops a
-        // download nobody is waiting for instead of letting it run to completion.
+        // Tied to this job and stored on the controller so configureAudioPreview
+        // or a new upgradeToFullAudioIfPossible aborts even a header-stalled fetch.
         const controller = registry.createAbortController();
+        activePopupExtractionController = controller;
         const isSuperseded = () => {
           if (jobId === state.fullAudioJobId) {
             return false;
@@ -586,8 +737,8 @@ const createFullAudioController = ({
           return true;
         };
         try {
-          extractionResult = await extractFullBeatmapAudio({
-            setId,
+          extractionResult = await extractAudio({
+            setId: normalizedSetId,
             audioFilename: audioFileName,
             providerOverride: state.providerOverride,
             userPriority: state.providerPriority,
@@ -610,6 +761,9 @@ const createFullAudioController = ({
             },
           });
         } finally {
+          if (activePopupExtractionController === controller) {
+            activePopupExtractionController = null;
+          }
           registry.releaseAbortController(controller);
         }
       } else if (!extractionResult.ok) {
@@ -634,7 +788,10 @@ const createFullAudioController = ({
       setProviderState({ currentArchiveProviderLabel: sourceLabel });
       setAudioBadgeWithProvider('loading', 'Loading full audio', sourceLabel, `Downloading from ${sourceLabel}`);
 
-      let audioBlob = await readCachedFullAudioBlob(setId, audioFileName);
+      let audioBlob = await readCachedBlob(normalizedSetId, audioFileName);
+      if (jobId !== state.fullAudioJobId) {
+        return;
+      }
       let byteLength = Number.isFinite(cachedByteLength) ? cachedByteLength : (audioBlob?.size || 0);
       if (audioBlob) {
         addDebugLog(`audio: archive extracted in worker from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
@@ -642,11 +799,11 @@ const createFullAudioController = ({
         audioBlob = new Blob([extractionResult.audioBytes], { type: mime || getAudioMimeType(pickedAudioFilename) });
         byteLength = extractionResult.audioBytes.byteLength;
         addDebugLog(`audio: archive extracted in popup from ${sourceLabel} (${Math.round(byteLength / 1024)} KB)`);
-        const cachedWriteOk = await writeCachedFullAudioBlob(
-          setId,
+        const cachedWriteOk = await writeCachedBlob(
+          normalizedSetId,
           audioFileName,
           audioBlob,
-          getCurrentMapsetInfo(),
+          mapsetInfo,
         );
         if (!cachedWriteOk) {
           // Nothing else reports this: the audio still plays, but the next load
@@ -655,6 +812,9 @@ const createFullAudioController = ({
         }
       }
 
+      if (jobId !== state.fullAudioJobId) {
+        return;
+      }
       if (!audioBlob || byteLength <= 0) {
         throw new Error('Full-audio extraction returned no cached audio payload.');
       }
@@ -663,7 +823,10 @@ const createFullAudioController = ({
       if (normalizedPickedAudioFilename !== normalizedRequestedAudioFilename) {
         addDebugLog('audio: cache stored under requested metadata filename');
       }
-      await hotswapToFullAudio(audioBlob, setId, pickedAudioFilename, jobId, sourceLabel);
+      const swapped = await hotswapToFullAudio(audioBlob, normalizedSetId, pickedAudioFilename, jobId, sourceLabel);
+      if (!swapped && jobId === state.fullAudioJobId && state.fullAudioStatus !== 'ready') {
+        throw new Error('Failed to load extracted full audio.');
+      }
     } catch (error) {
       if (jobId === state.fullAudioJobId) {
         setFullAudioState({

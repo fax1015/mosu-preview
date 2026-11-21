@@ -10,6 +10,13 @@ const FULL_AUDIO_CACHE_PRUNE_INTERVAL_MS = 1000 * 60 * 30;
 const FULL_AUDIO_CACHE_LAST_PRUNE_KEY = 'fullAudioCacheLastPruneMs';
 const FULL_AUDIO_CACHE_ALIASES_KEY = 'fullAudioCacheAliasesV1';
 let fullAudioCacheDebugLogger = null;
+let cacheMutationQueue = Promise.resolve();
+
+const enqueueCacheMutation = (task) => {
+  const next = cacheMutationQueue.then(task, task);
+  cacheMutationQueue = next.catch(() => {});
+  return next;
+};
 
 const setFullAudioCacheDebugLogger = (logger) => {
   fullAudioCacheDebugLogger = typeof logger === 'function' ? logger : null;
@@ -88,7 +95,22 @@ const getAudioMimeType = (filename) => {
   return 'audio/mpeg';
 };
 
-const normalizePath = (path) => String(path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+const normalizePath = (path) => {
+  const segments = String(path || '').replace(/\\/g, '/').split('/');
+  const clean = [];
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (!trimmed || trimmed === '.') {
+      continue;
+    }
+    if (trimmed === '..') {
+      clean.pop();
+      continue;
+    }
+    clean.push(trimmed);
+  }
+  return clean.join('/');
+};
 
 const getPathBaseName = (path) => {
   const normalized = normalizePath(path);
@@ -98,7 +120,11 @@ const getPathBaseName = (path) => {
 
 const makeFullAudioCacheKey = (setId, audioFilename) => {
   const safeSetId = encodeURIComponent(String(setId || '').trim());
-  const safeFile = encodeURIComponent(normalizePath(audioFilename).toLowerCase());
+  const normalizedPath = normalizePath(audioFilename).toLowerCase();
+  if (!safeSetId || !normalizedPath) {
+    return '';
+  }
+  const safeFile = encodeURIComponent(normalizedPath);
   return `https://osu.ppy.sh/beatmapsets/${safeSetId}/audio/${safeFile}`;
 };
 
@@ -196,11 +222,11 @@ const compactFullAudioAliasesForCacheKeys = (aliases, cacheKeys) => {
 
   return Object.fromEntries(
     Object.entries(aliases)
-      .filter(([aliasKey, primaryKey]) => liveKeys.has(aliasKey) || liveKeys.has(primaryKey)),
+      .filter(([, primaryKey]) => liveKeys.has(primaryKey)),
   );
 };
 
-const pruneFullAudioCacheAliasesForDeletedKeys = async (deletedKeys) => {
+const pruneFullAudioCacheAliasesForDeletedKeys = (deletedKeys) => enqueueCacheMutation(async () => {
   if (!hasStorageArea('local') || !deletedKeys || deletedKeys.size === 0) {
     return false;
   }
@@ -211,7 +237,7 @@ const pruneFullAudioCacheAliasesForDeletedKeys = async (deletedKeys) => {
     return false;
   }
   return writeFullAudioCacheAliases(nextAliases);
-};
+});
 
 const getFullAudioCacheUsage = async () => {
   if (!('caches' in globalThis)) {
@@ -248,7 +274,7 @@ const getFullAudioCacheUsage = async () => {
   }
 };
 
-const clearFullAudioCache = async () => {
+const clearFullAudioCache = () => enqueueCacheMutation(async () => {
   let clearedCache = false;
   if ('caches' in globalThis) {
     try {
@@ -260,9 +286,9 @@ const clearFullAudioCache = async () => {
 
   await writeFullAudioCacheAliases({});
   return clearedCache;
-};
+});
 
-const updateFullAudioCacheAliases = async (setId, audioFilename) => {
+const updateFullAudioCacheAliases = (setId, audioFilename) => enqueueCacheMutation(async () => {
   const aliasEntries = getFullAudioCacheAliasEntries(setId, audioFilename);
   if (aliasEntries.length === 0 || !hasStorageArea('local')) {
     return false;
@@ -270,10 +296,17 @@ const updateFullAudioCacheAliases = async (setId, audioFilename) => {
 
   const aliases = await readFullAudioCacheAliases();
   for (const [aliasKey, primaryKey] of aliasEntries) {
-    aliases[aliasKey] = primaryKey;
+    if (Object.hasOwn(aliases, aliasKey) && aliases[aliasKey] !== primaryKey) {
+      // Two distinct subdirectories share this basename (e.g. v1/audio.mp3 and
+      // v2/audio.mp3); drop the ambiguous basename alias so bare lookups do
+      // not arbitrarily serve the wrong track.
+      delete aliases[aliasKey];
+    } else {
+      aliases[aliasKey] = primaryKey;
+    }
   }
   return writeFullAudioCacheAliases(aliases);
-};
+});
 
 const readLastFullAudioPruneTime = async () => {
   if (!hasStorageArea('local')) {
@@ -322,7 +355,7 @@ const parseCachedSizeBytes = (response) => {
   return null;
 };
 
-const pruneFullAudioCache = async ({ force = false } = {}) => {
+const pruneFullAudioCacheInternal = async ({ force = false, targetFreeBytes = 0 } = {}) => {
   if (!('caches' in globalThis)) {
     return;
   }
@@ -365,6 +398,7 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
     }
 
     let totalBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+    let freedBytes = 0;
 
     const deletedRequests = new Set();
     for (const entry of entries) {
@@ -375,21 +409,28 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
 
       if (await cache.delete(entry.request)) {
         totalBytes -= entry.size;
+        freedBytes += entry.size;
         deletedRequests.add(entry.request.url);
       }
     }
 
-    if (totalBytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES) {
+    const needToEvict = () => (
+      totalBytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES
+      || (targetFreeBytes > 0 && freedBytes < targetFreeBytes)
+    );
+
+    if (needToEvict()) {
       const candidates = entries
         .filter((entry) => !deletedRequests.has(entry.request.url))
         .sort((a, b) => (a.cachedAtMs || 0) - (b.cachedAtMs || 0));
 
       for (const entry of candidates) {
-        if (totalBytes <= FULL_AUDIO_CACHE_TOTAL_MAX_BYTES) {
+        if (!needToEvict()) {
           break;
         }
         if (await cache.delete(entry.request)) {
           totalBytes -= entry.size;
+          freedBytes += entry.size;
           deletedRequests.add(entry.request.url);
         }
       }
@@ -408,12 +449,14 @@ const pruneFullAudioCache = async ({ force = false } = {}) => {
         await writeFullAudioCacheAliases(compactAliases);
       }
     }
+
+    await writeLastFullAudioPruneTime(now);
   } catch (error) {
     debugFullAudioCache(`cache: prune failed (${error?.message || error})`);
-  } finally {
-    await writeLastFullAudioPruneTime(now);
   }
 };
+
+const pruneFullAudioCache = (options = {}) => enqueueCacheMutation(() => pruneFullAudioCacheInternal(options));
 
 const readCachedFullAudioBlob = async (setId, audioFilename) => {
   if (!setId || !audioFilename || !('caches' in globalThis)) {
@@ -423,10 +466,18 @@ const readCachedFullAudioBlob = async (setId, audioFilename) => {
     const cache = await caches.open(FULL_AUDIO_CACHE_NAME);
     const now = Date.now();
     const aliases = await readFullAudioCacheAliases();
+    const normalizedPath = normalizePath(audioFilename).toLowerCase();
+    const hasSubdirectory = normalizedPath.includes('/');
+    const primaryKey = getPrimaryFullAudioCacheKey(setId, audioFilename);
+
     for (const key of getFullAudioCacheKeyCandidates(setId, audioFilename)) {
       let matchedKey = key;
       let response = await cache.match(key);
-      if (!response && aliases[key]) {
+      // When the caller requested an explicit subdirectory (e.g. v2/audio.mp3),
+      // do not follow a basename alias pointing to a different subdirectory
+      // (e.g. v1/audio.mp3). Direct root-level cache.match(key) still works.
+      const canFollowAlias = Boolean(aliases[key]) && (!hasSubdirectory || aliases[key] === primaryKey);
+      if (!response && canFollowAlias) {
         matchedKey = aliases[key];
         response = await cache.match(matchedKey);
       }
@@ -439,7 +490,7 @@ const readCachedFullAudioBlob = async (setId, audioFilename) => {
           continue;
         }
         return await response.blob();
-      } else if (aliases[key]) {
+      } else if (canFollowAlias) {
         await pruneFullAudioCacheAliasesForDeletedKeys(new Set([key]));
       }
     }
@@ -528,7 +579,10 @@ const ensureCachedMapsetInfo = async (setId, audioFilename, mapsetInfo, blob) =>
       }
 
       const response = await cache.match(matchedKey);
-      if (!response || hasMapsetInfo(parseCachedMapsetInfo(response))) {
+      if (!response) {
+        continue;
+      }
+      if (hasMapsetInfo(parseCachedMapsetInfo(response))) {
         return false;
       }
 
@@ -552,7 +606,13 @@ const ensureCachedMapsetInfo = async (setId, audioFilename, mapsetInfo, blob) =>
   }
 };
 
-const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo = null) => {
+const writeCachedFullAudioBlob = async (
+  setId,
+  audioFilename,
+  blob,
+  mapsetInfo = null,
+  { awaitPrune = false } = {},
+) => {
   if (
     !setId
     || !audioFilename
@@ -571,17 +631,24 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo =
     if (!key) {
       return false;
     }
-    await cache.put(
-      key,
-      new Response(blob, {
-        headers: {
-          'content-type': blob.type || getAudioMimeType(audioFilename),
-          'x-mosu-cached-at': String(Date.now()),
-          'x-mosu-size': String(blob.size),
-          ...buildMapsetInfoHeaders(mapsetInfo),
-        },
-      }),
-    );
+    const buildResponse = () => new Response(blob, {
+      headers: {
+        'content-type': blob.type || getAudioMimeType(audioFilename),
+        'x-mosu-cached-at': String(Date.now()),
+        'x-mosu-size': String(blob.size),
+        ...buildMapsetInfoHeaders(mapsetInfo),
+      },
+    });
+    try {
+      await cache.put(key, buildResponse());
+    } catch (putError) {
+      if (putError?.name !== 'QuotaExceededError') {
+        throw putError;
+      }
+      debugFullAudioCache('cache: quota exceeded, evicting oldest entries before retry');
+      await pruneFullAudioCache({ force: true, targetFreeBytes: blob.size });
+      await cache.put(key, buildResponse());
+    }
     // Awaited: the prune below rewrites the same storage key, and starting it
     // before this lands could write back an alias map without the new entry.
     await updateFullAudioCacheAliases(setId, audioFilename);
@@ -590,7 +657,13 @@ const writeCachedFullAudioBlob = async (setId, audioFilename, blob, mapsetInfo =
     // would keep growing past its ceiling. Force one as soon as we know we are
     // actually over budget.
     const { bytes } = await getFullAudioCacheUsage();
-    void pruneFullAudioCache({ force: bytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES });
+    const forcePrune = bytes > FULL_AUDIO_CACHE_TOTAL_MAX_BYTES;
+    const prunePromise = pruneFullAudioCache({ force: forcePrune });
+    if (awaitPrune) {
+      await prunePromise;
+    } else {
+      void prunePromise;
+    }
     return true;
   } catch (error) {
     debugFullAudioCache(`cache: write failed (${error?.message || error})`);

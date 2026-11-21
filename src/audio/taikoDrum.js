@@ -120,7 +120,10 @@ const TAIKO_DRUM = Object.freeze({
 // @generated-taiko-voices-end
 
 const getTaikoDrumTier = (volume) => {
-  const numeric = Number(volume);
+  const raw = volume == null || (typeof volume === 'string' && volume.trim() === '')
+    ? Number.NaN
+    : Number(volume);
+  const numeric = Number.isFinite(raw) ? raw : 100;
   if (numeric >= TAIKO_VOLUME_HARD) {
     return 'drum';
   }

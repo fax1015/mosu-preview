@@ -38,6 +38,12 @@ const DECODER_DELAY_SAMPLES = 529;
 // silence; starting a little early keeps that ahead of the target.
 const SEEK_PREROLL_FRAMES = 2;
 
+// Maximum bytes scanned when searching for initial sync or resynchronising
+// after damage/trailing tags, and lookahead needed to validate two consecutive
+// MPEG frames in one buffer window (max valid MPEG frame is < 2890 bytes).
+const MAX_SYNC_SCAN_BYTES = 64 * 1024;
+const SYNC_PAIR_LOOKAHEAD_BYTES = 4096;
+
 /**
  * Reads the four header bytes of an MPEG audio frame. Returns null for anything
  * that is not a usable header, including free-format bitrates, whose frame
@@ -106,11 +112,20 @@ const readAscii = (reader, offset, length) => {
  * string and 12 bytes of LAME fields before the packed delay/padding.
  */
 const readXingFrame = async (reader, offset, header) => {
+  const frameEnd = offset + header.frameLength;
+  if (frameEnd > reader.size) return null;
+  if (!reader.has(offset, header.frameLength)) await reader.load(offset, header.frameLength);
   const tagOffset = offset + header.xingOffset;
-  if (!reader.has(tagOffset, 160)) await reader.load(offset, header.xingOffset + 160);
+  if (tagOffset + 8 > frameEnd) {
+    return offset + 40 <= frameEnd && readAscii(reader, offset + 36, 4) === 'VBRI'
+      ? { hasLameTag: false, encoderDelay: 0 }
+      : null;
+  }
   const tag = readAscii(reader, tagOffset, 4);
   if (tag !== 'Xing' && tag !== 'Info') {
-    return readAscii(reader, offset + 36, 4) === 'VBRI' ? { hasLameTag: false, encoderDelay: 0 } : null;
+    return offset + 40 <= frameEnd && readAscii(reader, offset + 36, 4) === 'VBRI'
+      ? { hasLameTag: false, encoderDelay: 0 }
+      : null;
   }
   const flags = reader.byte(tagOffset + 7);
   let cursor = tagOffset + 8;
@@ -118,12 +133,69 @@ const readXingFrame = async (reader, offset, header) => {
   if (flags & 2) cursor += 4; // byte count
   if (flags & 4) cursor += 100; // TOC
   if (flags & 8) cursor += 4; // quality
+  if (cursor + 24 > frameEnd) {
+    return { hasLameTag: false, encoderDelay: 0 };
+  }
   const encoder = readAscii(reader, cursor, 4);
-  if (!/^(LAME|Lavf|Lavc)$/.test(encoder) || !reader.has(cursor, 24)) {
+  if (!/^(LAME|Lavf|Lavc)$/.test(encoder)) {
     return { hasLameTag: false, encoderDelay: 0 };
   }
   const packed = (reader.byte(cursor + 21) << 16) | (reader.byte(cursor + 22) << 8) | reader.byte(cursor + 23);
   return { hasLameTag: true, encoderDelay: packed >> 12 };
+};
+
+/**
+ * Scans up to `maxScanBytes` from `startOffset` for two consecutive valid MPEG
+ * frames belonging to the same stream (matching `requiredStream` when set).
+ * Scans synchronously within each loaded chunk to avoid per-byte async waits
+ * and backward chunk thrashing on chunk boundaries.
+ */
+const scanForSyncedFrame = async (reader, startOffset, maxScanBytes, requiredStream = null) => {
+  const limit = Math.min(reader.size - 4, startOffset + maxScanBytes - 1);
+  let probe = startOffset;
+  while (probe <= limit) {
+    if (!reader.has(probe, 4)) {
+      await reader.load(probe, Math.min(reader.size - probe, SYNC_PAIR_LOOKAHEAD_BYTES * 2));
+    }
+    const buf = reader.bytes;
+    const base = reader.start;
+    const chunkEnd = Math.min(limit, reader.end - 4);
+    for (; probe <= chunkEnd; probe += 1) {
+      const idx = probe - base;
+      if (buf[idx] !== 0xff || (buf[idx + 1] & 0xe0) !== 0xe0) continue;
+      const candidate = parseFrameHeader(buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]);
+      if (!candidate) continue;
+      if (requiredStream && !sameStream(candidate, requiredStream)) continue;
+      const nextOffset = probe + candidate.frameLength;
+      if (nextOffset + 4 > reader.size) continue;
+      let after;
+      if (reader.has(nextOffset, 4)) {
+        const nextIdx = nextOffset - base;
+        after = parseFrameHeader(buf[nextIdx], buf[nextIdx + 1], buf[nextIdx + 2], buf[nextIdx + 3]);
+      } else {
+        // Load starting at `probe` with enough lookahead to include `nextOffset + 4`
+        // so a failed probe does not discard the bytes immediately after `probe`.
+        await reader.load(probe, candidate.frameLength + 4);
+        after = reader.has(nextOffset, 4)
+          ? parseFrameHeader(
+            reader.byte(nextOffset),
+            reader.byte(nextOffset + 1),
+            reader.byte(nextOffset + 2),
+            reader.byte(nextOffset + 3),
+          )
+          : null;
+        if (after && sameStream(candidate, after)) {
+          return { offset: probe, header: candidate };
+        }
+        probe += 1;
+        break;
+      }
+      if (after && sameStream(candidate, after)) {
+        return { offset: probe, header: candidate };
+      }
+    }
+  }
+  return null;
 };
 
 /**
@@ -142,7 +214,7 @@ const buildMp3FrameIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) =
   await reader.load(0, 10);
 
   let offset = 0;
-  if (readAscii(reader, 0, 3) === 'ID3') {
+  if (reader.size >= 10 && readAscii(reader, 0, 3) === 'ID3') {
     const size = ((reader.byte(6) & 0x7f) << 21) | ((reader.byte(7) & 0x7f) << 14)
       | ((reader.byte(8) & 0x7f) << 7) | (reader.byte(9) & 0x7f);
     offset = 10 + size + ((reader.byte(5) & 0x10) ? 10 : 0);
@@ -150,17 +222,10 @@ const buildMp3FrameIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) =
 
   // The first frame is only trusted when the next one follows where it says it
   // ends; a stray 0xFFE in tag padding would otherwise start the index there.
-  let first = null;
-  for (let scanned = 0; offset + 4 <= reader.size && scanned < 64 * 1024; offset += 1, scanned += 1) {
-    const header = await readHeaderAt(reader, offset);
-    if (!header) continue;
-    const next = await readHeaderAt(reader, offset + header.frameLength);
-    if (next && sameStream(header, next)) {
-      first = header;
-      break;
-    }
-  }
-  if (!first) return null;
+  const synced = await scanForSyncedFrame(reader, offset, MAX_SYNC_SCAN_BYTES);
+  if (!synced) return null;
+  offset = synced.offset;
+  const first = synced.header;
 
   let startSkip = 0;
   const xing = first.layer === 3 ? await readXingFrame(reader, offset, first) : null;
@@ -191,20 +256,11 @@ const buildMp3FrameIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) =
     let header = headerIfLoaded(offset);
     if (header === undefined) header = await readHeaderAt(reader, offset);
     if (!header || !sameStream(header, first) || offset + header.frameLength > reader.size) {
-      // Damage or trailing tags. Resynchronise on the next run of two frames;
-      // give up at the end of the data.
-      let found = -1;
-      for (let probe = offset + 1; probe + 4 <= reader.size; probe += 1) {
-        const candidate = await readHeaderAt(reader, probe);
-        if (!candidate || !sameStream(candidate, first)) continue;
-        const after = await readHeaderAt(reader, probe + candidate.frameLength);
-        if (after && sameStream(after, first)) {
-          found = probe;
-          break;
-        }
-      }
-      if (found < 0) break;
-      offset = found;
+      // Damage or trailing tags. Resynchronise on the next run of two frames
+      // within a bounded window; give up if none appears.
+      const resynced = await scanForSyncedFrame(reader, offset + 1, MAX_SYNC_SCAN_BYTES, first);
+      if (!resynced) break;
+      offset = resynced.offset;
       continue;
     }
 
@@ -229,6 +285,9 @@ const buildMp3FrameIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) =
   if (count === 0) return null;
 
   const sampleRate = first.sampleRate;
+  const durationMs = ((totalSamples - startSkip) / sampleRate) * 1000;
+  if (!(durationMs > 0)) return null;
+
   const startMs = new Float64Array(count);
   for (let i = 0; i < count; i += 1) {
     startMs[i] = ((samples[i] - startSkip) / sampleRate) * 1000;
@@ -240,7 +299,7 @@ const buildMp3FrameIndex = async (blob, { chunkBytes = 4 * 1024 * 1024 } = {}) =
     count,
     offsets: frameOffsets,
     startMs,
-    durationMs: ((totalSamples - startSkip) / sampleRate) * 1000,
+    durationMs,
     sampleRate,
     isVbr,
     prerollPoints: SEEK_PREROLL_FRAMES,

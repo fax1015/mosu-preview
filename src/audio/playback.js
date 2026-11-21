@@ -1,3 +1,4 @@
+import { waitForAudioElementReady } from './mediaEvents.js';
 import { seekAudioElementToMapTime } from './seek.js';
 
 // Owns the playback mode, the frame loop and every seek. Nothing
@@ -50,6 +51,8 @@ const createPlaybackController = ({
     // Resolves true once the element reports the seek landed, false if it never
     // did. The default suits callers with no media element worth waiting on.
     waitForAudioSeek = async () => true,
+    waitForAudioReady = (audioElement, options) => waitForAudioElementReady(audioElement, options),
+    resetMediaClock = null,
     requestFrame = (callback) => requestAnimationFrame(callback),
     cancelFrame = (frameId) => cancelAnimationFrame(frameId),
     isHidden = () => globalThis.document?.visibilityState === 'hidden',
@@ -92,8 +95,29 @@ const createPlaybackController = ({
     state.audioAnchorMapMs + ((Number(state.audio?.currentTime) || 0) * 1000)
   );
 
+  const SLICE_READY_TIMEOUT_MS = 2500;
+  let activeSliceReadyController = null;
+  let pendingSliceReadyPromise = null;
+  let pendingSeekIsSlice = false;
+
+  const abortPendingSliceReady = () => {
+    if (activeSliceReadyController) {
+      activeSliceReadyController.abort();
+      activeSliceReadyController = null;
+    }
+    pendingSliceReadyPromise = null;
+  };
+
+  const didSeekReloadSlice = (prevSrc) => Boolean(
+    state.audio?.src
+    && state.audio.src !== prevSrc
+    && state.fullAudioSliceUrl
+    && state.audio.src === state.fullAudioSliceUrl,
+  );
+
   const beginAudioOperation = () => {
     state.audioOpToken += 1;
+    abortPendingSliceReady();
     return state.audioOpToken;
   };
 
@@ -101,15 +125,24 @@ const createPlaybackController = ({
 
   // Whether the element is really where it was sent. Checked before playing
   // rather than after, so a refused seek never puts a single frame of the wrong
-  // audio out.
-  const hasAudioLandedNear = (intendedMapMs) => (
-    !Number.isFinite(intendedMapMs)
-    || Math.abs(
-      getRawAudioMappedTimeMs()
-      - intendedMapMs
-      - getAudioOutputLatencyMapMs()
-    ) <= AUDIO_SEEK_LANDING_TOLERANCE_MS
-  );
+  // audio out. When a frameSeeker loaded a slice, the slice starts at
+  // currentTime === 0 anchored at state.audioAnchorMapMs.
+  const hasAudioLandedNear = (intendedMapMs, { isSliceSeek = false } = {}) => {
+    if (isSliceSeek) {
+      if (state.audioAnchorSrc && state.audio?.src !== state.audioAnchorSrc) {
+        return false;
+      }
+      return Math.abs(getRawAudioMappedTimeMs() - state.audioAnchorMapMs) <= AUDIO_SEEK_LANDING_TOLERANCE_MS;
+    }
+    return (
+      !Number.isFinite(intendedMapMs)
+      || Math.abs(
+        getRawAudioMappedTimeMs()
+        - intendedMapMs
+        - getAudioOutputLatencyMapMs(),
+      ) <= AUDIO_SEEK_LANDING_TOLERANCE_MS
+    );
+  };
 
   const pauseAudioElement = () => {
     if (state.audio && !state.audio.paused) {
@@ -119,6 +152,14 @@ const createPlaybackController = ({
 
   // Whether the pending `state.rafId` is a hidden-window tick rather than a frame.
   let loopIsOnTimer = false;
+  let seekFrameId = null;
+
+  const clearSeekFrame = () => {
+    if (seekFrameId !== null) {
+      cancelFrame(seekFrameId);
+      seekFrameId = null;
+    }
+  };
 
   const clearCurrentRaf = () => {
     if (state.rafId !== null) {
@@ -129,6 +170,7 @@ const createPlaybackController = ({
       }
       state.rafId = null;
     }
+    clearSeekFrame();
   };
 
   const requestLoop = () => {
@@ -175,6 +217,7 @@ const createPlaybackController = ({
   // that as the truth.
   const holdForAudioSeek = (mapTimeMs) => {
     pauseAudioElement();
+    resetMediaClock?.();
     syncVisualClockToMapTime(mapTimeMs);
     state.playbackMode = 'seeking';
     if (state.isPlaying) {
@@ -185,6 +228,7 @@ const createPlaybackController = ({
   // Makes the media element authoritative and takes its position as the truth,
   // rather than assuming it landed exactly where it was sent.
   const adoptAudioClock = () => {
+    resetMediaClock?.();
     state.playbackMode = 'audio';
     syncVisualClockToMapTime(getAudioMappedTimeMs());
     if (state.isPlaying) {
@@ -238,8 +282,10 @@ const createPlaybackController = ({
   const stopPlayback = () => {
     beginAudioOperation();
     state.pendingSeekMapMs = null;
+    pendingSeekIsSlice = false;
     state.isPlaying = false;
     state.playbackMode = 'none';
+    resetMediaClock?.();
     clearCurrentRaf();
     pauseAudioElement();
     // Pin the clock where it stopped. Sound scheduled ahead of this point is
@@ -264,6 +310,13 @@ const createPlaybackController = ({
 
     if (state.playbackMode === 'manual') {
       resumeAudioClockAfterStall();
+      if (state.playbackMode === 'seeking') {
+        renderFrame();
+        if (state.rafId === null) {
+          requestLoop();
+        }
+        return;
+      }
     }
 
     if (state.playbackMode === 'audio') {
@@ -313,7 +366,6 @@ const createPlaybackController = ({
    * The playback loop paints directly: it already runs on the frame clock, and
    * going through here would cost it a frame.
    */
-  let seekFrameId = null;
   const renderSeekFrame = () => {
     if (seekFrameId !== null) {
       return;
@@ -324,9 +376,10 @@ const createPlaybackController = ({
     });
   };
 
-  const completePendingSeek = async (token, settled) => {
+  const completePendingSeek = async (token, settled, { isSliceSeek = false } = {}) => {
     const targetMapMs = state.pendingSeekMapMs;
     state.pendingSeekMapMs = null;
+    pendingSeekIsSlice = false;
 
     if (!settled) {
       // The element never reported the seek. The intent still stands — that is
@@ -338,7 +391,7 @@ const createPlaybackController = ({
       return;
     }
 
-    if (!hasAudioLandedNear(targetMapMs)) {
+    if (!hasAudioLandedNear(targetMapMs, { isSliceSeek })) {
       // The element clamped instead of seeking -- the audio does not actually
       // cover this timestamp. Keep the timestamp the user asked for rather than
       // dragging them to wherever the audio stopped.
@@ -384,6 +437,8 @@ const createPlaybackController = ({
       while (state.pendingSeekMapMs !== null) {
         const token = state.audioOpToken;
         const targetMapMs = state.pendingSeekMapMs;
+        const isSliceSeek = pendingSeekIsSlice;
+        const sliceReadyPromise = isSliceSeek ? pendingSliceReadyPromise : null;
         // Keep the wait attached to the newest drag position. Browsers may
         // coalesce several currentTime assignments into one `seeked` event;
         // validating that event against this iteration's stale target would
@@ -391,14 +446,16 @@ const createPlaybackController = ({
         const getLatestTargetSec = () => getAudioSeekTargetSec(
           state.pendingSeekMapMs ?? targetMapMs,
         );
-        const settled = await waitForAudioSeek(state.audio, getLatestTargetSec);
+        const settled = isSliceSeek && sliceReadyPromise
+          ? await sliceReadyPromise
+          : await waitForAudioSeek(state.audio, getLatestTargetSec);
         if (!isCurrentAudioOperation(token)) {
           // Superseded while we waited: whatever the element just reported
           // belongs to a target the user has already moved past. Wait for the
           // seek that replaced it instead.
           continue;
         }
-        await completePendingSeek(token, settled);
+        await completePendingSeek(token, settled, { isSliceSeek });
       }
     } finally {
       isSettlingSeek = false;
@@ -423,6 +480,7 @@ const createPlaybackController = ({
 
     if (!state.audioSyncEnabled || !state.audio?.src) {
       state.pendingSeekMapMs = null;
+      pendingSeekIsSlice = false;
       if (state.playbackMode === 'seeking') {
         // The audio went away under an earlier seek. Nothing is coming to
         // release the hold, so this seek has to.
@@ -434,6 +492,7 @@ const createPlaybackController = ({
 
     holdForAudioSeek(targetMapMs);
 
+    const prevSrc = state.audio.src || '';
     let hasAudioTarget = false;
     try {
       hasAudioTarget = seekAudioToMapTime(targetMapMs);
@@ -443,9 +502,21 @@ const createPlaybackController = ({
 
     if (!hasAudioTarget) {
       state.pendingSeekMapMs = null;
+      pendingSeekIsSlice = false;
       releaseAudioClock();
       renderSeekFrame();
       return;
+    }
+
+    const reloadedSlice = didSeekReloadSlice(prevSrc);
+    pendingSeekIsSlice = reloadedSlice;
+    if (reloadedSlice) {
+      activeSliceReadyController = new AbortController();
+      pendingSliceReadyPromise = waitForAudioReady(state.audio, {
+        requireFreshEvent: true,
+        timeoutMs: SLICE_READY_TIMEOUT_MS,
+        signal: activeSliceReadyController.signal,
+      });
     }
 
     state.pendingSeekMapMs = targetMapMs;
@@ -461,6 +532,7 @@ const createPlaybackController = ({
   const startManualPlayback = () => {
     beginAudioOperation();
     state.pendingSeekMapMs = null;
+    pendingSeekIsSlice = false;
     clearCurrentRaf();
     pauseAudioElement();
     if (state.currentTimeMs >= state.durationMs) {
@@ -484,10 +556,13 @@ const createPlaybackController = ({
 
     const token = beginAudioOperation();
     state.pendingSeekMapMs = null;
+    pendingSeekIsSlice = false;
     clearCurrentRaf();
     pauseAudioElement();
+    resetMediaClock?.();
 
     const targetMapMs = state.currentTimeMs;
+    const prevSrc = state.audio.src || '';
     let hasAudioTarget = false;
     try {
       hasAudioTarget = seekAudioToMapTime(targetMapMs);
@@ -499,15 +574,26 @@ const createPlaybackController = ({
       return 'unavailable';
     }
 
+    const reloadedSlice = didSeekReloadSlice(prevSrc);
     syncVisualClockToMapTime(targetMapMs);
     state.playbackMode = 'seeking';
     state.audio.playbackRate = state.playbackSpeed;
 
-    const settled = await waitForAudioSeek(state.audio, getAudioSeekTargetSec(targetMapMs));
+    let settled = false;
+    if (reloadedSlice) {
+      activeSliceReadyController = new AbortController();
+      settled = await waitForAudioReady(state.audio, {
+        requireFreshEvent: true,
+        timeoutMs: SLICE_READY_TIMEOUT_MS,
+        signal: activeSliceReadyController.signal,
+      });
+    } else {
+      settled = await waitForAudioSeek(state.audio, getAudioSeekTargetSec(targetMapMs));
+    }
     if (!isCurrentAudioOperation(token)) {
       return 'superseded';
     }
-    if (!settled || !hasAudioLandedNear(targetMapMs)) {
+    if (!settled || !hasAudioLandedNear(targetMapMs, { isSliceSeek: reloadedSlice })) {
       // Either the element never reported the seek, or it landed somewhere else
       // entirely -- a preview clip clamping to its own end, most often, which is
       // how starting mid-map used to drop the preview into the clip.
@@ -548,21 +634,40 @@ const createPlaybackController = ({
       state.currentTimeMs = 0;
     }
 
-    const result = await startAudioPlayback();
+    // Mark playing intent immediately so a rapid second toggle cancels cleanly
+    // and a seek mid-start preserves playing intent.
+    state.isPlaying = true;
+    let result;
+    try {
+      result = await startAudioPlayback();
+    } catch {
+      if (state.isPlaying) {
+        stopPlayback();
+      }
+      return false;
+    }
     if (result === 'started') {
       return true;
     }
     if (result === 'superseded') {
       return state.isPlaying;
     }
+    if (!state.isPlaying) {
+      return false;
+    }
     return startManualPlayback();
   };
 
   const restartPreview = () => {
-    seekTo(0);
-    if (state.mapData && state.durationMs > 0 && !state.isPlaying) {
-      void togglePlayback();
+    if (!state.mapData || state.durationMs <= 0) {
+      return;
     }
+    if (!state.isPlaying) {
+      syncVisualClockToMapTime(0);
+      void togglePlayback();
+      return;
+    }
+    seekTo(0);
   };
 
   return {

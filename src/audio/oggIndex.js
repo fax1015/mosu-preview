@@ -40,6 +40,11 @@ const FLAG_CONTINUED = 0x01;
 const FLAG_EOS = 0x04;
 const PAGE_HEADER_BYTES = 27;
 const MAX_PAGE_BYTES = PAGE_HEADER_BYTES + 255 + (255 * 255);
+const MAX_ID_HEADER_BYTES = 64;
+const MAX_SETUP_HEADER_BYTES = 1024 * 1024;
+// 2^53 / 2^32 = 0x00200000: granules with high >= this exceed safe integer
+// precision or encode negative signed 64-bit positions other than -1.
+const MAX_SAFE_GRANULE_HIGH = 0x00200000;
 
 // Ogg's CRC-32: polynomial 0x04c11db7, unreflected, zero initial value and no
 // final xor. That makes it linear, which is what lets a page be rebuilt from a
@@ -99,7 +104,7 @@ const readModeBlockFlags = (setup) => {
     if (readBits(at, 8) > 63 || readBits(at + 8, 16) || readBits(at + 24, 16)) break;
     at += 41;
     modeCount += 1;
-    if (modeCount > 63) break;
+    if (modeCount > 64) break;
     if (readBits(at, 6) + 1 === modeCount) confirmedCount = modeCount;
   }
   if (!confirmedCount) return null;
@@ -182,8 +187,8 @@ const buildOggVorbisIndex = async (
     const number = packetNumber;
     packetNumber += 1;
     if (number === 0) {
-      const id = packet.bytes;
-      if (id.length < 30 || id[0] !== 1 || String.fromCharCode(...id.slice(1, 7)) !== 'vorbis') fail();
+      const id = packet.bytes.subarray(0, packet.byteLength);
+      if (id.length < 30 || id[0] !== 1 || String.fromCharCode(...id.subarray(1, 7)) !== 'vorbis') fail();
       sampleRate = (id[12] | (id[13] << 8) | (id[14] << 16)) + (id[15] * 0x1000000);
       blockSizes[0] = 1 << (id[28] & 0x0f);
       blockSizes[1] = 1 << (id[28] >> 4);
@@ -191,11 +196,13 @@ const buildOggVorbisIndex = async (
       return null;
     }
     if (number === 1) {
-      if (packet.bytes[0] !== 3) fail();
+      // Comment packets may carry megabytes of embedded album art; we only need
+      // to confirm the packet type byte without buffering the comment body.
+      if (packet.length === 0 || packet.first !== 3) fail();
       return null;
     }
     if (number === 2) {
-      modeFlags = readModeBlockFlags(packet.bytes);
+      modeFlags = readModeBlockFlags(packet.bytes.subarray(0, packet.byteLength));
       if (!modeFlags) fail();
       modeMask = ((1 << (Math.floor(Math.log2(Math.max(1, modeFlags.length - 1))) + 1)) - 1) << 1;
       return null;
@@ -244,9 +251,12 @@ const buildOggVorbisIndex = async (
       const flags = reader.byte(offset + 5);
       const granuleLow = u32(offset + 6);
       const granuleHigh = u32(offset + 10);
-      const granule = granuleHigh === 0xffffffff && granuleLow === 0xffffffff ? -1 : (granuleHigh * 0x100000000) + granuleLow;
+      const isUnknownGranule = granuleHigh === 0xffffffff && granuleLow === 0xffffffff;
+      if (!isUnknownGranule && granuleHigh >= MAX_SAFE_GRANULE_HIGH) fail();
+      const granule = isUnknownGranule ? -1 : (granuleHigh * 0x100000000) + granuleLow;
       const pageSerial = u32(offset + 14);
       const segments = reader.byte(offset + 26);
+      if (offset + PAGE_HEADER_BYTES + segments > reader.size) break;
       await ensure(offset, PAGE_HEADER_BYTES + segments);
       let bodyLength = 0;
       for (let s = 0; s < segments; s += 1) bodyLength += reader.byte(offset + PAGE_HEADER_BYTES + s);
@@ -278,6 +288,9 @@ const buildOggVorbisIndex = async (
         lacing[lacingUsed + s] = size;
         if (!open) {
           if (s === 0 && (flags & FLAG_CONTINUED)) fail();
+          const maxBufferedBytes = packetNumber === 0
+            ? MAX_ID_HEADER_BYTES
+            : (packetNumber === 2 ? MAX_SETUP_HEADER_BYTES : 0);
           open = {
             startPage: pageIndex,
             startSegment: s,
@@ -285,15 +298,32 @@ const buildOggVorbisIndex = async (
             startCrc: crc,
             first: size > 0 ? reader.byte(at) : 0,
             length: 0,
-            bytes: packetNumber < 3 ? [] : null,
+            bytes: maxBufferedBytes > 0 ? new Uint8Array(Math.min(maxBufferedBytes, 4096)) : null,
+            byteLength: 0,
+            maxBufferedBytes,
           };
         } else if (s === 0 && !(flags & FLAG_CONTINUED)) {
           fail();
         }
+        if (open.length === 0 && size > 0) {
+          open.first = reader.byte(at);
+        }
+        if (open.bytes && size > 0) {
+          const nextByteLength = open.byteLength + size;
+          if (nextByteLength > open.maxBufferedBytes) fail();
+          if (nextByteLength > open.bytes.length) {
+            const grown = new Uint8Array(Math.min(open.maxBufferedBytes, Math.max(open.bytes.length * 2, nextByteLength)));
+            grown.set(open.bytes.subarray(0, open.byteLength));
+            open.bytes = grown;
+          }
+        }
         for (let i = 0; i < size; i += 1) {
           const byte = reader.byte(at + i);
           crc = crcByte(crc, byte);
-          if (open.bytes) open.bytes.push(byte);
+          if (open.bytes) {
+            open.bytes[open.byteLength] = byte;
+            open.byteLength += 1;
+          }
         }
         open.length += size;
         at += size;
@@ -319,8 +349,9 @@ const buildOggVorbisIndex = async (
         pageEndSamples[pageIndex] = lastSamples;
         if (granuleOffset === null) granuleOffset = granule - lastSamples;
         else if (flags & FLAG_EOS) {
-          // The last page may trim the final packet's padding.
-          if (granule > lastSamples + granuleOffset) fail();
+          // The last page may trim the final packet's padding, but cannot
+          // jump backwards before the previous page or exceed the decoded count.
+          if (granule < lastGranule || granule > lastSamples + granuleOffset) fail();
         } else agrees = granule - lastSamples === granuleOffset;
         lastGranule = granule;
       }
@@ -336,6 +367,7 @@ const buildOggVorbisIndex = async (
   // that starts below has the samples before zero dropped.
   const timelineShift = Math.min(granuleOffset, 0);
   const origin = Math.max(granuleOffset, 0);
+  if (!(lastGranule > origin)) return null;
   const toMs = (sampleCount) => (sampleCount / sampleRate) * 1000;
 
   const points = [0];

@@ -17,14 +17,19 @@ import {
   MIN_BEAT_LENGTH_MS,
   OSU_WIDTH,
   PIECE_MAX_ALPHA,
+  PLAYFIELD_BACKGROUND,
   WHITE,
+  buildPrefixMaxEndTimes,
   drawPieceRect,
   drawSelectionRings,
   easeOutQuint,
+  findFirstIndexWithEndAtOrAfter,
+  findLastIndexAtOrBefore,
   getBarCornerRadius,
   linearGradient,
   mixColours,
   pickHitTarget,
+  traceRoundedRect,
   withAlpha,
 } from './shared.js';
 
@@ -39,16 +44,6 @@ const darken = (colour, amount) => ({
   g: colour.g / (1 + amount),
   b: colour.b / (1 + amount),
 });
-
-const traceRoundedRect = (ctx, x, y, width, height, radius) => {
-  ctx.beginPath();
-  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
-  if (r > 0 && typeof ctx.roundRect === 'function') {
-    ctx.roundRect(x, y, width, height, r);
-  } else {
-    ctx.rect(x, y, width, height);
-  }
-};
 
 /**
  * The end of a hold note, after ArgonHoldNoteTailPiece: a solid cap in the
@@ -78,22 +73,33 @@ const getTailGlow = (ctx, height, colour) => {
 };
 
 const drawHoldTail = (ctx, x, y, width, height, colour) => {
+  if (!(width > 0) || !(height > 0)) return;
   const radius = getBarCornerRadius(height);
   ctx.fillStyle = withAlpha(darken(colour, 0.35), 0.92);
-  traceRoundedRect(ctx, x, y, width, height, radius);
-  ctx.fill();
+  if (traceRoundedRect(ctx, x, y, width, height, radius)) {
+    ctx.fill();
+  }
   ctx.save();
   ctx.translate(x, y);
   ctx.globalCompositeOperation = 'lighter';
   ctx.fillStyle = getTailGlow(ctx, height, colour);
-  traceRoundedRect(ctx, 0, 0, width, height / 2, radius);
-  ctx.fill();
+  if (traceRoundedRect(ctx, 0, 0, width, height / 2, radius)) {
+    ctx.fill();
+  }
   ctx.restore();
   const outline = Math.max(1, Math.min(width, height) * 0.1);
   ctx.strokeStyle = withAlpha(WHITE, 0.6);
   ctx.lineWidth = outline;
-  traceRoundedRect(ctx, x + (outline / 2), y + (outline / 2), width - outline, height - outline, radius - (outline / 2));
-  ctx.stroke();
+  if (traceRoundedRect(
+    ctx,
+    x + (outline / 2),
+    y + (outline / 2),
+    width - outline,
+    height - outline,
+    radius - (outline / 2),
+  )) {
+    ctx.stroke();
+  }
 };
 
 // --- layout -------------------------------------------------------------------
@@ -290,15 +296,25 @@ const generateManiaBarLines = (controlPoints, firstObjectTime, lastObjectEndTime
     const meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
     const beatLength = Math.max(MIN_BEAT_LENGTH_MS, point.beatLength);
     const barLength = beatLength * meter;
-    const endTime = i < sections.length - 1 ? sections[i + 1].time : lastHitTime + barLength;
-    let startTime = point.time;
-    if (!(point.time > generationStart)) {
-      startTime = point.time + (Math.ceil((generationStart - point.time) / barLength) * barLength);
+    const isLastSection = i === sections.length - 1;
+    const endTime = isLastSection ? lastHitTime + barLength : sections[i + 1].time;
+    // Omit the section's own first bar line before advancing past generationStart,
+    // so a section starting before t = 0 doesn't drop a later visible bar line.
+    let startTime = point.omitFirstBarLine ? point.time + barLength : point.time;
+    let beat = point.omitFirstBarLine ? 1 : 0;
+    if (startTime < generationStart) {
+      const skippedBars = Math.ceil((generationStart - startTime) / barLength);
+      startTime += skippedBars * barLength;
+      beat += skippedBars;
     }
-    if (point.omitFirstBarLine) startTime += barLength;
 
-    let beat = 0;
-    for (let t = startTime; endTime - t > -1e-3 && lines.length < 200000; t += barLength, beat += 1) {
+    // Stop strictly before the next timing section's start time so BPM changes
+    // do not emit duplicate overlapping bar lines at the section boundary.
+    for (
+      let t = startTime;
+      (isLastSection ? endTime - t > -1e-3 : t < endTime - 1e-3) && lines.length < 200000;
+      t += barLength, beat += 1
+    ) {
       const rounded = Math.round(t);
       const time = Math.abs(t - rounded) < 1e-3 ? rounded : t;
       lines.push({ time, major: beat % meter === 0 });
@@ -315,7 +331,12 @@ const generateManiaBarLines = (controlPoints, firstObjectTime, lastObjectEndTime
  * every hit too: a note is one, a hold note's head and tail are one each.
  */
 const buildManiaKeyPresses = (objects, columnOf, columnCount) => {
-  const presses = Array.from({ length: columnCount }, () => ({ press: [], release: [], hits: [] }));
+  const presses = Array.from({ length: columnCount }, () => ({
+    press: [],
+    release: [],
+    maxRelease: [],
+    hits: [],
+  }));
   const nextInColumn = new Array(objects.length).fill(null);
   const lastSeen = new Array(columnCount).fill(-1);
   for (let i = objects.length - 1; i >= 0; i -= 1) {
@@ -340,8 +361,10 @@ const buildManiaKeyPresses = (objects, columnOf, columnCount) => {
       release = endTime + (canDelayFully ? releaseDelay : (next.time - endTime) * 0.9);
     }
     const entry = presses[column];
+    const prevMaxRelease = entry.maxRelease.length > 0 ? entry.maxRelease[entry.maxRelease.length - 1] : -Infinity;
     entry.press.push(object.time);
     entry.release.push(release);
+    entry.maxRelease.push(Math.max(prevMaxRelease, release));
     entry.hits.push(object.time);
     if (isHold) entry.hits.push(endTime);
   }
@@ -351,28 +374,16 @@ const buildManiaKeyPresses = (objects, columnOf, columnCount) => {
   return presses;
 };
 
-// The index of the last value at or before `time` in a sorted list, or -1.
-const lastAtOrBefore = (values, time) => {
-  let low = 0;
-  let high = values.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (values[middle] <= time) low = middle + 1;
-    else high = middle;
-  }
-  return low - 1;
-};
-
 /**
  * How lit a lane is from its key: up to full in 50ms while held, settling to
  * half over 250ms, and from wherever it was down to nothing over 250ms once
  * let go, all OutQuint -- the timing of lazer's column lighting.
  */
 const getLaneLight = (presses, time) => {
-  const index = lastAtOrBefore(presses.press, time);
+  const index = findLastIndexAtOrBefore(presses.press, time);
   if (index < 0) return 0;
   const press = presses.press[index];
-  const release = presses.release[index];
+  const release = presses.maxRelease ? Math.max(presses.release[index], presses.maxRelease[index]) : presses.release[index];
   const lightWhileHeld = (heldFor) => (heldFor < 50
     ? easeOutQuint(heldFor / 50)
     : 1 - (0.5 * easeOutQuint(Math.min(1, (heldFor - 50) / 250))));
@@ -388,10 +399,10 @@ const getLaneLight = (presses, time) => {
  * back over 200ms. All OutQuint but the 500ms.
  */
 const getKeyState = (presses, time) => {
-  const index = lastAtOrBefore(presses.press, time);
+  const index = findLastIndexAtOrBefore(presses.press, time);
   if (index < 0) return { lit: 0, background: 0, flash: 0 };
   const press = presses.press[index];
-  const release = presses.release[index];
+  const release = presses.maxRelease ? Math.max(presses.release[index], presses.maxRelease[index]) : presses.release[index];
   const heldFor = Math.min(time, release) - press;
   const litWhileHeld = easeOutQuint(Math.min(1, heldFor / 70));
   const backgroundWhileHeld = heldFor < 70
@@ -445,6 +456,12 @@ export class ManiaRenderer {
 
   setBeatmap() {
     this.cache = null;
+    this.hitTargets = [];
+  }
+
+  dispose() {
+    this.cache = null;
+    this.hitTargets = [];
   }
 
   getControlPoints() {
@@ -529,16 +546,19 @@ export class ManiaRenderer {
     );
   }
 
-  // Bar lines and key presses depend only on the objects and the timing.
+  // Bar lines, key presses, prefix-max end times, and per-object scroll beats
+  // depend only on the objects, timing points, column count, and SV mode.
   getCache() {
     const objects = this.mapData?.objects;
     const controlPoints = this.getControlPoints();
     const columnCount = this.getColumnCount();
+    const withSv = this.appliesInheritedSv();
     if (
       this.cache
       && this.cache.objects === objects
       && this.cache.controlPoints === controlPoints
       && this.cache.columnCount === columnCount
+      && this.cache.withSv === withSv
     ) {
       return this.cache;
     }
@@ -551,22 +571,57 @@ export class ManiaRenderer {
       columnCount - 1,
     );
     let lastEnd = 0;
-    for (const object of list) {
-      lastEnd = Math.max(lastEnd, Number(object.endTime) || Number(object.time) || 0);
+    const objectStartBeats = new Float64Array(list.length);
+    const objectEndBeats = new Float64Array(list.length);
+    for (let i = 0; i < list.length; i += 1) {
+      const object = list[i];
+      const end = Number.isFinite(object.endTime) ? object.endTime : (Number(object.time) || 0);
+      if (end > lastEnd) lastEnd = end;
+      objectStartBeats[i] = getElapsedBeatsAt(controlPoints, object.time, { withSv });
+      objectEndBeats[i] = end > object.time
+        ? getElapsedBeatsAt(controlPoints, end, { withSv })
+        : objectStartBeats[i];
+    }
+    const barLines = generateManiaBarLines(controlPoints, list[0]?.time ?? 0, lastEnd);
+    const barLineBeats = new Float64Array(barLines.length);
+    for (let i = 0; i < barLines.length; i += 1) {
+      barLineBeats[i] = getElapsedBeatsAt(controlPoints, barLines[i].time, { withSv });
     }
     this.cache = {
       objects,
       controlPoints,
       columnCount,
+      withSv,
       columnOf,
-      barLines: generateManiaBarLines(controlPoints, list[0]?.time ?? 0, lastEnd),
+      prefixMaxEnd: buildPrefixMaxEndTimes(list),
+      objectStartBeats,
+      objectEndBeats,
+      objectSnapColours: null,
+      objectEndSnapColours: null,
+      barLines,
+      barLineBeats,
       presses: buildManiaKeyPresses(list, columnOf, columnCount),
     };
     return this.cache;
   }
 
+  ensureSnapColours(cache) {
+    if (cache.objectSnapColours) return;
+    const list = Array.isArray(cache.objects) ? cache.objects : [];
+    const startColours = new Array(list.length);
+    const endColours = new Array(list.length);
+    for (let i = 0; i < list.length; i += 1) {
+      const object = list[i];
+      startColours[i] = this.getSnapColour(object.time);
+      const isHold = object.kind === 'hold' || object.endTime > object.time;
+      endColours[i] = isHold ? this.getSnapColour(object.endTime) : startColours[i];
+    }
+    cache.objectSnapColours = startColours;
+    cache.objectEndSnapColours = endColours;
+  }
+
   render(ctx, width, height) {
-    ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
+    ctx.fillStyle = PLAYFIELD_BACKGROUND;
     ctx.fillRect(0, 0, width, height);
 
     const cache = this.getCache();
@@ -582,6 +637,8 @@ export class ManiaRenderer {
       pixelRatio,
     );
     const time = this.currentTimeMs;
+    const currentBeats = getElapsedBeatsAt(cache.controlPoints, time, { withSv: cache.withSv });
+    const pixelsPerBeat = this.getPixelsPerBeat(layout.scrollLength);
     this.hitTargets = [];
 
     ctx.save();
@@ -590,8 +647,8 @@ export class ManiaRenderer {
       ctx.scale(1, -1);
     }
     this.drawLanes(ctx, layout, cache, time);
-    this.drawBarLines(ctx, layout, cache, time);
-    this.drawNotes(ctx, layout, cache, time);
+    this.drawBarLines(ctx, layout, cache, time, currentBeats, pixelsPerBeat);
+    this.drawNotes(ctx, layout, cache, time, currentBeats, pixelsPerBeat);
     this.drawHitExplosions(ctx, layout, cache, time);
     this.drawKeys(ctx, layout, cache, time);
     ctx.restore();
@@ -616,20 +673,27 @@ export class ManiaRenderer {
     const { hitY, noteHeight } = layout;
     const band = noteHeight * HIT_EXPLOSION_BAND;
     const corner = getBarCornerRadius(noteHeight);
+    let saved = false;
     for (const column of layout.columns) {
       const { hits } = cache.presses[column.index];
-      for (let i = lastAtOrBefore(hits, time); i >= 0; i -= 1) {
+      for (let i = findLastIndexAtOrBefore(hits, time); i >= 0; i -= 1) {
         const age = time - hits[i];
         if (age >= HIT_EXPLOSION_MS) break;
+        if (!saved) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          saved = true;
+        }
         // FadeOutFromOne with Easing.Out (OutQuad).
         const alpha = (1 - (age / HIT_EXPLOSION_MS)) ** 2;
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
         ctx.fillStyle = withAlpha(mixColours(column.colour, WHITE, 0.8), 0.85 * alpha);
-        traceRoundedRect(ctx, column.innerX, hitY - band, column.innerWidth, band, corner);
-        ctx.fill();
-        ctx.restore();
+        if (traceRoundedRect(ctx, column.innerX, hitY - band, column.innerWidth, band, corner)) {
+          ctx.fill();
+        }
       }
+    }
+    if (saved) {
+      ctx.restore();
     }
   }
 
@@ -661,9 +725,9 @@ export class ManiaRenderer {
 
   // A hairline across the stage every bar, a little brighter every fourth,
   // fading once it passes the line.
-  drawBarLines(ctx, layout, cache, time) {
-    const { barLines } = cache;
-    const { hitY, scrollLength } = layout;
+  drawBarLines(ctx, layout, cache, time, currentBeats, pixelsPerBeat) {
+    const { barLines, barLineBeats } = cache;
+    const { hitY } = layout;
     let drawn = 0;
     for (
       let i = findFirstIndexAtOrAfter(barLines, time - BAR_LINE_FADE_MS);
@@ -671,7 +735,7 @@ export class ManiaRenderer {
       i += 1
     ) {
       const line = barLines[i];
-      const y = hitY - this.getScrollOffset(time, line.time, scrollLength);
+      const y = hitY - ((barLineBeats[i] - currentBeats) * pixelsPerBeat);
       if (y < -2) break;
       const alpha = line.time >= time ? 1 : 1 - ((time - line.time) / BAR_LINE_FADE_MS);
       if (alpha <= 0.002) continue;
@@ -683,23 +747,29 @@ export class ManiaRenderer {
     }
   }
 
-  drawNotes(ctx, layout, cache, time) {
+  drawNotes(ctx, layout, cache, time, currentBeats, pixelsPerBeat) {
     const objects = this.mapData?.objects;
     if (!Array.isArray(objects) || objects.length === 0) return;
-    const { hitY, scrollLength, noteHeight } = layout;
+    const { hitY, noteHeight } = layout;
+    const { objectStartBeats, objectEndBeats, prefixMaxEnd } = cache;
+
+    if (this.timingNoteColours) {
+      this.ensureSnapColours(cache);
+    }
 
     // Notes leave the moment they are hit; holds stay until let go. Positions
     // only grow with time, so the first note above the top ends the search.
     const visible = [];
+    const startIndex = findFirstIndexWithEndAtOrAfter(prefixMaxEnd, time);
     for (
-      let i = findFirstIndexAtOrAfter(objects, time - (this.host.maxObjectDurationMs || 0));
+      let i = startIndex;
       i < objects.length && visible.length < 4000;
       i += 1
     ) {
       const object = objects[i];
       const isHold = object.kind === 'hold' || object.endTime > object.time;
       if (isHold ? object.endTime <= time : object.time <= time) continue;
-      const headBottom = hitY - this.getScrollOffset(time, object.time, scrollLength);
+      const headBottom = hitY - ((objectStartBeats[i] - currentBeats) * pixelsPerBeat);
       if (headBottom < -noteHeight) {
         if (object.time > time) break;
         continue;
@@ -707,6 +777,7 @@ export class ManiaRenderer {
       visible.push({ object, index: i, isHold, headBottom });
     }
 
+    const noteCorner = getBarCornerRadius(noteHeight);
     // Latest first, so an earlier note is drawn over a later one.
     for (let v = visible.length - 1; v >= 0; v -= 1) {
       const {
@@ -716,7 +787,7 @@ export class ManiaRenderer {
       if (!column) continue;
       const noteX = column.innerX;
       const noteWidth = column.innerWidth;
-      const colour = this.timingNoteColours ? this.getSnapColour(object.time) : column.colour;
+      const colour = this.timingNoteColours ? cache.objectSnapColours[index] : column.colour;
 
       if (isHold) {
         // DrawableHoldNote: once its head is hit the head stays on the line,
@@ -724,37 +795,48 @@ export class ManiaRenderer {
         // from there to half-way under the tail.
         const held = time >= object.time;
         const headBottomDrawn = held ? hitY : headBottom;
-        const tailBottom = hitY - this.getScrollOffset(time, object.endTime, scrollLength);
+        const tailBottom = hitY - ((objectEndBeats[index] - currentBeats) * pixelsPerBeat);
         const cutY = headBottomDrawn - (noteHeight / 2);
         const bodyTop = tailBottom - (noteHeight / 2);
         if (cutY > bodyTop) {
-          ctx.fillStyle = withAlpha(column.colour, held ? 0.42 : 0.3);
-          traceRoundedRect(ctx, noteX, bodyTop, noteWidth, cutY - bodyTop, getBarCornerRadius(noteHeight));
-          ctx.fill();
+          const visibleBodyTop = Math.max(0, bodyTop);
+          if (cutY > visibleBodyTop) {
+            ctx.fillStyle = withAlpha(column.colour, held ? 0.42 : 0.3);
+            if (traceRoundedRect(ctx, noteX, visibleBodyTop, noteWidth, cutY - visibleBodyTop, noteCorner)) {
+              ctx.fill();
+            }
+          }
         }
-        // Only a tail that has reached the cut needs cutting: a clip per hold
-        // note was most of the cost of drawing a long-note map.
-        const tailReachesCut = tailBottom > cutY;
-        if (tailReachesCut) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(column.x - 1, -1e5, column.width + 2, cutY + 1e5);
-          ctx.clip();
+        if (tailBottom >= 0) {
+          // Only a tail that has reached the cut needs cutting: a clip per hold
+          // note was most of the cost of drawing a long-note map.
+          const tailReachesCut = tailBottom > cutY;
+          if (tailReachesCut) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(column.x - 1, -1e5, column.width + 2, cutY + 1e5);
+            ctx.clip();
+          }
+          const tailColour = this.timingNoteColours ? cache.objectEndSnapColours[index] : column.colour;
+          drawHoldTail(ctx, noteX, tailBottom - noteHeight, noteWidth, noteHeight, tailColour);
+          if (tailReachesCut) ctx.restore();
         }
-        const tailColour = this.timingNoteColours ? this.getSnapColour(object.endTime) : column.colour;
-        drawHoldTail(ctx, noteX, tailBottom - noteHeight, noteWidth, noteHeight, tailColour);
-        if (tailReachesCut) ctx.restore();
         drawPieceRect(ctx, noteX, headBottomDrawn - noteHeight, noteWidth, noteHeight, colour, PIECE_MAX_ALPHA);
-        // The whole hold note, from its tail to its head, as one target.
-        const holdTop = Math.min(tailBottom, headBottomDrawn) - noteHeight;
-        this.hitTargets.push({
-          index,
-          x: noteX,
-          y: holdTop,
-          width: noteWidth,
-          height: headBottomDrawn - holdTop,
-          corner: getBarCornerRadius(noteHeight),
-        });
+        // Clamp hold hit targets to the visible stage so off-screen tails do
+        // not produce giant out-of-canvas selection rings.
+        const rawHoldTop = Math.min(tailBottom, headBottomDrawn) - noteHeight;
+        const holdTop = Math.max(0, rawHoldTop);
+        const holdBottom = Math.min(hitY, headBottomDrawn);
+        if (holdBottom > holdTop) {
+          this.hitTargets.push({
+            index,
+            x: noteX,
+            y: holdTop,
+            width: noteWidth,
+            height: holdBottom - holdTop,
+            corner: noteCorner,
+          });
+        }
         continue;
       }
 
@@ -765,7 +847,7 @@ export class ManiaRenderer {
         y: headBottom - noteHeight,
         width: noteWidth,
         height: noteHeight,
-        corner: getBarCornerRadius(noteHeight),
+        corner: noteCorner,
       });
     }
   }

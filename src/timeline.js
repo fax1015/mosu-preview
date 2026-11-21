@@ -1,5 +1,11 @@
 import { clamp, findFirstIndexAtOrAfter } from './core/math.js';
 import { getCanvasContext } from './core/canvas.js';
+import {
+  MAX_MEASURE_LINES,
+  buildPrefixMaxEndTimes,
+  findFirstIndexWithEndAtOrAfter,
+  findLastIndexAtOrBefore,
+} from './renderers/shared.js';
 
 // The preview's timeline: the map itself (density bars from afar, single
 // objects up close) in the small strip between the speed and time controls,
@@ -203,14 +209,17 @@ const buildKiaiSections = (controlPoints) => {
   return sections;
 };
 
+const MAX_TIMING_METER = 1024;
+const getSectionTime = (section) => section.time;
+
 const buildTimingSections = (controlPoints) => (
   Array.isArray(controlPoints)
     ? controlPoints
-      .filter((point) => point?.uninherited && Number.isFinite(point.time) && point.beatLength > 0)
+      .filter((point) => point?.uninherited && Number.isFinite(point.time) && Number.isFinite(point.beatLength) && point.beatLength > 0)
       .map((point) => ({
         time: point.time,
         beatLength: point.beatLength,
-        meter: Number.isInteger(point.meter) && point.meter > 0 ? point.meter : 4,
+        meter: Number.isInteger(point.meter) && point.meter > 0 ? clamp(point.meter, 1, MAX_TIMING_METER) : 4,
       }))
       .sort((a, b) => a.time - b.time)
     : []
@@ -260,6 +269,7 @@ class TimelineRenderer {
     this.breaks = [];
     this.timingSections = [];
     this.maxObjectDurationMs = 0;
+    this.prefixMaxEnd = null;
     // Where the map stops: the song's end once the full track says how long it
     // is, the last object's end until then.
     this.lastObjectEndMs = 0;
@@ -296,6 +306,8 @@ class TimelineRenderer {
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
     this.visualDurationMs = this.durationMs;
     this.durationAnimation = null;
+    this.currentTimeMs = clamp(this.currentTimeMs, 0, this.durationMs);
+    this.lastFollowTimeMs = this.currentTimeMs;
     this.previewTimeMs = Number.isFinite(previewTimeMs) && previewTimeMs > 0 ? previewTimeMs : -1;
     this.kiaiSections = buildKiaiSections(mapData?.timingControlPoints);
     this.breaks = normaliseBreaks(mapData?.breaks);
@@ -317,13 +329,12 @@ class TimelineRenderer {
     // The indices pointed into the old array; a mania key count change can
     // even give a different number of notes.
     this.selection.clear();
-    // Objects are sorted by start time but may overlap, so finding the ones on
-    // screen has to look back by the longest of them.
+    this.prefixMaxEnd = buildPrefixMaxEndTimes(this.objects);
     this.maxObjectDurationMs = 0;
     this.lastObjectEndMs = 0;
     for (const object of this.objects) {
-      const time = Number(object?.time) || 0;
-      const endTime = Number(object?.endTime) || time;
+      const time = Number.isFinite(object?.time) ? object.time : 0;
+      const endTime = Number.isFinite(object?.endTime) ? Math.max(time, object.endTime) : time;
       this.maxObjectDurationMs = Math.max(this.maxObjectDurationMs, endTime - time);
       this.lastObjectEndMs = Math.max(this.lastObjectEndMs, endTime);
     }
@@ -346,11 +357,25 @@ class TimelineRenderer {
     if (objects === this.objects) {
       return;
     }
+    // If another morph is still mid-flight, advance its progress to `now` and
+    // carry it as the re-based starting point so rapid switches ease smoothly
+    // instead of snapping.
+    let priorMorph = null;
+    if (animate && this.densityMorph) {
+      const elapsed = clamp((now - this.densityMorph.startTime) / DENSITY_MORPH_MS, 0, 1);
+      if (elapsed < 1) {
+        priorMorph = {
+          from: this.densityMorph.from,
+          progress: easeOutCubic(elapsed),
+        };
+      }
+    }
     // The old map's bars, cached as they were, are where the morph starts.
     const from = {
       objects: this.objects,
       fullDensity: this.fullDensity,
       viewDensityCache: this.viewDensityCache,
+      priorMorph: priorMorph ? { from: { ...priorMorph.from, priorMorph: null }, progress: priorMorph.progress } : null,
     };
     this.kiaiSections = buildKiaiSections(mapData?.timingControlPoints);
     this.breaks = normaliseBreaks(mapData?.breaks);
@@ -359,6 +384,19 @@ class TimelineRenderer {
     this.densityMorph = animate && from.objects.length > 0
       ? { from, startTime: now, progress: 0 }
       : null;
+  }
+
+  dispose() {
+    this.objects = [];
+    this.prefixMaxEnd = null;
+    this.kiaiSections = [];
+    this.breaks = [];
+    this.timingSections = [];
+    this.fullDensity = null;
+    this.viewDensityCache = null;
+    this.densityMorph = null;
+    this.durationAnimation = null;
+    this.selection.clear();
   }
 
   isDensityMorphing() {
@@ -395,12 +433,18 @@ class TimelineRenderer {
     const currentVisualDurationMs = this.getVisualDuration();
     const previousDurationMs = this.durationMs;
     this.durationMs = nextDurationMs;
+    this.currentTimeMs = clamp(this.currentTimeMs, 0, nextDurationMs);
+    this.lastFollowTimeMs = this.currentTimeMs;
     if (nextDurationMs !== previousDurationMs) {
       this.fullDensity = null;
       this.viewDensityCache = null;
       if (this.densityMorph) {
         this.densityMorph.from.fullDensity = null;
         this.densityMorph.from.viewDensityCache = null;
+        if (this.densityMorph.from.priorMorph?.from) {
+          this.densityMorph.from.priorMorph.from.fullDensity = null;
+          this.densityMorph.from.priorMorph.from.viewDensityCache = null;
+        }
       }
       if (!this.fitsMap) {
         if (this.target.durationMs >= nextDurationMs) {
@@ -545,7 +589,7 @@ class TimelineRenderer {
 
   /** Zooms keeping the playhead where it is on screen, or centred if it is off it. */
   zoomAroundPlayhead(factor) {
-    const { startMs, durationMs } = this.view;
+    const { startMs, durationMs } = this.getTargetView();
     const ratio = (this.currentTimeMs - startMs) / durationMs;
     this.zoomAt(this.currentTimeMs, factor, ratio >= 0 && ratio <= 1 ? ratio : 0.5);
     this.resumeFollow();
@@ -615,9 +659,12 @@ class TimelineRenderer {
     let nearestDistanceMs = Infinity;
     let covering = -1;
 
-    // Long objects start before the window the heads are searched in, so the
-    // walk begins as far back as the longest of them.
-    const from = findFirstIndexAtOrAfter(objects, timeMs - toleranceMs - this.maxObjectDurationMs);
+    // When checking heads only, no object starting before timeMs - toleranceMs
+    // can match. When checking bodies too, prefixMaxEnd bounds the earliest
+    // object whose endTime can still reach timeMs - toleranceMs in O(log N).
+    const from = includeBodies && this.prefixMaxEnd
+      ? findFirstIndexWithEndAtOrAfter(this.prefixMaxEnd, timeMs - toleranceMs)
+      : findFirstIndexAtOrAfter(objects, timeMs - toleranceMs);
     for (let index = from; index < objects.length; index += 1) {
       const time = Number(objects[index]?.time);
       if (!Number.isFinite(time)) {
@@ -702,9 +749,13 @@ class TimelineRenderer {
     let x0 = (startMs / totalMs) * this.width;
     let x1 = ((startMs + durationMs) / totalMs) * this.width;
     if (x1 - x0 < MIN_BRACKET_WIDTH_PX) {
-      const middle = (x0 + x1) / 2;
-      x0 = middle - (MIN_BRACKET_WIDTH_PX / 2);
-      x1 = middle + (MIN_BRACKET_WIDTH_PX / 2);
+      const half = MIN_BRACKET_WIDTH_PX / 2;
+      const middle = clamp((x0 + x1) / 2, half, Math.max(half, this.width - half));
+      x0 = Math.max(0, middle - half);
+      x1 = Math.min(this.width, x0 + MIN_BRACKET_WIDTH_PX);
+    } else {
+      x0 = clamp(x0, 0, this.width);
+      x1 = clamp(x1, x0, this.width);
     }
     return { x0, x1 };
   }
@@ -812,12 +863,17 @@ class TimelineRenderer {
     if (source.fullDensity?.binCount === binCount) {
       return source.fullDensity;
     }
-    const counts = countObjectsIntoBins(source.objects, 0, this.durationMs, new Float32Array(binCount));
+    const bins = countObjectsIntoBins(source.objects, 0, this.durationMs, new Float32Array(binCount));
     let maxCount = 0;
-    for (const count of counts) {
-      maxCount = Math.max(maxCount, count);
+    for (let i = 0; i < bins.length; i += 1) {
+      if (bins[i] > maxCount) maxCount = bins[i];
     }
-    const bins = counts.map((count) => (maxCount > 0 ? count / maxCount : 0));
+    if (maxCount > 0) {
+      const invMax = 1 / maxCount;
+      for (let i = 0; i < bins.length; i += 1) {
+        bins[i] *= invMax;
+      }
+    }
     source.fullDensity = {
       binCount,
       bins,
@@ -882,8 +938,9 @@ class TimelineRenderer {
 
     this.drawBreaks(ctx, layout, toX, startMs, endMs);
     this.drawKiai(ctx, layout, toX, startMs, endMs, false);
-    const beatGridStrength = this.drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx);
-    const ruler = this.buildRuler(startMs, endMs, msPerPx, toX);
+    const visibleSections = this.getVisibleTimingSections(startMs, endMs);
+    const beatGridStrength = this.drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx, visibleSections);
+    const ruler = this.buildRuler(startMs, endMs, msPerPx, toX, visibleSections);
     this.drawTimeGrid(ctx, layout, ruler.xs, 1 - beatGridStrength);
 
     const objectMix = 1 - smoothstep(OBJECTS_SHOWN_MS_PER_PX, DENSITY_SHOWN_MS_PER_PX, msPerPx);
@@ -912,15 +969,24 @@ class TimelineRenderer {
   }
 
   drawBreaks(ctx, layout, toX, startMs, endMs) {
-    const visible = this.breaks.filter((period) => period.endMs > startMs && period.startMs < endMs);
-    if (visible.length === 0) {
+    let hasVisible = false;
+    for (const period of this.breaks) {
+      if (period.endMs > startMs && period.startMs < endMs) {
+        hasVisible = true;
+        break;
+      }
+    }
+    if (!hasVisible) {
       return;
     }
     const top = layout.trackTop;
     const bottom = layout.trackBottom;
     ctx.save();
     ctx.beginPath();
-    for (const period of visible) {
+    for (const period of this.breaks) {
+      if (period.endMs <= startMs || period.startMs >= endMs) {
+        continue;
+      }
       const x0 = Math.max(0, toX(period.startMs));
       const x1 = Math.min(layout.width, toX(period.endMs));
       ctx.rect(x0, top, x1 - x0, bottom - top);
@@ -976,10 +1042,10 @@ class TimelineRenderer {
   getVisibleTimingSections(startMs, endMs) {
     const sections = this.timingSections;
     const visible = [];
-    let index = 0;
-    while (index + 1 < sections.length && sections[index + 1].time <= startMs) {
-      index += 1;
+    if (sections.length === 0) {
+      return visible;
     }
+    let index = Math.max(0, findLastIndexAtOrBefore(sections, startMs, getSectionTime));
     for (; index < sections.length; index += 1) {
       const section = sections[index];
       const sectionEndMs = index + 1 < sections.length ? sections[index + 1].time : Infinity;
@@ -997,14 +1063,20 @@ class TimelineRenderer {
     return visible;
   }
 
-  drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx) {
+  drawBeatGrid(ctx, layout, toX, startMs, endMs, msPerPx, visibleSections = null) {
     // Pairs of x and opacity, drawn after the walk so each kind is one batch.
     const barLines = [];
     const beatLines = [];
     let strength = 0;
-    for (const { section, fromMs, toMs } of this.getVisibleTimingSections(startMs, endMs)) {
+    let totalLines = 0;
+    const sections = visibleSections ?? this.getVisibleTimingSections(startMs, endMs);
+    for (const { section, fromMs, toMs } of sections) {
+      const barMs = section.beatLength * section.meter;
+      if (!Number.isFinite(barMs) || !(barMs > 0)) {
+        continue;
+      }
       const beatPx = section.beatLength / msPerPx;
-      const barPx = beatPx * section.meter;
+      const barPx = barMs / msPerPx;
       const barStrength = clamp((barPx - MIN_BAR_SPACING_PX) / 20, 0, 1);
       if (barStrength <= 0) {
         continue;
@@ -1016,15 +1088,19 @@ class TimelineRenderer {
       if (!showBeats) {
         beat = Math.ceil(beat / section.meter) * section.meter;
       }
-      for (; ; beat += beatStepCount) {
+      for (; totalLines < MAX_MEASURE_LINES; beat += beatStepCount) {
         const timeMs = section.time + (beat * section.beatLength);
-        if (timeMs >= toMs) {
+        if (!Number.isFinite(timeMs) || timeMs >= toMs) {
           break;
         }
         if (((beat % section.meter) + section.meter) % section.meter === 0) {
           barLines.push(Math.round(toX(timeMs)), barStrength);
         } else {
           beatLines.push(Math.round(toX(timeMs)), clamp((beatPx - MIN_BEAT_SPACING_PX) / 8, 0, 1));
+        }
+        totalLines += 1;
+        if (!(beat + beatStepCount > beat)) {
+          break;
         }
       }
     }
@@ -1059,36 +1135,42 @@ class TimelineRenderer {
    * Only a map with no timing at all falls back to the clock, there being no
    * beat to count from.
    */
-  buildRuler(startMs, endMs, msPerPx, toX) {
+  buildRuler(startMs, endMs, msPerPx, toX, visibleSections = null) {
     const xs = [];
-    const sections = this.getVisibleTimingSections(startMs, endMs);
+    const sections = visibleSections ?? this.getVisibleTimingSections(startMs, endMs);
 
     if (sections.length > 0) {
       for (const { section, fromMs, toMs } of sections) {
         const barMs = section.beatLength * section.meter;
-        if (!(barMs > 0)) {
+        if (!Number.isFinite(barMs) || !(barMs > 0)) {
           continue;
         }
         let stepMs = barMs;
-        while (stepMs / msPerPx < MIN_TICK_SPACING_PX) {
+        while (Number.isFinite(stepMs) && stepMs / msPerPx < MIN_TICK_SPACING_PX) {
           stepMs *= 2;
+        }
+        if (!Number.isFinite(stepMs) || !(stepMs > 0)) {
+          continue;
         }
         // Counted from the section's own start, so every mark is a downbeat
         // of the tempo in force rather than of the one before it.
         let index = Math.ceil(((fromMs - section.time) / stepMs) - 1e-6);
-        for (; ; index += 1) {
+        for (; xs.length < MAX_MEASURE_LINES; index += 1) {
           const timeMs = section.time + (index * stepMs);
-          if (timeMs >= toMs) {
+          if (!Number.isFinite(timeMs) || timeMs >= toMs) {
             break;
           }
           xs.push(Math.round(toX(timeMs)));
+          if (!(index + 1 > index)) {
+            break;
+          }
         }
       }
       return { xs, onBars: true };
     }
 
     const stepMs = pickTickStep(msPerPx);
-    for (let index = Math.ceil(startMs / stepMs); index * stepMs <= endMs; index += 1) {
+    for (let index = Math.ceil(startMs / stepMs); index * stepMs <= endMs && xs.length < MAX_MEASURE_LINES; index += 1) {
       xs.push(Math.round(toX(index * stepMs)));
     }
     return { xs, onBars: false };
@@ -1120,13 +1202,21 @@ class TimelineRenderer {
     // one's. Both maps are binned over the same view, so their bars line up.
     const morph = this.densityMorph;
     const fromBins = morph ? this.getViewDensity(startMs, durationMs, binCount, morph.from).bins : null;
+    const priorMorph = morph?.from?.priorMorph ?? null;
+    const priorFromBins = priorMorph
+      ? this.getViewDensity(startMs, durationMs, binCount, priorMorph.from).bins
+      : null;
 
     const traceBars = () => {
       ctx.beginPath();
       for (let index = 0; index < bins.length; index += 1) {
         let barHeight = heightOf(bins[index]);
         if (fromBins) {
-          const fromHeight = heightOf(fromBins[index]);
+          let fromHeight = heightOf(fromBins[index]);
+          if (priorFromBins) {
+            const priorHeight = heightOf(priorFromBins[index]);
+            fromHeight = priorHeight + ((fromHeight - priorHeight) * priorMorph.progress);
+          }
           barHeight = fromHeight + ((barHeight - fromHeight) * morph.progress);
         }
         if (barHeight <= 0) {
@@ -1139,20 +1229,26 @@ class TimelineRenderer {
     };
 
     ctx.globalAlpha = alpha;
-    // One path per colour: everything in the upcoming green, then the played
-    // stretch again in the brighter one, clipped at the playhead.
-    traceBars();
-    ctx.fillStyle = COLOURS.upcoming;
-    ctx.fill();
-    if (playheadX > 0) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, layout.trackTop, Math.min(layout.width, playheadX), layout.trackBottom - layout.trackTop);
-      ctx.clip();
+    // Skip tracing/filling twice when the entire visible strip is already
+    // played (playhead past right edge) or upcoming (playhead at/before left).
+    if (playheadX >= layout.width) {
       traceBars();
       ctx.fillStyle = COLOURS.played;
       ctx.fill();
-      ctx.restore();
+    } else {
+      traceBars();
+      ctx.fillStyle = COLOURS.upcoming;
+      ctx.fill();
+      if (playheadX > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, layout.trackTop, playheadX, layout.trackBottom - layout.trackTop);
+        ctx.clip();
+        traceBars();
+        ctx.fillStyle = COLOURS.played;
+        ctx.fill();
+        ctx.restore();
+      }
     }
     ctx.globalAlpha = 1;
   }
@@ -1165,7 +1261,9 @@ class TimelineRenderer {
     const middle = (layout.trackTop + layout.trackBottom) / 2;
     const radius = clamp((layout.trackBottom - layout.trackTop - 5) * 0.24, 1.5, 3.5);
     const bodyHalf = radius * 0.72;
-    const firstIndex = findFirstIndexAtOrAfter(objects, startMs - this.maxObjectDurationMs);
+    const firstIndex = this.prefixMaxEnd
+      ? findFirstIndexWithEndAtOrAfter(this.prefixMaxEnd, startMs)
+      : findFirstIndexAtOrAfter(objects, startMs - this.maxObjectDurationMs);
     const playheadMs = this.currentTimeMs;
 
     ctx.globalAlpha = alpha;
@@ -1173,8 +1271,8 @@ class TimelineRenderer {
       ctx.fillStyle = played ? COLOURS.played : COLOURS.upcoming;
       ctx.strokeStyle = ctx.fillStyle;
       const bodies = [];
+      const heads = [];
       const spinners = [];
-      ctx.beginPath();
       for (let index = firstIndex; index < objects.length; index += 1) {
         const object = objects[index];
         const time = object?.time;
@@ -1199,11 +1297,10 @@ class TimelineRenderer {
         if (endTime - time > 1) {
           bodies.push(x0, toX(endTime));
         }
-        ctx.moveTo(x0 + radius, middle);
-        ctx.arc(x0, middle, radius, 0, Math.PI * 2);
+        heads.push(x0);
       }
-      ctx.fill();
 
+      // Draw translucent slider/hold bodies under filled heads so heads stay crisp.
       if (bodies.length > 0) {
         ctx.globalAlpha = alpha * 0.55;
         ctx.beginPath();
@@ -1212,6 +1309,15 @@ class TimelineRenderer {
         }
         ctx.fill();
         ctx.globalAlpha = alpha;
+      }
+      if (heads.length > 0) {
+        ctx.beginPath();
+        for (let index = 0; index < heads.length; index += 1) {
+          const x0 = heads[index];
+          ctx.moveTo(x0 + radius, middle);
+          ctx.arc(x0, middle, radius, 0, Math.PI * 2);
+        }
+        ctx.fill();
       }
       if (spinners.length > 0) {
         ctx.lineWidth = 1.25;
@@ -1239,6 +1345,7 @@ class TimelineRenderer {
 
     const bodies = [];
     const heads = [];
+    const spinners = [];
     for (const index of this.selection) {
       const object = this.objects[index];
       const time = Number(object?.time);
@@ -1249,12 +1356,17 @@ class TimelineRenderer {
       if (endTime < startMs) {
         continue;
       }
-      heads.push(toX(time));
+      const x0 = toX(time);
+      if (object.kind === 'spinner') {
+        spinners.push(x0, toX(endTime));
+        continue;
+      }
+      heads.push(x0);
       if (endTime - time > 1) {
-        bodies.push(toX(time), toX(endTime));
+        bodies.push(x0, toX(endTime));
       }
     }
-    if (heads.length === 0) {
+    if (heads.length === 0 && spinners.length === 0) {
       return;
     }
 
@@ -1275,6 +1387,9 @@ class TimelineRenderer {
     for (const x of heads) {
       ctx.moveTo(x + radius + 1.5, middle);
       ctx.arc(x, middle, radius + 1.5, 0, Math.PI * 2);
+    }
+    for (let index = 0; index < spinners.length; index += 2) {
+      traceCapsule(ctx, spinners[index], spinners[index + 1], middle, radius + 1.5);
     }
     ctx.stroke();
   }
@@ -1308,12 +1423,18 @@ class TimelineRenderer {
   // can be found even zoomed in.
   drawEndMarker(ctx, layout, toX, startMs, endMs) {
     const songEndMs = this.getEndMs();
-    if (songEndMs === null || songEndMs < startMs || songEndMs > endMs) {
+    if (songEndMs === null || songEndMs > endMs) {
+      return;
+    }
+    const height = layout.trackBottom - layout.trackTop;
+    if (songEndMs < startMs) {
+      // The entire visible stretch is past the song end: keep the shading.
+      ctx.fillStyle = COLOURS.pastEnd;
+      ctx.fillRect(0, layout.trackTop, layout.width, height);
       return;
     }
     // A song that runs to the timeline's end would land just off the canvas.
     const x = Math.min(Math.round(toX(songEndMs)), layout.width - 1);
-    const height = layout.trackBottom - layout.trackTop;
     if (x + 1 < layout.width) {
       ctx.fillStyle = COLOURS.pastEnd;
       ctx.fillRect(x + 1, layout.trackTop, layout.width - x - 1, height);

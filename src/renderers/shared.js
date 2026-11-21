@@ -22,6 +22,92 @@ const MAX_MEASURE_LINES = 4096;
 
 const WHITE = Object.freeze({ r: 255, g: 255, b: 255 });
 const BLACK = Object.freeze({ r: 0, g: 0, b: 0 });
+// Opaque fills for the { alpha: false } playfield canvas: translucent clears
+// leave trails from previous frames or maps on an opaque backing store.
+const PLAYFIELD_BACKGROUND = 'rgb(19, 21, 26)';
+const EMPTY_PLAYFIELD_BACKGROUND = 'rgb(8, 8, 10)';
+
+/**
+ * Index of the last item whose value is at or before `target`, or -1.
+ * Accepts a sorted numeric array / TypedArray when `getValue` is omitted,
+ * or a sorted object array via `getValue(item)`.
+ */
+const findLastIndexAtOrBefore = (items, target, getValue = null) => {
+  if (!items || items.length === 0) return -1;
+  let low = 0;
+  let high = items.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    const value = getValue ? getValue(items[mid]) : items[mid];
+    if (value <= target) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low - 1;
+};
+
+/**
+ * Running maximum endTime up to each index of a time-sorted object list.
+ * Because the prefix max is monotonic, a binary search finds the earliest
+ * index whose object could still overlap `minEndTime` in O(log N).
+ */
+const buildPrefixMaxEndTimes = (objects) => {
+  const list = Array.isArray(objects) ? objects : [];
+  const prefixMaxEnd = new Float64Array(list.length);
+  let runningMax = -Infinity;
+  for (let i = 0; i < list.length; i += 1) {
+    const object = list[i];
+    const time = Number.isFinite(object?.time) ? object.time : -Infinity;
+    const endTime = Number.isFinite(object?.endTime) ? Math.max(time, object.endTime) : time;
+    if (endTime > runningMax) {
+      runningMax = endTime;
+    }
+    prefixMaxEnd[i] = runningMax;
+  }
+  return prefixMaxEnd;
+};
+
+const findFirstIndexWithEndAtOrAfter = (prefixMaxEnd, minEndTime) => {
+  if (!prefixMaxEnd || prefixMaxEnd.length === 0) return 0;
+  let low = 0;
+  let high = prefixMaxEnd.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (prefixMaxEnd[mid] < minEndTime) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  return low;
+};
+
+/**
+ * Traces a rounded rectangle (or plain rectangle if radius is 0 or roundRect
+ * is unavailable). Always clamps the corner radius to half the shorter side
+ * and skips non-positive dimensions so Canvas2D roundRect never throws.
+ * Returns true if a path was added.
+ */
+const traceRoundedRect = (ctx, x, y, width, height, radius = 0, { beginPath = true } = {}) => {
+  if (beginPath) {
+    ctx.beginPath();
+  }
+  if (!(width > 0) || !(height > 0)) {
+    return false;
+  }
+  const r = Math.max(0, Math.min(Number.isFinite(radius) ? radius : 0, width / 2, height / 2));
+  if (r > 0 && typeof ctx.roundRect === 'function') {
+    if (!beginPath) {
+      ctx.moveTo(x + r, y);
+    }
+    ctx.roundRect(x, y, width, height, r);
+  } else {
+    ctx.rect(x, y, width, height);
+  }
+  return true;
+};
 
 /**
  * osu!lazer's approach preempt: IBeatmapDifficultyInfo.DifficultyRange(AR,
@@ -141,29 +227,29 @@ const drawPieceRect = (ctx, x, y, width, height, colour, alpha) => {
   const radius = getBarCornerRadius(height);
   const outlineWidth = Math.max(1, Math.min(height, width) * 0.1);
   const grow = (Math.min(width, height) * (PIECE_SHADOW_SCALE - 1)) / 2;
-  // The bar grown (or, negative, shrunk) by `by` on every side.
-  const trace = (by) => {
-    const r = Math.max(0, radius + by);
-    ctx.beginPath();
-    if (typeof ctx.roundRect === 'function' && r > 0) {
-      ctx.roundRect(x - by, y - by, width + (by * 2), height + (by * 2), r);
-    } else {
-      ctx.rect(x - by, y - by, width + (by * 2), height + (by * 2));
-    }
-  };
 
   ctx.fillStyle = withAlpha(BLACK, alpha * PIECE_SHADOW_ALPHA);
-  trace(grow);
-  ctx.fill();
+  if (traceRoundedRect(ctx, x - grow, y - grow, width + (grow * 2), height + (grow * 2), radius + grow)) {
+    ctx.fill();
+  }
   ctx.fillStyle = withAlpha(WHITE, pieceBaseAlpha(alpha));
-  trace(0);
-  ctx.fill();
-  ctx.fillStyle = withAlpha(colour, pieceTintAlpha(alpha));
-  ctx.fill();
+  if (traceRoundedRect(ctx, x, y, width, height, radius)) {
+    ctx.fill();
+    ctx.fillStyle = withAlpha(colour, pieceTintAlpha(alpha));
+    ctx.fill();
+  }
   ctx.strokeStyle = withAlpha(WHITE, pieceOutlineAlpha(alpha));
   ctx.lineWidth = outlineWidth;
-  trace(-outlineWidth / 2);
-  ctx.stroke();
+  if (traceRoundedRect(
+    ctx,
+    x + (outlineWidth / 2),
+    y + (outlineWidth / 2),
+    width - outlineWidth,
+    height - outlineWidth,
+    radius - (outlineWidth / 2),
+  )) {
+    ctx.stroke();
+  }
 };
 
 /**
@@ -202,9 +288,11 @@ const MIN_HIT_RADIUS_PX = 6;
 
 const hitTargetContains = (target, x, y) => {
   if (Number.isFinite(target.radius)) {
+    if (!(target.radius > 0)) return false;
     const radius = Math.max(MIN_HIT_RADIUS_PX, target.radius);
     return ((x - target.x) ** 2) + ((y - target.y) ** 2) <= radius * radius;
   }
+  if (!(target.width > 0) || !(target.height > 0)) return false;
   const growX = Math.max(0, (MIN_HIT_RADIUS_PX * 2 - target.width) / 2);
   const growY = Math.max(0, (MIN_HIT_RADIUS_PX * 2 - target.height) / 2);
   return x >= target.x - growX && x <= target.x + target.width + growX
@@ -231,23 +319,22 @@ const drawSelectionRings = (ctx, targets, selection) => {
   for (const target of targets) {
     if (target.ring === false || !selection.has(target.index)) continue;
     if (Number.isFinite(target.radius)) {
+      if (!(target.radius > 0)) continue;
       const radius = target.radius + SELECTION_RING_GAP;
       ctx.moveTo(target.x + radius, target.y);
       ctx.arc(target.x, target.y, radius, 0, Math.PI * 2);
+      traced += 1;
     } else {
+      if (!(target.width > 0) || !(target.height > 0)) continue;
       const x = target.x - SELECTION_RING_GAP;
       const y = target.y - SELECTION_RING_GAP;
       const width = target.width + (SELECTION_RING_GAP * 2);
       const height = target.height + (SELECTION_RING_GAP * 2);
-      const corner = Math.min((target.corner ?? 0) + SELECTION_RING_GAP, width / 2, height / 2);
-      if (typeof ctx.roundRect === 'function') {
-        ctx.moveTo(x + corner, y);
-        ctx.roundRect(x, y, width, height, corner);
-      } else {
-        ctx.rect(x, y, width, height);
+      const corner = Math.max(0, Math.min((target.corner ?? 0) + SELECTION_RING_GAP, width / 2, height / 2));
+      if (traceRoundedRect(ctx, x, y, width, height, corner, { beginPath: false })) {
+        traced += 1;
       }
     }
-    traced += 1;
   }
   if (traced > 0) {
     ctx.strokeStyle = SELECTION_RING_COLOUR;
@@ -390,10 +477,13 @@ const statelessSingle = (seed, series = 0) => (
 );
 
 export {
+  BLACK,
   DEFAULT_COLOURS,
+  EMPTY_PLAYFIELD_BACKGROUND,
   HIT_BURST_MS,
   PIECE_MAX_ALPHA,
   PIECE_SHADOW_SCALE,
+  PLAYFIELD_BACKGROUND,
   SELECTION_RING_COLOUR,
   LONG_OBJECT_POST_HIT_FADE_MS,
   MAX_COMBO_WHITENESS,
@@ -405,6 +495,7 @@ export {
   OSU_WIDTH,
   WHITE,
   assignComboIndices,
+  buildPrefixMaxEndTimes,
   drawPieceCircle,
   drawPieceRect,
   drawSelectionRings,
@@ -412,6 +503,8 @@ export {
   easeInSine,
   easeOutQuint,
   easeOutSine,
+  findFirstIndexWithEndAtOrAfter,
+  findLastIndexAtOrBefore,
   formatTime,
   getApproachPreemptMs,
   getBarCornerRadius,
@@ -424,5 +517,6 @@ export {
   pickHitTarget,
   statelessInt,
   statelessSingle,
+  traceRoundedRect,
   withAlpha,
 };

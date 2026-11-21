@@ -19,22 +19,25 @@ import { createLegacyRandom } from '../core/beatmapConversion.js';
 import { clamp, findFirstIndexAtOrAfter } from '../core/math.js';
 import {
   OSU_VIEW_HEIGHT,
-  PIECE_MAX_ALPHA,
   OSU_VIEW_WIDTH,
   OSU_WIDTH,
+  PIECE_MAX_ALPHA,
+  PLAYFIELD_BACKGROUND,
   WHITE,
+  drawPieceCircle,
+  drawSelectionRings,
   easeInQuad,
   easeInSine,
   easeOutQuint,
   easeOutSine,
-  drawPieceCircle,
-  drawSelectionRings,
+  findLastIndexAtOrBefore,
   getApproachPreemptMs,
   getBarCornerRadius,
   mixColours,
   pickHitTarget,
   statelessInt,
   statelessSingle,
+  traceRoundedRect,
   withAlpha,
 } from './shared.js';
 
@@ -139,7 +142,10 @@ const AFTER_IMAGE_MS = 1200;
  * catcher is twice it (Catcher.calculateScale).
  */
 const getCatchObjectScale = (circleSize) => {
-  const cs = Number.isFinite(Number(circleSize)) ? Number(circleSize) : 5;
+  const numeric = (circleSize === null || circleSize === undefined || circleSize === '')
+    ? Number.NaN
+    : Number(circleSize);
+  const cs = clamp(Number.isFinite(numeric) ? numeric : 5, 0, 10);
   return (1 - ((0.7 * (cs - 5)) / 5)) / 2;
 };
 
@@ -180,37 +186,53 @@ const buildCatchAutoplayFrames = (objectsInCreationOrder, circleSize) => {
   };
 
   let lastPosition = CENTRE_X;
-  let lastTime = 0;
+  let lastTime = Number.NEGATIVE_INFINITY;
+  let previousHyperDash = false;
   for (const object of objectsInCreationOrder) {
     if (object.type === 'banana') continue;
     const positionChange = Math.abs(lastPosition - object.x);
+    if (lastTime === Number.NEGATIVE_INFINITY) {
+      // Allow negative-time first objects without skipping them while keeping
+      // positive-time maps starting from t = 0 as in osu!lazer.
+      lastTime = Math.min(0, object.time - (positionChange / BASE_WALK_SPEED));
+    }
     const timeAvailable = object.time - lastTime;
     if (timeAvailable < 0) continue;
 
-    const speedRequired = positionChange === 0 ? 0 : positionChange / timeAvailable;
+    const speedRequired = positionChange === 0
+      ? 0
+      : (timeAvailable === 0 ? Infinity : positionChange / timeAvailable);
     const dashRequired = speedRequired > BASE_WALK_SPEED;
     const impossibleJump = speedRequired > BASE_DASH_SPEED;
+    const departingHyperDash = previousHyperDash;
 
     if (lastPosition - halfCatchWidth < object.x && lastPosition + halfCatchWidth > object.x) {
       // Already under it.
       lastTime = object.time;
+      previousHyperDash = Boolean(object.hyperDash);
       addFrame(object.time, lastPosition);
       continue;
     }
 
     if (impossibleJump) {
       addFrame(object.time, object.x);
-    } else if (object.hyperDash) {
-      addFrame(object.time - timeAvailable, lastPosition);
+    } else if (departingHyperDash) {
+      addFrame(lastTime, lastPosition);
       addFrame(object.time, object.x);
     } else if (dashRequired) {
-      // Dash first, then walk the rest of the way.
+      // Dash first at BASE_DASH_SPEED (1.0 px/ms), then walk at BASE_WALK_SPEED
+      // (0.5 px/ms) for the remainder. Because dash is 2x walk speed, each ms
+      // of dashing saves 1ms of walking: timeAtDashSpeed === timeWeNeedToSave.
       const timeAtNormalSpeed = positionChange / BASE_WALK_SPEED;
-      const timeWeNeedToSave = timeAtNormalSpeed - timeAvailable;
-      const timeAtDashSpeed = timeWeNeedToSave / 2;
-      const midPosition = lastPosition + ((object.x - lastPosition) * (timeAtDashSpeed / timeAvailable));
-      addFrame(object.time - timeAvailable + 1, lastPosition, true);
-      addFrame(object.time - timeAvailable + timeAtDashSpeed, midPosition);
+      const timeWeNeedToSave = clamp(timeAtNormalSpeed - timeAvailable, 0, timeAvailable);
+      const timeAtDashSpeed = timeWeNeedToSave;
+      const direction = Math.sign(object.x - lastPosition);
+      const midPosition = lastPosition + (direction * BASE_DASH_SPEED * timeAtDashSpeed);
+      const dashStartOffset = timeAtDashSpeed > 1 ? 1 : (timeAtDashSpeed * 0.5);
+      addFrame(lastTime + dashStartOffset, lastPosition, true);
+      if (timeAtDashSpeed < timeAvailable) {
+        addFrame(lastTime + timeAtDashSpeed, midPosition);
+      }
       addFrame(object.time, object.x);
     } else {
       const timeBefore = positionChange / BASE_WALK_SPEED;
@@ -220,6 +242,7 @@ const buildCatchAutoplayFrames = (objectsInCreationOrder, circleSize) => {
 
     lastTime = object.time;
     lastPosition = object.x;
+    previousHyperDash = Boolean(object.hyperDash);
   }
 
   return {
@@ -237,14 +260,7 @@ const buildCatchAutoplayFrames = (objectsInCreationOrder, circleSize) => {
 const getCatcherXAt = (frames, time) => {
   const { times, xs } = frames;
   if (times.length === 0 || !(time >= times[0])) return CENTRE_X;
-  let low = 0;
-  let high = times.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (times[middle] <= time) low = middle + 1;
-    else high = middle;
-  }
-  const index = low - 1;
+  const index = findLastIndexAtOrBefore(times, time);
   if (index >= times.length - 1) return xs[times.length - 1];
   const span = times[index + 1] - times[index];
   if (!(span > 0)) return xs[index + 1];
@@ -255,13 +271,14 @@ const getCatcherXAt = (frames, time) => {
  * Catcher.OnNewResult's hyperdash state over the map: from catching a fruit or
  * droplet that leads a hyperdash until the next one is caught. Back-to-back
  * hyperdashes are one stretch: the catcher only turns red, and leaves its
- * after-image, as one begins. Tiny droplets do not touch it; a banana ends it.
+ * after-image, as one begins. Tiny droplets do not touch it; a caught banana
+ * ends it, while a missed banana never hits the catcher.
  */
 const buildHyperDashSpans = (objects, frames) => {
   const spans = [];
   let start = null;
   for (const object of objects) {
-    if (object.type === 'tinyDroplet') continue;
+    if (object.type === 'tinyDroplet' || object.missed) continue;
     let hyper = false;
     if (object.hyperDash && Number.isFinite(object.hyperDashTargetTime)) {
       const catcherX = getCatcherXAt(frames, object.time);
@@ -449,16 +466,8 @@ const bananaScaleAt = (object, time) => {
 };
 
 // The index of the last span to have started by `time`, or -1.
-const lastSpanStartedBy = (spans, time) => {
-  let low = 0;
-  let high = spans.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (spans[middle].start <= time) low = middle + 1;
-    else high = middle;
-  }
-  return low - 1;
-};
+const getSpanStart = (span) => span.start;
+const lastSpanStartedBy = (spans, time) => findLastIndexAtOrBefore(spans, time, getSpanStart);
 
 /** The catcher's colour: red while it hyperdashes, faded to and from. */
 const getCatcherColourAt = (spans, time) => {
@@ -498,8 +507,6 @@ const getCatchPlayfieldLayout = (canvasWidth, canvasHeight) => {
   };
 };
 
-const CATCH_BACKGROUND = 'rgba(19, 21, 26, 0.95)';
-
 // A fruit is the preview's own round piece (see drawPieceCircle), with a red
 // ring outside it on one that starts a hyperdash. Tiny droplets are specks of
 // their colour. `ringAlpha` fades the ring on its own: it is wider than the
@@ -531,13 +538,8 @@ const drawPlate = (ctx, x, y, width, height, colour, alpha) => {
   const left = x - (width / 2);
   const top = y - (height / 2);
   // Rounded off as much as a mania note is.
-  const radius = getBarCornerRadius(height);
-  if (typeof ctx.roundRect === 'function' && radius > 0) {
-    ctx.beginPath();
-    ctx.roundRect(left, top, width, height, radius);
+  if (traceRoundedRect(ctx, left, top, width, height, getBarCornerRadius(height))) {
     ctx.fill();
-  } else {
-    ctx.fillRect(left, top, width, height);
   }
 };
 
@@ -574,19 +576,16 @@ export class CatchRenderer {
 
   get mapData() { return this.host.mapData; }
 
-  setBeatmap(mapData) {
+  setBeatmap() {
     this.model = null;
     this.modelKey = null;
-    // The timeline colours catch objects by their source object's combo.
-    if ((mapData?.mode ?? 0) === 2 && Array.isArray(mapData?.catchObjects) && Array.isArray(mapData?.objects)) {
-      for (const catchObject of mapData.catchObjects) {
-        const sourceObject = mapData.objects[catchObject.sourceObjectIndex];
-        if (sourceObject) {
-          catchObject.comboIndex = sourceObject.comboIndex;
-          catchObject.comboIndexWithOffsets = sourceObject.comboIndexWithOffsets;
-        }
-      }
-    }
+    this.hitTargets = [];
+  }
+
+  dispose() {
+    this.model = null;
+    this.modelKey = null;
+    this.hitTargets = [];
   }
 
   // Worked out the first time a map is drawn, and again only if its objects,
@@ -621,7 +620,7 @@ export class CatchRenderer {
   }
 
   render(ctx, width, height) {
-    ctx.fillStyle = CATCH_BACKGROUND;
+    ctx.fillStyle = PLAYFIELD_BACKGROUND;
     ctx.fillRect(0, 0, width, height);
     this.hitTargets = [];
 
@@ -633,6 +632,7 @@ export class CatchRenderer {
     const fruitRadius = (OBJECT_SIZE / 2) * model.objectScale * FRUIT_DRAWN_SIZE;
     const plateTop = CATCHER_Y - fruitRadius;
     const plateThickness = fruitRadius * PLATE_THICKNESS;
+    const catcherY = layout.fieldY + ((plateTop + (plateThickness / 2)) * scale);
     const view = {
       time,
       scale,
@@ -640,6 +640,7 @@ export class CatchRenderer {
       toY: (y) => layout.fieldY + (y * scale),
       fruitRadius: fruitRadius * scale,
       catcherX: getCatcherXAt(model.frames, time),
+      catcherY,
       plateTop,
       // Where caught fruit sit: on the plate, a little way into it.
       plateY: plateTop - (fruitRadius * CAUGHT_OBJECT_SCALE * (1 - STACK_SINK)),
@@ -648,7 +649,6 @@ export class CatchRenderer {
       // The last object already caught.
       lastCaught: findFirstIndexAtOrAfter(model.objects, time + 1e-9) - 1,
     };
-    const catcherY = view.toY(plateTop + (plateThickness / 2));
 
     // The floor the catcher runs along, across the field.
     ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
@@ -725,15 +725,20 @@ export class CatchRenderer {
   }
 
   // Caught fruit and bananas, at half their size, until their combo ends.
+  // Collected newest-first up to PLATE_DRAW_LIMIT, then drawn oldest-to-newest
+  // so newly caught fruit stacks on top of earlier fruit.
   drawPlateStack(ctx, model, view) {
     if (view.lastCaught < 0) return;
     const segment = model.segments[model.segmentOf[view.lastCaught]];
     if (!segment || segment.explodeTime <= view.time) return;
-    let drawn = 0;
-    for (let i = view.lastCaught; i >= segment.start && drawn < PLATE_DRAW_LIMIT; i -= 1) {
+    const toDraw = [];
+    for (let i = view.lastCaught; i >= segment.start && toDraw.length < PLATE_DRAW_LIMIT; i -= 1) {
       const object = model.objects[i];
       if (!object.staysOnPlate) continue;
-      drawn += 1;
+      toDraw.push(object);
+    }
+    for (let i = toDraw.length - 1; i >= 0; i -= 1) {
+      const object = toDraw[i];
       const radius = view.fruitRadius * PIECE_SCALE[object.type] * PIECE_DRAWN[object.type] * CAUGHT_OBJECT_SCALE;
       drawPiece(ctx, object, view.toX(view.catcherX + object.plateX), view.toY(view.plateY + object.plateY), radius);
     }
@@ -757,17 +762,19 @@ export class CatchRenderer {
       drawPiece(ctx, object, view.toX(x), view.toY(y), radius, 1 - (age / DROP_FADE_MS));
     };
 
-    // Whole combos thrown off in the last 750ms.
+    // Whole combos thrown off in the last 750ms (oldest-to-newest within each combo).
     for (let s = model.segmentOf[view.lastCaught]; s >= 0; s -= 1) {
       const segment = segments[s];
       if (segment.explodeTime > time) continue;
       if (segment.explodeTime <= time - DROP_FADE_MS) break;
-      let drawn = 0;
-      for (let i = segment.end; i >= segment.start && drawn < PLATE_DRAW_LIMIT; i -= 1) {
+      const toDraw = [];
+      for (let i = segment.end; i >= segment.start && toDraw.length < PLATE_DRAW_LIMIT; i -= 1) {
         if (objects[i].staysOnPlate) {
-          drawn += 1;
-          drawDrop(objects[i]);
+          toDraw.push(objects[i]);
         }
+      }
+      for (let i = toDraw.length - 1; i >= 0; i -= 1) {
+        drawDrop(toDraw[i]);
       }
     }
     // Droplets, each gone as soon as it landed.
@@ -783,7 +790,7 @@ export class CatchRenderer {
    */
   drawTrails(ctx, model, view) {
     const { time } = view;
-    const y = view.toY(view.plateTop) + (view.plateHeight / 2);
+    const y = view.catcherY;
     const drawSpanTrails = (spans, colour) => {
       for (let s = lastSpanStartedBy(spans, time); s >= 0; s -= 1) {
         const span = spans[s];

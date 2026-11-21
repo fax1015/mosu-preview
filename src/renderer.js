@@ -8,6 +8,7 @@ import { clamp } from './core/math.js';
 import { TimelineRenderer } from './timeline.js';
 import {
   DEFAULT_COLOURS,
+  EMPTY_PLAYFIELD_BACKGROUND,
   assignComboIndices,
   formatTime,
   getMaxObjectDurationMs,
@@ -43,12 +44,18 @@ export class PreviewRenderer {
   // The ruleset that draws `mode`; anything unknown is drawn as mania, as it
   // always has been.
   rulesetRenderer(mode = this.mapData?.mode ?? 0) {
-    return [this.standard, this.taiko, this.catch][mode] ?? this.mania;
+    switch (mode) {
+      case 0: return this.standard;
+      case 1: return this.taiko;
+      case 2: return this.catch;
+      default: return this.mania;
+    }
   }
 
   setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
     this.mapData = mapData;
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
+    this.currentTimeMs = clamp(this.currentTimeMs, 0, this.durationMs);
     this.timeline?.setBeatmap(mapData, this.durationMs, { previewTimeMs });
     this.comboColours = (Array.isArray(mapData?.comboColours) && mapData.comboColours.length > 0)
       ? mapData.comboColours.map(normalizeComboColour)
@@ -59,9 +66,10 @@ export class PreviewRenderer {
     if (Array.isArray(this.mapData?.objects)) {
       assignComboIndices(this.mapData.objects, this.mapData.mode ?? 0);
     }
-    for (const ruleset of [this.standard, this.taiko, this.catch, this.mania]) {
-      ruleset.setBeatmap?.(mapData);
-    }
+    this.standard.setBeatmap?.(mapData);
+    this.taiko.setBeatmap?.(mapData);
+    this.catch.setBeatmap?.(mapData);
+    this.mania.setBeatmap?.(mapData);
   }
 
   /**
@@ -74,8 +82,9 @@ export class PreviewRenderer {
     const timelineShowsThisMap = this.showsTimelineObjects();
     this.mapData = mapData;
     this.maxObjectDurationMs = getMaxObjectDurationMs(mapData?.objects);
+    this.mania.setBeatmap(mapData);
     if (timelineShowsThisMap) {
-      this.timeline?.setObjects(mapData?.objects);
+      this.selectionTimeline?.setObjects(mapData?.objects);
     }
   }
 
@@ -108,12 +117,25 @@ export class PreviewRenderer {
 
   setDuration(durationMs, { animate = false } = {}) {
     this.durationMs = Number.isFinite(durationMs) ? Math.max(durationMs, 1) : 1;
+    this.currentTimeMs = clamp(this.currentTimeMs, 0, this.durationMs);
     return Boolean(this.timeline?.setDuration(this.durationMs, { animate }));
   }
 
   setTime(ms) {
+    if (!Number.isFinite(ms)) {
+      return;
+    }
     this.currentTimeMs = clamp(ms, 0, this.durationMs || 1);
     this.timeline?.setTime(this.currentTimeMs);
+  }
+
+  dispose() {
+    this.standard.dispose?.();
+    this.taiko.dispose?.();
+    this.catch.dispose?.();
+    this.mania.dispose?.();
+    this.timeline?.dispose?.();
+    this.mapData = null;
   }
 
   // Each ruleset picks out the settings that are its own.
@@ -165,10 +187,9 @@ export class PreviewRenderer {
   renderPlayfield() {
     const { ctx, width, height } = getCanvasContext(this.playfieldCanvas, { lowLatency: this.lowLatencyPlayfield });
 
-    ctx.fillStyle = 'rgba(8, 8, 10, 0.85)';
-    ctx.fillRect(0, 0, width, height);
-
     if (!this.mapData || !Array.isArray(this.mapData.objects) || this.mapData.objects.length === 0) {
+      ctx.fillStyle = EMPTY_PLAYFIELD_BACKGROUND;
+      ctx.fillRect(0, 0, width, height);
       ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
       ctx.font = '600 14px Torus, sans-serif';
       ctx.textAlign = 'center';

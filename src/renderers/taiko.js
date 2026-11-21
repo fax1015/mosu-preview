@@ -14,15 +14,26 @@ import {
   OSU_HEIGHT,
   OSU_WIDTH,
   PIECE_MAX_ALPHA,
+  PLAYFIELD_BACKGROUND,
+  WHITE,
+  buildPrefixMaxEndTimes,
   drawPieceCircle,
   drawSelectionRings,
+  findFirstIndexWithEndAtOrAfter,
+  findLastIndexAtOrBefore,
   getHitBurst,
+  linearGradient,
   pickHitTarget,
   withAlpha,
 } from './shared.js';
 
 // How long the judgement circle stays lit in a note's colour after a hit.
 const RECEPTOR_FLASH_MS = 160;
+const MIN_VISIBLE_AHEAD_MS = 8000;
+const MAX_VISIBLE_AHEAD_MS = 60000;
+const DON_COLOR = Object.freeze({ r: 242, g: 86, b: 86 });
+const KAT_COLOR = Object.freeze({ r: 92, g: 166, b: 255 });
+const ROLL_COLOR = Object.freeze({ r: 255, g: 196, b: 84 });
 
 /**
  * Canvas pixels per osu! pixel: the scale at which a 512x384 field fits the
@@ -53,6 +64,8 @@ export class TaikoRenderer {
     this.host = host;
     // What the last frame drew that a click can pick out.
     this.hitTargets = [];
+    this.prefixMaxEnd = null;
+    this.prefixMaxEndObjects = null;
   }
 
   get mapData() { return this.host.mapData; }
@@ -60,6 +73,31 @@ export class TaikoRenderer {
   get currentTimeMs() { return this.host.currentTimeMs; }
 
   get maxObjectDurationMs() { return this.host.maxObjectDurationMs; }
+
+  setBeatmap(mapData) {
+    this.hitTargets = [];
+    if ((mapData?.mode ?? 0) === 1 && Array.isArray(mapData?.objects)) {
+      this.prefixMaxEndObjects = mapData.objects;
+      this.prefixMaxEnd = buildPrefixMaxEndTimes(mapData.objects);
+    } else {
+      this.prefixMaxEndObjects = null;
+      this.prefixMaxEnd = null;
+    }
+  }
+
+  dispose() {
+    this.hitTargets = [];
+    this.prefixMaxEndObjects = null;
+    this.prefixMaxEnd = null;
+  }
+
+  getPrefixMaxEnd(objects) {
+    if (this.prefixMaxEndObjects !== objects || !this.prefixMaxEnd || this.prefixMaxEnd.length !== objects.length) {
+      this.prefixMaxEndObjects = objects;
+      this.prefixMaxEnd = buildPrefixMaxEndTimes(objects);
+    }
+    return this.prefixMaxEnd;
+  }
 
   getControlPoints() {
     return Array.isArray(this.mapData?.timingControlPoints) ? this.mapData.timingControlPoints : [];
@@ -73,7 +111,7 @@ export class TaikoRenderer {
   // lane in the same time, instead of crawling across a narrow one or racing
   // across a wide one at the size of the full preview.
   render(ctx, width, height) {
-    ctx.fillStyle = 'rgba(19, 21, 26, 0.95)';
+    ctx.fillStyle = PLAYFIELD_BACKGROUND;
     ctx.fillRect(0, 0, width, height);
     const unit = getTaikoUnit(width, height);
     this.renderLane(ctx, width, height, unit);
@@ -96,20 +134,25 @@ export class TaikoRenderer {
     }
 
     const lines = [];
-    for (let i = 0; i < sections.length; i += 1) {
+    const firstSection = Math.max(0, findLastIndexAtOrBefore(sections, visibleStart, (section) => section.time));
+    for (let i = firstSection; i < sections.length && lines.length < MAX_MEASURE_LINES; i += 1) {
       const point = sections[i];
       const sectionStart = point.time;
+      if (sectionStart > visibleEnd) {
+        break;
+      }
       const meter = Number.isFinite(point.meter) && point.meter > 0 ? point.meter : 4;
       // Held to the shortest beat osu! accepts, so a corrupt beat length cannot
       // turn one frame into millions of bar lines.
       const measureLength = Math.max(MIN_BEAT_LENGTH_MS, point.beatLength) * meter;
-      const sectionEnd = (i + 1 < sections.length) ? sections[i + 1].time : visibleEnd + measureLength;
+      if (!Number.isFinite(measureLength) || measureLength <= 0) {
+        continue;
+      }
+      const hasNextSection = i + 1 < sections.length;
+      const sectionEnd = hasNextSection ? sections[i + 1].time : visibleEnd;
       const sectionVisibleStart = Math.max(visibleStart, sectionStart);
       const sectionVisibleEnd = Math.min(visibleEnd, sectionEnd);
       if (sectionVisibleEnd < sectionVisibleStart) {
-        continue;
-      }
-      if (!Number.isFinite(measureLength) || measureLength <= 0) {
         continue;
       }
 
@@ -122,13 +165,22 @@ export class TaikoRenderer {
         const measureTime = sectionStart + (measureIndex * measureLength);
         // Not "> end": a time too large to tell one bar from the next compares
         // false both ways, and the loop has to end on that as well.
-        if (!(measureTime <= sectionVisibleEnd)) {
+        if (hasNextSection ? !(measureTime < sectionEnd - 1e-6) : !(measureTime <= sectionVisibleEnd)) {
+          break;
+        }
+        if (!(measureTime <= visibleEnd)) {
           break;
         }
         if (measureIndex === 0 && point.omitFirstBarLine) {
+          if (!(sectionStart + ((measureIndex + 1) * measureLength) > measureTime)) {
+            break;
+          }
           continue;
         }
         lines.push(measureTime);
+        if (!(sectionStart + ((measureIndex + 1) * measureLength) > measureTime)) {
+          break;
+        }
       }
     }
 
@@ -156,26 +208,28 @@ export class TaikoRenderer {
     // Notes fade in over the far end of the lane, a little short of the
     // canvas's right edge.
     const noteTravelWidth = (width - judgeX - (fieldWidth * 0.06)) + laneRightOverflow;
+    const rightFadeEndX = judgeX + noteTravelWidth;
     const rightFadeWidth = Math.max(12, noteTravelWidth * 0.07);
-    const rightFadeStartX = (judgeX + noteTravelWidth) - rightFadeWidth;
+    const rightFadeStartX = rightFadeEndX - rightFadeWidth;
     const leftMeasureFadeWidth = Math.max(24, judgeX - playfieldX);
-    const maxVisibleAheadMs = 8000;
-    // Long enough behind the line for a hit note's burst.
-    const maxVisibleBehindMs = HIT_BURST_MS;
+    const currentTaikoSpeed = Math.max(this.getPixelsPerMs(currentTime, fieldWidth), 0.001);
+    const maxVisibleAheadMs = clamp(
+      Math.max(MIN_VISIBLE_AHEAD_MS, (noteTravelWidth + 64) / currentTaikoSpeed),
+      MIN_VISIBLE_AHEAD_MS,
+      MAX_VISIBLE_AHEAD_MS,
+    );
+    // Long enough behind the line for hit bursts, drumrolls and swells to finish fading.
+    const maxVisibleBehindMs = Math.max(HIT_BURST_MS, LONG_OBJECT_POST_HIT_FADE_MS);
     const spinnerFadeInMs = 1400;
     const visibleEnd = currentTime + maxVisibleAheadMs;
     const visibleStart = currentTime - maxVisibleBehindMs;
-    const currentTaikoSpeed = Math.max(this.getPixelsPerMs(currentTime, fieldWidth), 0.001);
     const measureLookBehindMs = Math.max(1000, (leftMeasureFadeWidth + 24) / currentTaikoSpeed);
     const measureVisibleStart = currentTime - measureLookBehindMs;
-    const donColor = { r: 242, g: 86, b: 86 };
-    const katColor = { r: 92, g: 166, b: 255 };
-    const rollColor = { r: 255, g: 196, b: 84 };
     const taikoFadeAlphaAtX = (x) => {
       if (x <= rightFadeStartX) {
         return 1;
       }
-      return clamp(((judgeX + noteTravelWidth) - x) / Math.max(rightFadeWidth, 1), 0, 1);
+      return clamp((rightFadeEndX - x) / Math.max(rightFadeWidth, 1), 0, 1);
     };
     const taikoPositionAt = (targetTime, speedReferenceTime = targetTime) => (
       judgeX + ((targetTime - currentTime) * this.getPixelsPerMs(speedReferenceTime, fieldWidth))
@@ -215,7 +269,7 @@ export class TaikoRenderer {
       const hit = objects[i];
       if (hit.kind === 'spinner' || isRoll(hit)) continue;
       const flash = 1 - ((currentTime - hit.time) / RECEPTOR_FLASH_MS);
-      ctx.fillStyle = withAlpha(isKatNote(hit) ? katColor : donColor, 0.45 * flash * flash);
+      ctx.fillStyle = withAlpha(isKatNote(hit) ? KAT_COLOR : DON_COLOR, 0.45 * flash * flash);
       ctx.beginPath();
       ctx.arc(judgeX, laneY, receptorRadius, 0, Math.PI * 2);
       ctx.fill();
@@ -248,28 +302,26 @@ export class TaikoRenderer {
       ctx.stroke();
     }
 
-    for (
-      let i = findFirstIndexAtOrAfter(objects, visibleStart - this.maxObjectDurationMs);
-      i < objects.length;
-      i += 1
-    ) {
+    const firstIndex = findFirstIndexWithEndAtOrAfter(this.getPrefixMaxEnd(objects), visibleStart);
+    const lastIndex = findLastIndexAtOrBefore(objects, visibleEnd, (object) => object.time);
+
+    // Latest first, so earlier notes are drawn on top and picked first.
+    for (let i = lastIndex; i >= firstIndex; i -= 1) {
       const object = objects[i];
-      if (object.time > visibleEnd) {
-        break;
-      }
-      if (object.endTime < visibleStart) {
+      const objectEndTime = Number.isFinite(object.endTime) ? object.endTime : object.time;
+      if (objectEndTime < visibleStart) {
         continue;
       }
 
       if (object.kind === 'spinner') {
-        const duration = Math.max(1, object.endTime - object.time);
+        const duration = Math.max(1, objectEndTime - object.time);
         const progress = clamp((currentTime - object.time) / duration, 0, 1);
         const radiusStart = laneHeight * 0.85;
         const radiusEnd = laneHeight * 0.28;
         const radius = radiusStart - ((radiusStart - radiusEnd) * progress);
         const alpha = currentTime < object.time
           ? clamp(1 - ((object.time - currentTime) / spinnerFadeInMs), 0, 1) * 0.6
-          : clamp(1 - ((currentTime - object.endTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1) * 0.8;
+          : clamp(1 - ((currentTime - objectEndTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1) * 0.8;
         const fadedAlpha = alpha * taikoFadeAlphaAtX(judgeX);
         if (fadedAlpha <= 0.02) {
           continue;
@@ -279,15 +331,36 @@ export class TaikoRenderer {
         ctx.beginPath();
         ctx.arc(judgeX, laneY, radius, 0, Math.PI * 2);
         ctx.stroke();
+        this.hitTargets.push({ index: i, x: judgeX, y: laneY, radius });
         continue;
       }
 
       if (isRoll(object)) {
+        const rollThickness = Math.max(6, laneHeight * 0.48);
+        const rollRadius = rollThickness / 2;
+
+        if (currentTime > objectEndTime) {
+          const alpha = 0.86 * clamp(1 - ((currentTime - objectEndTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1);
+          if (alpha <= 0.02) {
+            continue;
+          }
+          ctx.fillStyle = withAlpha(ROLL_COLOR, alpha * 0.9);
+          ctx.beginPath();
+          ctx.arc(judgeX, laneY, rollRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = withAlpha(WHITE, alpha * 0.28);
+          ctx.beginPath();
+          ctx.arc(judgeX, laneY, Math.max(0.6, rollThickness * 0.11), 0, Math.PI * 2);
+          ctx.fill();
+          this.hitTargets.push({ index: i, x: judgeX, y: laneY, radius: rollRadius });
+          continue;
+        }
+
         const headX = taikoPositionAt(object.time, object.time);
-        const tailX = taikoPositionAt(object.endTime, object.time);
+        const tailX = taikoPositionAt(objectEndTime, object.time);
         const leftX = Math.max(judgeX, Math.min(headX, tailX));
         const rightX = Math.max(headX, tailX);
-        if (rightX <= judgeX || leftX > (laneRightEdge + 24)) {
+        if (rightX < judgeX || leftX > (laneRightEdge + 24) || leftX >= rightFadeEndX) {
           continue;
         }
 
@@ -295,66 +368,76 @@ export class TaikoRenderer {
         if (object.time > currentTime) {
           const futureDistance = Math.max(0, headX - judgeX);
           alpha = 0.18 + (0.68 * clamp(1 - (futureDistance / Math.max(noteTravelWidth, 1)), 0, 1));
-        } else if (currentTime > object.endTime) {
-          alpha = 0.86 * clamp(1 - ((currentTime - object.endTime) / LONG_OBJECT_POST_HIT_FADE_MS), 0, 1);
         }
         if (alpha <= 0.02) {
           continue;
         }
 
-        const rollThickness = Math.max(6, laneHeight * 0.48);
-        if (rightX > rightFadeStartX) {
-          const rollGradient = ctx.createLinearGradient(leftX, laneY, rightX, laneY);
-          const fadeStop = clamp((rightFadeStartX - leftX) / Math.max(rightX - leftX, 1), 0, 1);
-          rollGradient.addColorStop(0, withAlpha(rollColor, alpha * 0.9));
-          rollGradient.addColorStop(fadeStop, withAlpha(rollColor, alpha * 0.9));
-          rollGradient.addColorStop(1, withAlpha(rollColor, 0));
-          ctx.strokeStyle = rollGradient;
+        if (rightX <= leftX + 0.01) {
+          const capAlpha = alpha * taikoFadeAlphaAtX(leftX);
+          if (capAlpha <= 0.02) {
+            continue;
+          }
+          ctx.fillStyle = withAlpha(ROLL_COLOR, capAlpha * 0.9);
+          ctx.beginPath();
+          ctx.arc(leftX, laneY, rollRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = withAlpha(WHITE, capAlpha * 0.28);
+          ctx.beginPath();
+          ctx.arc(leftX, laneY, Math.max(0.6, rollThickness * 0.11), 0, Math.PI * 2);
+          ctx.fill();
         } else {
-          ctx.strokeStyle = withAlpha(rollColor, alpha * 0.9);
-        }
-        ctx.lineWidth = rollThickness;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(leftX, laneY);
-        ctx.lineTo(rightX, laneY);
-        ctx.stroke();
+          ctx.strokeStyle = rightX > rightFadeStartX
+            ? linearGradient(ctx, rightFadeStartX, laneY, rightFadeEndX, laneY, [
+              [0, withAlpha(ROLL_COLOR, alpha * 0.9)],
+              [1, withAlpha(ROLL_COLOR, 0)],
+            ])
+            : withAlpha(ROLL_COLOR, alpha * 0.9);
+          ctx.lineWidth = rollThickness;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(leftX, laneY);
+          ctx.lineTo(rightX, laneY);
+          ctx.stroke();
 
-        if (rightX > rightFadeStartX) {
-          const highlightGradient = ctx.createLinearGradient(leftX, laneY, rightX, laneY);
-          const fadeStop = clamp((rightFadeStartX - leftX) / Math.max(rightX - leftX, 1), 0, 1);
-          highlightGradient.addColorStop(0, withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28));
-          highlightGradient.addColorStop(fadeStop, withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28));
-          highlightGradient.addColorStop(1, withAlpha({ r: 255, g: 255, b: 255 }, 0));
-          ctx.strokeStyle = highlightGradient;
-        } else {
-          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, alpha * 0.28);
+          ctx.strokeStyle = rightX > rightFadeStartX
+            ? linearGradient(ctx, rightFadeStartX, laneY, rightFadeEndX, laneY, [
+              [0, withAlpha(WHITE, alpha * 0.28)],
+              [1, withAlpha(WHITE, 0)],
+            ])
+            : withAlpha(WHITE, alpha * 0.28);
+          ctx.lineWidth = Math.max(1.2, rollThickness * 0.22);
+          ctx.beginPath();
+          ctx.moveTo(leftX, laneY);
+          ctx.lineTo(rightX, laneY);
+          ctx.stroke();
         }
-        ctx.lineWidth = Math.max(1.2, rollThickness * 0.22);
-        ctx.beginPath();
-        ctx.moveTo(leftX, laneY);
-        ctx.lineTo(rightX, laneY);
-        ctx.stroke();
-        // The roll as drawn, round ends and all, out to the canvas's edge.
-        this.hitTargets.push({
-          index: i,
-          x: leftX - (rollThickness / 2),
-          y: laneY - (rollThickness / 2),
-          width: Math.min(rightX, width) - leftX + rollThickness,
-          height: rollThickness,
-          corner: rollThickness / 2,
-        });
+
+        // The roll as drawn, round ends and all, clipped to the canvas's edge.
+        const targetWidth = Math.min(rightX, width) - leftX + rollThickness;
+        if (leftX < width + rollRadius && targetWidth > 0) {
+          this.hitTargets.push({
+            index: i,
+            x: leftX - rollRadius,
+            y: laneY - rollRadius,
+            width: targetWidth,
+            height: rollThickness,
+            corner: rollRadius,
+          });
+        }
         continue;
       }
 
-      const noteColor = isKatNote(object) ? katColor : donColor;
+      const noteColor = isKatNote(object) ? KAT_COLOR : DON_COLOR;
       const radius = Math.max(6, laneHeight * 0.28) * (isFinishNote(object) ? 1.38 : 1);
 
       // Hit: it swells and fades on the circle.
       if (object.time <= currentTime) {
         const burst = getHitBurst(currentTime - object.time);
         if (burst.alpha > 0.002) {
-          drawPieceCircle(ctx, judgeX, laneY, radius * burst.scale, noteColor, burst.alpha, { vivid: true });
+          const burstRadius = radius * burst.scale;
+          drawPieceCircle(ctx, judgeX, laneY, burstRadius, noteColor, burst.alpha, { vivid: true });
+          this.hitTargets.push({ index: i, x: judgeX, y: laneY, radius: burstRadius });
         }
         continue;
       }

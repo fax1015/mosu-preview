@@ -4,7 +4,8 @@
 
 import {
   buildSliderCurvePoints,
-  getPathLength,
+  measurePath,
+  positionOnMeasuredPath,
   simplifyPathForRendering,
   trimPathFromStart,
   trimPathToLength,
@@ -20,15 +21,19 @@ import {
 import {
   LONG_OBJECT_POST_HIT_FADE_MS,
   OSU_HEIGHT,
-  PIECE_MAX_ALPHA,
-  PIECE_SHADOW_SCALE,
-  SELECTION_RING_COLOUR,
-  drawPieceCircle,
   OSU_VIEW_HEIGHT,
   OSU_VIEW_WIDTH,
   OSU_WIDTH,
+  PIECE_MAX_ALPHA,
+  PIECE_SHADOW_SCALE,
+  PLAYFIELD_BACKGROUND,
+  buildPrefixMaxEndTimes,
+  drawPieceCircle,
+  drawSelectionRings,
+  findFirstIndexWithEndAtOrAfter,
   getApproachPreemptMs,
   getComboColour,
+  pickHitTarget,
   withAlpha,
 } from './shared.js';
 
@@ -36,7 +41,6 @@ const OSU_FIELD_OFFSET_X = (OSU_VIEW_WIDTH - OSU_WIDTH) / 2;
 const OSU_FIELD_OFFSET_Y = (OSU_VIEW_HEIGHT - OSU_HEIGHT) / 2;
 // Match the slight downward field placement observed in osu!'s legacy layout.
 const OSU_FIELD_VERTICAL_SHIFT = 8;
-const STANDARD_PLAYFIELD_BACKGROUND = 'rgba(19, 21, 26, 0.95)';
 // osu!lazer: StackOffset = StackHeight * Scale * -6.4, with Scale = radius/64,
 // so one stack level is worth radius/10 osu! pixels — 4.5px at CS 2 down to
 // 2.3px at CS 7. This constant is only the CS 5 value, used as a fallback when
@@ -72,8 +76,7 @@ const STANDARD_FADE_IN_PREEMPT_THRESHOLD_MS = 450;
 const APPROACH_CIRCLE_START_SCALE = 4;
 const sliderPathCache = new WeakMap();
 const sliderRenderPathCache = new WeakMap();
-const sliderPathMetricsCache = new WeakMap();
-const sliderRenderPathLengthCache = new WeakMap();
+const sliderPathCumulativeCache = new WeakMap();
 // Unstacked slider endpoints, keyed by object. Separate from sliderPathCache
 // because that one is keyed on the stack offset, which is exactly what the
 // stacking algorithm has not decided yet when it asks for these.
@@ -87,7 +90,7 @@ const standardSliderTickCache = new WeakMap();
 const MAX_SLIDER_TICK_PATH_LENGTH = 100000;
 const MAX_SLIDER_TICKS = 20000;
 
-const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(cs, 0, 10));
+const getCircleRadius = (cs) => 54.4 - (4.48 * clamp(Number.isFinite(cs) ? cs : 5, 0, 10));
 
 const getStandardPlayfieldLayout = (canvasWidth, canvasHeight, circleSize, padding = 0) => {
   const width = Math.max(1, Number(canvasWidth) || 1);
@@ -153,7 +156,7 @@ const buildSliderPathPointsOsu = (object, useStackOffset = true) => {
   if (
     cachedPath
     && Array.isArray(cachedPath.points)
-    && cachedPath.points.length >= 2
+    && cachedPath.points.length >= 1
     && cachedPath.stackIndex === stackIndex
   ) {
     return cachedPath.points;
@@ -193,62 +196,30 @@ const getSliderRenderPathPointsOsu = (object, scaleX, scaleY) => {
   return points;
 };
 
-const getSliderPathMetrics = (path) => {
-  const cached = sliderPathMetricsCache.get(path);
+const getSliderPathCumulativeLengths = (path) => {
+  const cached = sliderPathCumulativeCache.get(path);
   if (cached) return cached;
 
-  const cumulativeLengths = new Float64Array(path.length);
-  for (let i = 1; i < path.length; i += 1) {
-    cumulativeLengths[i] = cumulativeLengths[i - 1]
-      + Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
-  }
-  const metrics = { cumulativeLengths, totalLength: cumulativeLengths.at(-1) || 0 };
-  sliderPathMetricsCache.set(path, metrics);
-  return metrics;
+  const lengths = measurePath(path);
+  sliderPathCumulativeCache.set(path, lengths);
+  return lengths;
 };
 
-const positionOnSliderPathAtProgress = (path, progress) => {
-  if (!Array.isArray(path) || path.length === 0) return { x: 0, y: 0 };
-  if (path.length === 1) return path[0];
-
-  const { cumulativeLengths, totalLength } = getSliderPathMetrics(path);
-  if (totalLength <= 0) return path[0];
-  const target = clamp(Number(progress) || 0, 0, 1) * totalLength;
-  let low = 1;
-  let high = path.length - 1;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (cumulativeLengths[middle] < target) low = middle + 1;
-    else high = middle;
-  }
-
-  const start = path[low - 1];
-  const end = path[low];
-  const segmentStartLength = cumulativeLengths[low - 1];
-  const segmentLength = cumulativeLengths[low] - segmentStartLength;
-  const segmentProgress = segmentLength <= 0
-    ? 0
-    : clamp((target - segmentStartLength) / segmentLength, 0, 1);
-  return {
-    x: start.x + ((end.x - start.x) * segmentProgress),
-    y: start.y + ((end.y - start.y) * segmentProgress),
-  };
-};
+const positionOnSliderPathAtProgress = (path, progress) => (
+  positionOnMeasuredPath(path, getSliderPathCumulativeLengths(path), progress)
+);
 
 const getSliderRenderPathLength = (path) => {
-  if (sliderRenderPathLengthCache.has(path)) {
-    return sliderRenderPathLengthCache.get(path);
-  }
-  const length = getPathLength(path);
-  sliderRenderPathLengthCache.set(path, length);
-  return length;
+  const lengths = getSliderPathCumulativeLengths(path);
+  return lengths.length > 0 ? lengths[lengths.length - 1] : 0;
 };
 
 // A slider's `slides` counts spans, not repeats: one span is head-to-tail, and
 // each extra one is a reverse. Nearly everything that draws or times a slider
 // needs the same three numbers off the back of that.
 const getSliderSpanTiming = (object) => {
-  const totalDuration = Math.max(1, (object.endTime || object.time) - object.time);
+  const endTime = Number.isFinite(object.endTime) ? object.endTime : object.time;
+  const totalDuration = Math.max(1, endTime - object.time);
   const slides = Math.max(1, object.slides || 1);
   return { totalDuration, slides, spanDuration: totalDuration / slides };
 };
@@ -322,8 +293,16 @@ const getRawObjectEndPositionOsu = (object) => {
     return cachedEnd;
   }
 
-  const path = buildSliderPathPointsOsu(object, false);
-  const endPosition = path.at(-1) || getRawObjectStartPositionOsu(object);
+  // An even-span repeat slider returns to its start point on the final span,
+  // matching osu!lazer's Slider.EndPosition for stacking.
+  const slides = Math.max(1, object.slides || 1);
+  let endPosition;
+  if ((slides % 2) === 0) {
+    endPosition = getRawObjectStartPositionOsu(object);
+  } else {
+    const path = buildSliderPathPointsOsu(object, false);
+    endPosition = path.at(-1) || getRawObjectStartPositionOsu(object);
+  }
   rawSliderEndCache.set(object, endPosition);
   return endPosition;
 };
@@ -440,16 +419,22 @@ const applyPreviewStackingOld = (objects, approachRate, stackLeniency) => {
 
   for (let i = 0; i < objects.length; i += 1) {
     const current = objects[i];
+    if (current.kind === 'spinner') {
+      continue;
+    }
     if ((current.stackIndex || 0) !== 0 && current.kind !== 'slider') {
       continue;
     }
 
-    let startTime = Number(current.endTime) || current.time;
+    let startTime = Number.isFinite(current.endTime) ? current.endTime : current.time;
     let sliderStack = 0;
     for (let j = i + 1; j < objects.length; j += 1) {
       const next = objects[j];
       if ((next.time - stackThreshold) > startTime) {
         break;
+      }
+      if (next.kind === 'spinner') {
+        continue;
       }
 
       const currentStart = getRawObjectStartPositionOsu(current);
@@ -457,14 +442,15 @@ const applyPreviewStackingOld = (objects, approachRate, stackLeniency) => {
         ? getRawObjectEndPositionOsu(current)
         : currentStart;
       const nextStart = getRawObjectStartPositionOsu(next);
+      const nextEndTime = Number.isFinite(next.endTime) ? next.endTime : next.time;
 
       if (distanceBetweenOsuPositions(nextStart, currentStart) < 3) {
         current.stackIndex = (current.stackIndex || 0) + 1;
-        startTime = next.time;
+        startTime = nextEndTime;
       } else if (distanceBetweenOsuPositions(nextStart, currentEnd) < 3) {
         sliderStack += 1;
         next.stackIndex -= sliderStack;
-        startTime = next.time;
+        startTime = nextEndTime;
       }
     }
   }
@@ -492,7 +478,7 @@ const applyPreviewStackingModern = (objects, approachRate, stackLeniency) => {
           continue;
         }
 
-        const objectIEndTime = Number(objectN.endTime) || objectN.time;
+        const objectIEndTime = Number.isFinite(objectN.endTime) ? objectN.endTime : objectN.time;
         if ((Math.trunc(objectI.time) - Math.trunc(objectIEndTime)) > stackThreshold) {
           break;
         }
@@ -594,6 +580,8 @@ const getObjectEndTimeMs = (object) => (
 
 const smoothstep = (t) => t * t * (3 - (2 * t));
 
+const FOLLOW_LINE_ALPHAS_SCRATCH = new Float32Array(FOLLOW_LINE_GRADIENT_STEPS + 1);
+
 const drawFollowPoints = ({
   ctx,
   toCanvas,
@@ -656,7 +644,6 @@ const drawFollowPoints = ({
       ? Math.min((circleRadius * FOLLOW_LINE_EDGE_RADII) / bandLength, 0.5)
       : 0.5;
 
-    const fade = ctx.createLinearGradient(headX, headY, tailX, tailY);
     let peak = 0;
     for (let k = 0; k <= FOLLOW_LINE_GRADIENT_STEPS; k += 1) {
       const offset = k / FOLLOW_LINE_GRADIENT_STEPS;
@@ -667,11 +654,16 @@ const drawFollowPoints = ({
         line.from + ((line.to - line.from) * offset),
         line,
       ), 0, 1);
+      FOLLOW_LINE_ALPHAS_SCRATCH[k] = alpha;
       if (alpha > peak) peak = alpha;
-      // Rounded well below a step of 8-bit alpha, so the colours parse from cache.
-      fade.addColorStop(offset, `rgba(255, 255, 255, ${alpha.toFixed(3)})`);
     }
     if (peak <= 0.001) continue;
+
+    const fade = ctx.createLinearGradient(headX, headY, tailX, tailY);
+    for (let k = 0; k <= FOLLOW_LINE_GRADIENT_STEPS; k += 1) {
+      // Rounded well below a step of 8-bit alpha, so the colours parse from cache.
+      fade.addColorStop(k / FOLLOW_LINE_GRADIENT_STEPS, `rgba(255, 255, 255, ${FOLLOW_LINE_ALPHAS_SCRATCH[k].toFixed(3)})`);
+    }
 
     ctx.strokeStyle = fade;
     // Thinner continuous line, decoupled from circle radius
@@ -731,6 +723,12 @@ export class StandardRenderer {
   constructor(host) {
     this.host = host;
     this.visibleObjectsScratch = [];
+    this.visibleIndicesScratch = [];
+    this.hitTargets = [];
+    this.prefixMaxEnd = null;
+    this.prefixMaxEndObjects = null;
+    this.sliderPathXScratch = new Float64Array(64);
+    this.sliderPathYScratch = new Float64Array(64);
     // Created on first use; null where they cannot be.
     this.followLineLayers = undefined;
     this.snakingSliders = false;
@@ -763,6 +761,9 @@ export class StandardRenderer {
   }
 
   setBeatmap(mapData) {
+    this.hitTargets = [];
+    this.visibleObjectsScratch.length = 0;
+    this.visibleIndicesScratch.length = 0;
     if ((mapData?.mode ?? 0) === 0 && Array.isArray(mapData?.objects)) {
       applyPreviewStacking(
         mapData.objects,
@@ -771,17 +772,49 @@ export class StandardRenderer {
         mapData.beatmapVersion,
         mapData.circleSize,
       );
+      this.prefixMaxEndObjects = mapData.objects;
+      this.prefixMaxEnd = buildPrefixMaxEndTimes(mapData.objects);
+    } else {
+      this.prefixMaxEndObjects = null;
+      this.prefixMaxEnd = null;
     }
   }
 
+  dispose() {
+    if (this.followLineLayers) {
+      if (this.followLineLayers.lines?.canvas) {
+        this.followLineLayers.lines.canvas.width = 0;
+        this.followLineLayers.lines.canvas.height = 0;
+      }
+      if (this.followLineLayers.objects?.canvas) {
+        this.followLineLayers.objects.canvas.width = 0;
+        this.followLineLayers.objects.canvas.height = 0;
+      }
+    }
+    this.followLineLayers = undefined;
+    this.hitTargets = [];
+    this.visibleObjectsScratch.length = 0;
+    this.visibleIndicesScratch.length = 0;
+    this.prefixMaxEnd = null;
+    this.prefixMaxEndObjects = null;
+  }
+
   render(ctx, width, height) {
-    ctx.fillStyle = STANDARD_PLAYFIELD_BACKGROUND;
+    ctx.fillStyle = PLAYFIELD_BACKGROUND;
     ctx.fillRect(0, 0, width, height);
     this.renderField(ctx, width, height);
   }
 
   getTimingState(time) {
     return getTimingStateAt(this.getControlPoints(), time);
+  }
+
+  ensureSliderCoordScratch(length) {
+    if (length > this.sliderPathXScratch.length) {
+      const nextSize = Math.max(length, this.sliderPathXScratch.length * 2);
+      this.sliderPathXScratch = new Float64Array(nextSize);
+      this.sliderPathYScratch = new Float64Array(nextSize);
+    }
   }
 
   buildSliderTicks(object) {
@@ -792,6 +825,9 @@ export class StandardRenderer {
     const sliderTickRate = Number.isFinite(this.mapData?.sliderTickRate) && this.mapData.sliderTickRate > 0
       ? this.mapData.sliderTickRate
       : 1;
+    const beatmapVersion = Number.isFinite(Number(this.mapData?.beatmapVersion))
+      ? Number(this.mapData.beatmapVersion)
+      : 14;
     const stackIndex = object.stackIndex || 0;
     const objectPreemptMs = getApproachPreemptMs(this.mapData?.approachRate);
     const cachedTicks = standardSliderTickCache.get(object);
@@ -799,6 +835,7 @@ export class StandardRenderer {
       cachedTicks
       && Array.isArray(cachedTicks.ticks)
       && cachedTicks.sliderTickRate === sliderTickRate
+      && cachedTicks.beatmapVersion === beatmapVersion
       && cachedTicks.stackIndex === stackIndex
       && cachedTicks.objectPreemptMs === objectPreemptMs
     ) {
@@ -812,7 +849,7 @@ export class StandardRenderer {
     const ticks = [];
     const cacheTicks = () => {
       standardSliderTickCache.set(object, {
-        sliderTickRate, stackIndex, objectPreemptMs, ticks,
+        sliderTickRate, beatmapVersion, stackIndex, objectPreemptMs, ticks,
       });
       return ticks;
     };
@@ -822,9 +859,16 @@ export class StandardRenderer {
     }
 
     const velocity = pathLength / Math.max(1, spanDuration);
-    const beatLength = this.getTimingState(object.time).beatLength;
+    const timingState = this.getTimingState(object.time);
+    const beatLength = timingState.beatLength;
+    const svMultiplier = Number.isFinite(timingState.svMultiplier) && timingState.svMultiplier > 0
+      ? timingState.svMultiplier
+      : 1;
+    const tickDistanceMultiplier = beatmapVersion < 8 ? (1 / svMultiplier) : 1;
     const scoringDistance = velocity * beatLength;
-    const tickDistance = sliderTickRate > 0 ? (scoringDistance / sliderTickRate) : pathLength;
+    const tickDistance = sliderTickRate > 0
+      ? ((scoringDistance / sliderTickRate) * tickDistanceMultiplier)
+      : pathLength;
 
     if (!(Number.isFinite(tickDistance) && tickDistance > 0)) {
       return cacheTicks();
@@ -833,7 +877,7 @@ export class StandardRenderer {
     const minDistanceFromEnd = velocity * 10;
 
     const path = buildSliderPathPointsOsu(object);
-    if (path.length < 2 || getPathLength(path) <= 0) {
+    if (path.length < 2 || getSliderRenderPathLength(path) <= 0) {
       return cacheTicks();
     }
 
@@ -869,65 +913,22 @@ export class StandardRenderer {
       }
     }
 
+    // Reverse spans generate ticks from high to low time; sorting once in
+    // chronological order keeps ticks monotonic and enables O(log T) per-frame
+    // active-window culling.
+    ticks.sort((a, b) => a.time - b.time);
+
     return cacheTicks();
   }
 
   /**
    * The object under a point on the playfield, as an index into the map's
-   * objects, or -1.
-   *
-   * osu!standard only. There an object sits at a fixed place on the field for
-   * as long as it is on screen, which is what makes it something to point at;
-   * the other rulesets scroll their notes past a judgement line, so what is
-   * under the pointer depends on the moment you look rather than on the note.
-   *
-   * Tested against the objects the last frame actually drew, so the answer can
-   * never name something that is not on screen.
+   * objects, or -1. Tested against the targets the last frame actually drew,
+   * matching the scrolling rulesets so hit testing and selection rings agree
+   * on geometry, CS 0, spinners, and fade-out timing.
    */
   objectIndexAtPoint(canvasX, canvasY) {
-    const objects = this.mapData?.objects;
-    if ((this.mapData?.mode ?? 0) !== 0 || !Array.isArray(objects) || objects.length === 0) {
-      return -1;
-    }
-
-    const width = Math.max(1, this.host.playfieldCanvas?.clientWidth || 0);
-    const height = Math.max(1, this.host.playfieldCanvas?.clientHeight || 0);
-    const layout = getStandardPlayfieldLayout(width, height, this.mapData.circleSize, 0);
-    if (!(layout.scale > 0) || !(layout.scaleY > 0)) {
-      return -1;
-    }
-
-    // Back into the map's own coordinates, where a circle's radius is one
-    // number whatever the canvas is doing.
-    const osuX = (canvasX - layout.playfieldX) / layout.scale;
-    const osuY = (canvasY - layout.playfieldY) / layout.scaleY;
-    const radiusOsu = getCircleRadius(clamp(Number(this.mapData.circleSize) || 5, 0, 10));
-    const radiusSq = radiusOsu * radiusOsu;
-
-    // The scratch list reaches a little further ahead than the objects are
-    // actually drawn, so that sliders already under way are laid out. An
-    // object still before its approach circle has not appeared yet and must
-    // not be clickable through empty field.
-    const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
-
-    let picked = null;
-    for (const object of this.visibleObjectsScratch) {
-      if (this.currentTimeMs < object.time - preemptMs) {
-        continue;
-      }
-      const head = getObjectStartPositionOsu(object);
-      const dx = head.x - osuX;
-      const dy = head.y - osuY;
-      if ((dx * dx) + (dy * dy) > radiusSq) {
-        continue;
-      }
-      // A stack is drawn earliest on top, so that is the one being pointed at.
-      if (!picked || object.time < picked.time) {
-        picked = object;
-      }
-    }
-
-    return picked ? objects.indexOf(picked) : -1;
+    return pickHitTarget(this.hitTargets, canvasX, canvasY);
   }
 
   // osu!standard uses 640×480 game coordinates with a 512×384 field centered
@@ -952,9 +953,11 @@ export class StandardRenderer {
       playfieldHeight - 1,
     );
 
+    const scaleX = playfieldWidth / OSU_WIDTH;
+    const scaleY = playfieldHeight / OSU_HEIGHT;
     const toCanvas = (x, y) => ({
-      x: playfieldX + ((x / OSU_WIDTH) * playfieldWidth),
-      y: playfieldY + ((y / OSU_HEIGHT) * playfieldHeight),
+      x: playfieldX + (x * scaleX),
+      y: playfieldY + (y * scaleY),
     });
 
     const preemptMs = getApproachPreemptMs(this.mapData.approachRate);
@@ -965,7 +968,7 @@ export class StandardRenderer {
       (circleRadius * DRAWN_CIRCLE_RADIUS_SCALE) - DRAWN_CIRCLE_INSET_PX,
     );
     const minVisibleTime = this.currentTimeMs - Math.max(LONG_OBJECT_POST_HIT_FADE_MS, SLIDER_HEAD_HIT_FADE_MS);
-    const maxVisibleTime = this.currentTimeMs + preemptMs + 220;
+    const maxVisibleTime = this.currentTimeMs + preemptMs;
 
     // Objects are slightly see-through, so a follow line drawn straight under
     // them shows through and reads as lying on top. Where layers are to hand,
@@ -982,26 +985,41 @@ export class StandardRenderer {
       scale,
     });
     const layered = Boolean(layers) && followLineCount > 0;
+    if (layered) {
+      clearLayer(layers.objects, playfieldCtx);
+    }
     const ctx = layered ? layers.objects.ctx : playfieldCtx;
 
-    // Reused across frames: this is rebuilt every frame and discarded, and at
-    // 60fps the throwaway arrays were a steady source of GC pressure.
-    const visibleObjects = this.visibleObjectsScratch;
-    visibleObjects.length = 0;
-    for (
-      let i = findFirstIndexAtOrAfter(this.mapData.objects, minVisibleTime - this.maxObjectDurationMs);
-      i < this.mapData.objects.length;
-      i += 1
-    ) {
-      const object = this.mapData.objects[i];
-      if (object.time > maxVisibleTime) break;
-      if (object.endTime < minVisibleTime) continue;
-      visibleObjects.push(object);
+    const objects = this.mapData.objects;
+    if (this.prefixMaxEndObjects !== objects) {
+      this.prefixMaxEndObjects = objects;
+      this.prefixMaxEnd = buildPrefixMaxEndTimes(objects);
     }
 
-    visibleObjects.sort((a, b) => b.time - a.time);
+    // Reused across frames: avoids throwaway arrays at 60fps and keeps object
+    // indices on hand so hit targets never need O(N) objects.indexOf scans.
+    const visibleObjects = this.visibleObjectsScratch;
+    const visibleIndices = this.visibleIndicesScratch;
+    visibleObjects.length = 0;
+    visibleIndices.length = 0;
+    const startIndex = findFirstIndexWithEndAtOrAfter(this.prefixMaxEnd, minVisibleTime);
+    for (let i = startIndex; i < objects.length; i += 1) {
+      const object = objects[i];
+      if (object.time > maxVisibleTime) break;
+      const endTime = Number.isFinite(object.endTime) ? object.endTime : object.time;
+      if (endTime < minVisibleTime) continue;
+      visibleObjects.push(object);
+      visibleIndices.push(i);
+    }
 
-    for (const object of visibleObjects) {
+    this.hitTargets = [];
+
+    // Draw latest first so earliest objects sit on top of stacks. Since
+    // `objects` is time-sorted, iterating backwards is already descending order
+    // without allocating or sorting every frame.
+    for (let v = visibleObjects.length - 1; v >= 0; v -= 1) {
+      const object = visibleObjects[v];
+      const objectIndex = visibleIndices[v];
       const combo = getComboColour(this.comboColours, object);
       const sliderReverseIndicators = [];
       let sliderHeadCanvasPoint = null;
@@ -1019,7 +1037,7 @@ export class StandardRenderer {
         if (sliderHeadElapsedMs >= 0) {
           sliderHeadHitProgress = clamp(sliderHeadElapsedMs / SLIDER_HEAD_HIT_FADE_MS, 0, 1);
           const sliderHeadHitEaseOut = 1 - ((1 - sliderHeadHitProgress) * (1 - sliderHeadHitProgress));
-          sliderHeadHitAlpha = 0.95 * (1 - sliderHeadHitEaseOut);
+          sliderHeadHitAlpha = OBJECT_VISUAL_MAX_ALPHA * Math.pow(1 - sliderHeadHitEaseOut, 1.25);
           sliderHeadHitRadius = drawnCircleRadius * (1 + (SLIDER_HEAD_HIT_SCALE_BOOST * sliderHeadHitEaseOut));
         }
       }
@@ -1030,7 +1048,7 @@ export class StandardRenderer {
       }
       const point = toCanvas(objectPosition.x, objectPosition.y);
       const timeUntil = object.time - this.currentTimeMs;
-      const fadeAnchorTime = object.kind === 'circle' ? object.time : object.endTime;
+      const fadeAnchorTime = object.kind === 'circle' ? object.time : (Number.isFinite(object.endTime) ? object.endTime : object.time);
       const fadeWindowMs = object.kind === 'circle'
         ? Math.max(CIRCLE_POST_HIT_FADE_MS, SLIDER_HEAD_HIT_FADE_MS)
         : LONG_OBJECT_POST_HIT_FADE_MS;
@@ -1064,13 +1082,13 @@ export class StandardRenderer {
       if (object.kind === 'slider') {
         // Match the slider's filled body plus outline to the visible hit-circle diameter.
         const sliderBodyRadius = Math.max(0.5, objectRenderRadius - sliderSharedOutlineWidth);
-        const sliderRenderPathPoints = getSliderRenderPathPointsOsu(
-          object,
-          playfieldWidth / OSU_WIDTH,
-          playfieldHeight / OSU_HEIGHT,
-        );
+        const sliderRenderPathPoints = getSliderRenderPathPointsOsu(object, scaleX, scaleY);
         let sliderDrawPointsOsu = sliderRenderPathPoints;
         const sliderRenderPathLength = getSliderRenderPathLength(sliderRenderPathPoints);
+        const {
+          totalDuration: sliderDuration, slides, spanDuration,
+        } = getSliderSpanTiming(object);
+
         if (this.snakingSliders && timeUntil > 0) {
           const fadeInElapsedMs = preemptMs - timeUntil;
           // osu!lazer's SnakingSliderBody snakes over a third of the approach,
@@ -1084,9 +1102,6 @@ export class StandardRenderer {
             );
           }
         } else if (this.sliderSnakeOut && this.currentTimeMs > object.time) {
-          const {
-            totalDuration: sliderDuration, slides, spanDuration,
-          } = getSliderSpanTiming(object);
           const elapsed = clamp(this.currentTimeMs - object.time, 0, sliderDuration);
           const spanIndex = Math.min(slides - 1, Math.floor(elapsed / Math.max(1, spanDuration)));
 
@@ -1105,101 +1120,131 @@ export class StandardRenderer {
             }
           }
         }
-        const pathPoints = sliderDrawPointsOsu.map((p) => toCanvas(p.x, p.y));
-        if (pathPoints.length > 0) {
+
+        const drawCount = sliderDrawPointsOsu.length;
+        if (drawCount > 0) {
+          this.ensureSliderCoordScratch(drawCount);
+          const xs = this.sliderPathXScratch;
+          const ys = this.sliderPathYScratch;
+          for (let i = 0; i < drawCount; i += 1) {
+            xs[i] = playfieldX + (sliderDrawPointsOsu[i].x * scaleX);
+            ys[i] = playfieldY + (sliderDrawPointsOsu[i].y * scaleY);
+          }
           // osu!lazer's DrawableSliderTail puts the end circle on whichever end
           // the last span finishes at, which on a slider with an even number of
           // spans is back at the head rather than out at the tail.
-          sliderTailCanvasPoint = ((getSliderSpanTiming(object).slides - 1) % 2) === 0
-            ? pathPoints[pathPoints.length - 1]
-            : pathPoints[0];
-        }
-        if (pathPoints.length > 1) {
-          const sliderShadowAlpha = clamp(baseAlpha * 0.24, 0, 0.3);
-          ctx.strokeStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderShadowAlpha);
-          ctx.lineWidth = (sliderBodyRadius * 2 * STANDARD_OBJECT_SHADOW_SCALE) + Math.max(1.6, circleRadius * 0.2);
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          ctx.beginPath();
-          ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-          for (let i = 1; i < pathPoints.length; i += 1) {
-            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
-          }
-          ctx.stroke();
+          const tailIdx = ((slides - 1) % 2) === 0 ? drawCount - 1 : 0;
+          sliderTailCanvasPoint = { x: xs[tailIdx], y: ys[tailIdx] };
 
-          ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, sliderSharedOutlineAlpha);
-          ctx.lineWidth = (sliderBodyRadius * 2) + (sliderSharedOutlineWidth * 2);
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          ctx.beginPath();
-          ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-          for (let i = 1; i < pathPoints.length; i += 1) {
-            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
-          }
-          ctx.stroke();
-
-          ctx.strokeStyle = withAlpha(combo, baseAlpha * 0.56);
-          ctx.lineWidth = sliderBodyRadius * 2;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          ctx.beginPath();
-          ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-          for (let i = 1; i < pathPoints.length; i += 1) {
-            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
-          }
-          ctx.stroke();
-
-          const sliderTicks = this.buildSliderTicks(object);
-          const baseTickRadius = Math.max(1.6, drawnCircleRadius * 0.14);
-          for (const tick of sliderTicks) {
-            if (!tick?.position) {
-              continue;
-            }
-
-            const tickElapsed = this.currentTimeMs - tick.time;
-            const tickPreempt = Number.isFinite(tick.preempt) ? tick.preempt : 0;
-            if (tickElapsed < -tickPreempt) {
-              continue;
-            }
-
-            let tickAlpha = objectRenderAlpha * 0.72;
-            let tickRadius = baseTickRadius;
-
-            if (tickElapsed > 0) {
-              const tickFadeProgress = clamp(tickElapsed / SLIDER_HEAD_HIT_FADE_MS, 0, 1);
-              const tickEaseOut = 1 - ((1 - tickFadeProgress) * (1 - tickFadeProgress));
-              tickAlpha *= (1 - tickFadeProgress);
-              // Scale expansion: grow by 80% as it fades out to make it punchier.
-              tickRadius = baseTickRadius * (1 + (0.8 * tickEaseOut));
-            } else {
-              // Comes in over lazer's 150ms, swelling from half size over four
-              // times that, so a tick arrives rather than simply being there.
-              const sinceAppeared = tickPreempt + tickElapsed;
-              tickAlpha *= clamp(sinceAppeared / SLIDER_TICK_FADE_IN_MS, 0, 1);
-              const grow = clamp(sinceAppeared / (SLIDER_TICK_FADE_IN_MS * 4), 0, 1);
-              tickRadius = baseTickRadius * (0.5 + (0.5 * (1 - ((1 - grow) ** 2))));
-            }
-            if (tickAlpha <= 0.001) {
-              continue;
-            }
-
-            const tickPoint = toCanvas(tick.position.x, tick.position.y);
-            ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, tickAlpha);
+          if (drawCount > 1) {
+            // Trace the slider path once and stroke shadow, outline, and body
+            // on the same path instead of rebuilding it 3x per frame.
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
             ctx.beginPath();
-            ctx.arc(tickPoint.x, tickPoint.y, tickRadius, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.moveTo(xs[0], ys[0]);
+            for (let i = 1; i < drawCount; i += 1) {
+              ctx.lineTo(xs[i], ys[i]);
+            }
+
+            const sliderShadowAlpha = clamp(baseAlpha * 0.24, 0, 0.3);
+            ctx.strokeStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderShadowAlpha);
+            ctx.lineWidth = (sliderBodyRadius * 2 * STANDARD_OBJECT_SHADOW_SCALE) + Math.max(1.6, circleRadius * 0.2);
+            ctx.stroke();
+
+            ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, sliderSharedOutlineAlpha);
+            ctx.lineWidth = (sliderBodyRadius * 2) + (sliderSharedOutlineWidth * 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = withAlpha(combo, baseAlpha * 0.56);
+            ctx.lineWidth = sliderBodyRadius * 2;
+            ctx.stroke();
+          }
+        }
+
+        // Ticks and reverse-arrow animations stay outside `drawCount > 1` so
+        // `sliderSnakeOut` collapsing the body at endTime does not clip their
+        // active hit-fades.
+        if (sliderRenderPathPoints.length > 1) {
+          const sliderTicks = this.buildSliderTicks(object);
+          if (sliderTicks.length > 0) {
+            const baseTickRadius = Math.max(1.6, drawnCircleRadius * 0.14);
+            const firstTickIndex = findFirstIndexAtOrAfter(sliderTicks, this.currentTimeMs - SLIDER_HEAD_HIT_FADE_MS);
+            const maxTickPreempt = (spanDuration / 2) + Math.max(SLIDER_TICK_REPEAT_OFFSET_MS, preemptMs * 0.66);
+            for (let t = firstTickIndex; t < sliderTicks.length; t += 1) {
+              const tick = sliderTicks[t];
+              if (tick.time - maxTickPreempt > this.currentTimeMs) {
+                break;
+              }
+              if (!tick?.position) {
+                continue;
+              }
+
+              const tickElapsed = this.currentTimeMs - tick.time;
+              const tickPreempt = Number.isFinite(tick.preempt) ? tick.preempt : 0;
+              if (tickElapsed < -tickPreempt) {
+                continue;
+              }
+
+              let tickAlpha = objectRenderAlpha * 0.72;
+              let tickRadius = baseTickRadius;
+
+              if (tickElapsed > 0) {
+                const tickFadeProgress = clamp(tickElapsed / SLIDER_HEAD_HIT_FADE_MS, 0, 1);
+                const tickEaseOut = 1 - ((1 - tickFadeProgress) * (1 - tickFadeProgress));
+                tickAlpha *= (1 - tickFadeProgress);
+                // Scale expansion: grow by 80% as it fades out to make it punchier.
+                tickRadius = baseTickRadius * (1 + (0.8 * tickEaseOut));
+              } else {
+                // Comes in over lazer's 150ms, swelling from half size over four
+                // times that, so a tick arrives rather than simply being there.
+                const sinceAppeared = tickPreempt + tickElapsed;
+                tickAlpha *= clamp(sinceAppeared / SLIDER_TICK_FADE_IN_MS, 0, 1);
+                const grow = clamp(sinceAppeared / (SLIDER_TICK_FADE_IN_MS * 4), 0, 1);
+                tickRadius = baseTickRadius * (0.5 + (0.5 * (1 - ((1 - grow) ** 2))));
+              }
+              if (tickAlpha <= 0.001) {
+                continue;
+              }
+
+              const tickPoint = toCanvas(tick.position.x, tick.position.y);
+              ctx.fillStyle = withAlpha({ r: 255, g: 255, b: 255 }, tickAlpha);
+              ctx.beginPath();
+              ctx.arc(tickPoint.x, tickPoint.y, tickRadius, 0, Math.PI * 2);
+              ctx.fill();
+            }
           }
 
-          if ((object.slides || 1) > 1) {
-            const fullPathPoints = sliderDrawPointsOsu === sliderRenderPathPoints
-              ? pathPoints
-              : sliderRenderPathPoints.map((p) => toCanvas(p.x, p.y));
+          if (slides > 1) {
             const indicatorSize = Math.max(5, drawnCircleRadius * 0.45);
-            const { slides, spanDuration } = getSliderSpanTiming(object);
-            // Generate a reverse indicator for each span boundary.
-            // Reverse at end of span i occurs at object.time + (i+1) * spanDuration.
-            // Even span index → reverse at path end; odd → at path start.
-            for (let spanIndex = 0; spanIndex < slides - 1; spanIndex += 1) {
+            const animDuration = Math.min(300, spanDuration);
+            // Only visit spans whose reverse indicator can be visible now (O(1)
+            // instead of scanning up to thousands of repeats every frame).
+            const firstActiveSpan = Math.max(
+              0,
+              Math.floor((this.currentTimeMs - animDuration - object.time) / Math.max(1, spanDuration)) - 1,
+            );
+            const lastActiveSpan = Math.min(
+              slides - 2,
+              Math.max(0, Math.floor((this.currentTimeMs - object.time) / Math.max(1, spanDuration)) + 1),
+            );
+            const fullPathEnd = (atEnd) => {
+              const endOsu = getPathEnd(sliderRenderPathPoints, atEnd);
+              return {
+                position: toCanvas(endOsu.position.x, endOsu.position.y),
+                direction: { x: endOsu.direction.x * scaleX, y: endOsu.direction.y * scaleY },
+              };
+            };
+            const drawPathEnd = (atEnd) => {
+              const source = drawCount > 1 ? sliderDrawPointsOsu : sliderRenderPathPoints;
+              const endOsu = getPathEnd(source, atEnd);
+              return {
+                position: toCanvas(endOsu.position.x, endOsu.position.y),
+                direction: { x: endOsu.direction.x * scaleX, y: endOsu.direction.y * scaleY },
+              };
+            };
+
+            for (let spanIndex = firstActiveSpan; spanIndex <= lastActiveSpan; spanIndex += 1) {
               const reverseTime = object.time + ((spanIndex + 1) * spanDuration);
               const isAtEnd = (spanIndex % 2) === 0;
               const elapsed = this.currentTimeMs - reverseTime;
@@ -1223,7 +1268,6 @@ export class StandardRenderer {
 
               if (elapsed >= 0) {
                 // Hit Animation: expand and fade out (lazer uses Math.min(300, spanDuration))
-                const animDuration = Math.min(300, spanDuration);
                 if (elapsed >= animDuration) {
                   continue; // Fully faded out
                 }
@@ -1267,7 +1311,7 @@ export class StandardRenderer {
               // Lazer leaves a hit repeat where it was: on the last span the
               // snake pulls away from this end and would drag it along.
               sliderReverseIndicators.push({
-                ...getPathEnd(elapsed >= 0 ? fullPathPoints : pathPoints, isAtEnd),
+                ...(elapsed >= 0 ? fullPathEnd(isAtEnd) : drawPathEnd(isAtEnd)),
                 size: reverseSize,
                 circleRadius: reverseCircleRadius,
                 alpha: reverseAlpha,
@@ -1298,6 +1342,13 @@ export class StandardRenderer {
         ctx.beginPath();
         ctx.arc(centerX, centerY, spinnerRadius, 0, Math.PI * 2);
         ctx.stroke();
+
+        this.hitTargets.push({
+          index: objectIndex,
+          x: centerX,
+          y: centerY,
+          radius: spinnerRadius,
+        });
         continue;
       }
 
@@ -1370,30 +1421,14 @@ export class StandardRenderer {
       }
 
       if (object.kind === 'slider' && sliderHeadCanvasPoint && sliderHeadHitAlpha > 0.001) {
-        ctx.fillStyle = withAlpha({ r: 0, g: 0, b: 0 }, sliderHeadHitAlpha * 0.3);
-        ctx.beginPath();
-        ctx.arc(
+        drawPieceCircle(
+          ctx,
           sliderHeadCanvasPoint.x,
           sliderHeadCanvasPoint.y,
-          sliderHeadHitRadius * 1.1,
-          0,
-          Math.PI * 2,
+          sliderHeadHitRadius,
+          combo,
+          sliderHeadHitAlpha,
         );
-        ctx.fill();
-
-        ctx.fillStyle = withAlpha(combo, sliderHeadHitAlpha);
-        ctx.beginPath();
-        ctx.arc(sliderHeadCanvasPoint.x, sliderHeadCanvasPoint.y, sliderHeadHitRadius, 0, Math.PI * 2);
-        ctx.fill();
-
-        const sliderHeadOutlineAlpha = clamp((sliderHeadHitAlpha * 1.2) + 0.05, 0, 1);
-        const sliderHeadOutlineWidth = Math.max(1.5, sliderHeadHitRadius * 0.12);
-        const sliderHeadOutlineRadius = Math.max(0.5, sliderHeadHitRadius - (sliderHeadOutlineWidth * 0.5));
-        ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, sliderHeadOutlineAlpha);
-        ctx.lineWidth = sliderHeadOutlineWidth;
-        ctx.beginPath();
-        ctx.arc(sliderHeadCanvasPoint.x, sliderHeadCanvasPoint.y, sliderHeadOutlineRadius, 0, Math.PI * 2);
-        ctx.stroke();
       }
 
       if ((object.kind === 'circle' || object.kind === 'slider') && Number.isFinite(object.comboNumber)) {
@@ -1418,6 +1453,16 @@ export class StandardRenderer {
           );
         }
       }
+
+      const hitPoint = object.kind === 'slider' && sliderHeadCanvasPoint
+        ? sliderHeadCanvasPoint
+        : point;
+      this.hitTargets.push({
+        index: objectIndex,
+        x: hitPoint.x,
+        y: hitPoint.y,
+        radius: drawnCircleRadius,
+      });
     }
 
     if (layered) {
@@ -1427,28 +1472,26 @@ export class StandardRenderer {
     // Rings over everything, on the canvas itself rather than the object
     // layer: what is picked out has to stay visible through a follow line or a
     // slider drawn after it.
-    this.drawSelection(playfieldCtx, toCanvas, drawnCircleRadius);
+    this.drawSelection(playfieldCtx);
   }
 
-  /**
-   * A ring around each picked object that is on screen, matching the one the
-   * timeline draws: the two are one selection, and it is what a copied
-   * timestamp will name. Drawn by whichever playfield's map the timeline is
-   * showing: the lead's, or a compared difficulty's while that one is in focus.
-   */
-  drawSelection(ctx, toCanvas, circleRadius) {
-    if (!this.host.showsTimelineObjects()) {
-      return;
-    }
-    const selected = this.host.selectionTimeline.selection;
+  drawSelection(ctx, toCanvas = null, circleRadius = 0) {
+    const selected = this.host.getSelectionToRing?.();
     if (!selected || selected.size === 0) {
       return;
     }
-
+    if (this.hitTargets.length > 0) {
+      drawSelectionRings(ctx, this.hitTargets, selected);
+      return;
+    }
+    if (typeof toCanvas !== 'function' || !(circleRadius > 0)) {
+      return;
+    }
     const objects = this.mapData?.objects;
-    let traced = 0;
-    ctx.save();
-    ctx.beginPath();
+    if (!Array.isArray(objects)) {
+      return;
+    }
+    const fallbackTargets = [];
     for (const object of this.visibleObjectsScratch) {
       const index = objects.indexOf(object);
       if (index < 0 || !selected.has(index)) {
@@ -1456,22 +1499,19 @@ export class StandardRenderer {
       }
       const position = getObjectStartPositionOsu(object);
       const point = toCanvas(position.x, position.y);
-      const radius = circleRadius + 2.5;
-      ctx.moveTo(point.x + radius, point.y);
-      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
-      traced += 1;
+      fallbackTargets.push({ index, x: point.x, y: point.y, radius: circleRadius });
     }
-    if (traced > 0) {
-      ctx.strokeStyle = SELECTION_RING_COLOUR;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-    ctx.restore();
+    drawSelectionRings(ctx, fallbackTargets, selected);
   }
 
   // Two offscreen layers matched to the playfield canvas and cleared, or null
-  // where there is no OffscreenCanvas (as under node).
+  // where there is no OffscreenCanvas (as under node) or the target has zero
+  // dimensions. Only clears the lines layer upfront; the objects layer is
+  // cleared only when follow lines are actually drawn this frame.
   prepareFollowLineLayers(target) {
+    if (!target?.canvas || target.canvas.width <= 0 || target.canvas.height <= 0) {
+      return null;
+    }
     if (this.followLineLayers === undefined) {
       const lines = createLayer();
       const objects = lines && createLayer();
@@ -1481,7 +1521,6 @@ export class StandardRenderer {
       return null;
     }
     clearLayer(this.followLineLayers.lines, target);
-    clearLayer(this.followLineLayers.objects, target);
     return this.followLineLayers;
   }
 }

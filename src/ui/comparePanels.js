@@ -178,10 +178,12 @@ const createComparePanels = ({
   /** @type {Array<object>} */
   let panels = [];
   // setId -> { difficulties } | { pending: Promise } | { error }
+  const MAX_CACHED_LISTS = 32;
   const lists = new Map();
-  // beatmapId -> the picker's row for it, for the set it was made for.
+  let listRequestSeq = 0;
+  // beatmapId -> the picker's row for it, for the set + ruleset it was made for.
   const pickerRows = new Map();
-  let pickerRowsSetId = null;
+  let pickerRowsKey = null;
 
   const leadParts = {
     select: leadLabel?.querySelector('.map-preview-panel-select') ?? null,
@@ -328,8 +330,9 @@ const createComparePanels = ({
   // A window resized, a phone turned: the grid is chosen again for the new
   // shape, and every playfield drawn again at its new size. Paused, nothing
   // else would draw it, and the browser stretched the old picture to fit.
+  let resizeObserver = null;
   if (typeof ResizeObserver === 'function' && canvasWrap) {
-    new ResizeObserver(() => {
+    resizeObserver = new ResizeObserver(() => {
       if (panelsElement.children.length > 1) {
         layout();
       }
@@ -338,7 +341,8 @@ const createComparePanels = ({
       } catch {
         // The next frame draws.
       }
-    }).observe(canvasWrap);
+    });
+    resizeObserver.observe(canvasWrap);
   }
 
   // --- panels ---------------------------------------------------------------
@@ -444,6 +448,11 @@ const createComparePanels = ({
     });
     removeButton.addEventListener('click', (event) => {
       event.stopPropagation();
+      // Ignore a second click during the exit animation once this panel has
+      // already been dropped from `panels`, otherwise toggleDifficulty re-adds it.
+      if (!panels.some((candidate) => candidate.beatmapId === beatmapId)) {
+        return;
+      }
       toggleDifficulty(beatmapId);
     });
     return panel;
@@ -503,13 +512,18 @@ const createComparePanels = ({
     },
   });
 
+  const disposePanel = (panel) => {
+    panel?.renderer?.dispose?.();
+    panel?.element?.remove?.();
+  };
+
   // An exit still playing ends at once when the panels change again.
   const finishLeaving = () => {
     if (leavingPanels.length === 0) {
       return;
     }
     motion.cancel();
-    leavingPanels.forEach((panel) => panel.element.remove());
+    leavingPanels.forEach(disposePanel);
     leavingPanels = [];
   };
 
@@ -569,7 +583,7 @@ const createComparePanels = ({
     next.filter((panel) => panel.status === 'idle').forEach((panel) => void loadPanel(panel));
 
     if (!moving || removed.length === 0) {
-      removed.forEach((panel) => panel.element.remove());
+      removed.forEach(disposePanel);
       settleInto(next, entering, { animate: moving });
       return;
     }
@@ -605,7 +619,7 @@ const createComparePanels = ({
       if (!finished) {
         return;
       }
-      removed.forEach((panel) => panel.element.remove());
+      removed.forEach(disposePanel);
       leavingPanels = [];
       settleInto(panels, entering.filter((panel) => panels.includes(panel)), { animate: true });
     });
@@ -655,6 +669,20 @@ const createComparePanels = ({
 
   const afterListChange = () => { refreshLabels(); renderPicker(); syncCompareButton(); };
 
+  const setListEntry = (setId, entry) => {
+    if (lists.has(setId)) {
+      lists.delete(setId);
+    }
+    lists.set(setId, entry);
+    while (lists.size > MAX_CACHED_LISTS) {
+      const oldestKey = lists.keys().next().value;
+      if (oldestKey === setId) {
+        break;
+      }
+      lists.delete(oldestKey);
+    }
+  };
+
   const ensureList = (setId, { retry = false } = {}) => {
     const existing = lists.get(setId);
     if (existing && (existing.difficulties || existing.pending) && !retry) {
@@ -663,6 +691,7 @@ const createComparePanels = ({
     if (existing?.error && !retry) {
       return Promise.resolve(null);
     }
+    const token = ++listRequestSeq;
     const pending = (async () => {
       const cached = await readCachedList(setId);
       if (cached) {
@@ -672,16 +701,22 @@ const createComparePanels = ({
       void writeSession(LIST_CACHE_KEY, { setId, savedAt: Date.now(), difficulties }).catch(() => {});
       return difficulties;
     })().then((difficulties) => {
-      lists.set(setId, { difficulties });
+      if (lists.get(setId)?.token !== token) {
+        return lists.get(setId)?.difficulties ?? difficulties;
+      }
+      setListEntry(setId, { difficulties, token });
       afterListChange();
       return difficulties;
     }, (error) => {
-      lists.set(setId, { error: error?.message || 'unknown error' });
+      if (lists.get(setId)?.token !== token) {
+        return null;
+      }
+      setListEntry(setId, { error: error?.message || 'unknown error', token });
       addDebugLog(`compare: difficulty list for set ${setId} failed -> ${error?.message || 'unknown error'}`);
       afterListChange();
       return null;
     });
-    lists.set(setId, { pending });
+    setListEntry(setId, { pending, token });
     return pending;
   };
 
@@ -755,10 +790,11 @@ const createComparePanels = ({
       return;
     }
 
-    if (pickerRowsSetId !== lead.setId) {
+    const nextPickerKey = `${lead.setId}:${lead.mode}`;
+    if (pickerRowsKey !== nextPickerKey) {
       pickerRows.forEach(cancelCheckExit);
       pickerRows.clear();
-      pickerRowsSetId = lead.setId;
+      pickerRowsKey = nextPickerKey;
     }
     const difficulties = getDifficulties() || [];
     const shown = new Set(panels.map((panel) => panel.beatmapId));
@@ -1014,9 +1050,20 @@ const createComparePanels = ({
       : longest
   ), 0);
 
+  const dispose = () => {
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    pickerRows.forEach(cancelCheckExit);
+    pickerRows.clear();
+    finishLeaving();
+    panels.forEach(disposePanel);
+    panels = [];
+  };
+
   return {
     setLead,
     clear,
+    dispose,
     render,
     setDuration,
     setPreviewSettings,

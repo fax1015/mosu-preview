@@ -116,37 +116,76 @@ const createDetachController = ({
     }
   };
 
+  let pendingClosePromise = null;
+  let openInFlight = false;
+  let hasUserToggledFollow = false;
+
+  const getCurrentWindowId = async () => {
+    const windowsApi = globalThis.browser?.windows ?? globalThis.chrome?.windows ?? null;
+    if (!windowsApi?.getCurrent) {
+      return null;
+    }
+    try {
+      if (globalThis.browser?.windows?.getCurrent) {
+        const win = await windowsApi.getCurrent();
+        return Number.isInteger(win?.id) ? win.id : null;
+      }
+      return await new Promise((resolve) => {
+        windowsApi.getCurrent((win) => {
+          const error = globalThis.chrome?.runtime?.lastError;
+          resolve(!error && Number.isInteger(win?.id) ? win.id : null);
+        });
+      });
+    } catch {
+      return null;
+    }
+  };
+
   /**
    * Opening the toolbar popup while a detached window is up closes that window.
    * The action has a `default_popup`, so clicking the icon always opens this page;
    * without this the two previews would play over each other.
    */
-  const closeDetachedWindowIfOpen = async () => {
-    try {
-      const windowId = await readStoredDetachedWindowId();
-      if (windowId === null) {
-        return false;
-      }
-
-      const existingWindow = await getWindow(windowId);
-      if (!existingWindow) {
-        await writeStoredDetachedWindowId(null);
-        return false;
-      }
-
-      const closed = await removeWindow(windowId);
-      await writeStoredDetachedWindowId(null);
-      if (closed) {
-        addDebugLog('detach: closed the detached window on popup open');
-      }
-      return closed;
-    } catch (error) {
-      addDebugLog(`detach: could not close detached window (${error?.message || error})`);
-      return false;
+  const closeDetachedWindowIfOpen = () => {
+    if (pendingClosePromise) {
+      return pendingClosePromise;
     }
+    const run = (async () => {
+      try {
+        const windowId = await readStoredDetachedWindowId();
+        if (windowId === null) {
+          return false;
+        }
+
+        const existingWindow = await getWindow(windowId);
+        if (!existingWindow) {
+          await writeStoredDetachedWindowId(null);
+          return false;
+        }
+
+        const closed = await removeWindow(windowId);
+        await writeStoredDetachedWindowId(null);
+        if (closed) {
+          addDebugLog('detach: closed the detached window on popup open');
+        }
+        return closed;
+      } catch (error) {
+        addDebugLog(`detach: could not close detached window (${error?.message || error})`);
+        return false;
+      } finally {
+        if (pendingClosePromise === run) {
+          pendingClosePromise = null;
+        }
+      }
+    })();
+    pendingClosePromise = run;
+    return run;
   };
 
   const openDetachedWindow = async () => {
+    if (openInFlight) {
+      return;
+    }
     const pagePath = buildDetachedPageUrl({
       beatmapId: state.detachContext.beatmapId,
       setId: state.detachContext.setId,
@@ -161,22 +200,29 @@ const createDetachController = ({
       return;
     }
 
-    const pageUrl = getExtensionUrl(pagePath);
-
-    // Firefox for Android has no window management, so the preview opens as a tab
-    // there instead of failing outright.
-    if (!hasWindowsApi()) {
-      try {
-        await createTab({ url: pageUrl });
-        window.close();
-      } catch (error) {
-        addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
-        showPopupToast('Could not open a separate view', { tone: 'error' });
-      }
-      return;
-    }
-
+    openInFlight = true;
     try {
+      // Finish any in-flight close from popup open so it cannot overwrite the
+      // new detached window's stored id with null.
+      if (pendingClosePromise) {
+        await pendingClosePromise;
+      }
+
+      const pageUrl = getExtensionUrl(pagePath);
+
+      // Firefox for Android has no window management, so the preview opens as a tab
+      // there instead of failing outright.
+      if (!hasWindowsApi()) {
+        try {
+          await createTab({ url: pageUrl });
+          window.close();
+        } catch (error) {
+          addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
+          showPopupToast('Could not open a separate view', { tone: 'error' });
+        }
+        return;
+      }
+
       if (await focusExistingDetachedWindow()) {
         window.close();
         return;
@@ -204,6 +250,8 @@ const createDetachController = ({
     } catch (error) {
       addDebugLog(`detach: failed (${error?.message || error})`);
       showPopupToast('Could not open a separate window', { tone: 'error' });
+    } finally {
+      openInFlight = false;
     }
   };
 
@@ -222,6 +270,7 @@ const createDetachController = ({
   };
 
   const toggleFollowEnabled = () => {
+    hasUserToggledFollow = true;
     setFollowEnabled(!state.followEnabled);
     showPopupToast(state.followEnabled ? 'Following the browser' : 'Pinned to this map');
 
@@ -251,6 +300,11 @@ const createDetachController = ({
       return;
     }
 
+    // Re-check after the async query in case the user pinned while tabs were read.
+    if (!state.followEnabled) {
+      return;
+    }
+
     const picked = pickBeatmapTabInfo(tabs, {
       preferredWindowId: state.lastFocusedBrowsingWindowId,
       excludeWindowId: state.detachedWindowId,
@@ -260,10 +314,17 @@ const createDetachController = ({
       return;
     }
 
-    if (isSameFollowTarget(state.followTarget, toFollowTarget(picked.info))) {
+    const nextTarget = toFollowTarget(picked.info);
+    const nativeMode = Number.isInteger(state.sourceMapData?.mode)
+      ? state.sourceMapData.mode
+      : (Number.isInteger(state.mapData?.mode) ? state.mapData.mode : null);
+    if (isSameFollowTarget(state.followTarget, nextTarget, { nativeMode })) {
       return;
     }
 
+    // Update eagerly before awaiting loadPreview so a burst of tab events while
+    // the map is fetching cannot restart the exact same load.
+    state.followTarget = nextTarget;
     addDebugLog(`follow: switching to beatmap ${picked.info.beatmapId}`);
     await loadPreview({ sourceUrlOverride: picked.tab.url });
   };
@@ -273,17 +334,25 @@ const createDetachController = ({
     // into the one map the user actually settled on.
     state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
     state.followSyncTimer = registry.addTimeout(setTimeout(() => {
+      state.followSyncTimer = registry.clearTimeout(state.followSyncTimer);
       void syncPreviewWithBrowsingTabs();
     }, FOLLOW_SYNC_DEBOUNCE_MS));
   };
 
   const startFollowingBrowsingTabs = () => {
-    setFollowEnabled(true);
+    if (!hasUserToggledFollow) {
+      setFollowEnabled(true);
+    }
 
-    // Needed to exclude this window from the tab scan, and harmless if it fails.
+    // Read this window's own id directly instead of racing the opener's storage
+    // write, falling back to storage where windows.getCurrent is unavailable.
     void (async () => {
       try {
-        state.detachedWindowId = await readStoredDetachedWindowId();
+        const ownId = await getCurrentWindowId();
+        state.detachedWindowId = ownId !== null ? ownId : await readStoredDetachedWindowId();
+        if (state.detachedWindowId !== null && state.lastFocusedBrowsingWindowId === state.detachedWindowId) {
+          state.lastFocusedBrowsingWindowId = null;
+        }
       } catch {
         state.detachedWindowId = null;
       }

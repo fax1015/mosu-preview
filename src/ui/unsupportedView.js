@@ -130,6 +130,10 @@ const createUnsupportedViewController = ({
     state.unsupportedAsciiField = null;
   };
 
+  const prefersReducedMotion = () => Boolean(
+    globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches,
+  );
+
   const startUnsupportedAsciiAnimation = () => {
     if (!unsupportedPanel || !unsupportedAscii) {
       return;
@@ -138,6 +142,10 @@ const createUnsupportedViewController = ({
     stopUnsupportedAsciiAnimation();
     state.unsupportedAsciiField = createUnsupportedAsciiField();
     renderUnsupportedAsciiFrame(state.unsupportedAsciiField);
+
+    if (prefersReducedMotion()) {
+      return;
+    }
 
     state.unsupportedAsciiTimer = registry.addInterval(setInterval(() => {
       if (!state.unsupportedAsciiField) {

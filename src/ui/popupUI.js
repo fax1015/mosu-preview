@@ -196,6 +196,17 @@ const bindPopupUiEvents = ({
     return cachedLookup.get(eventKeyToken(event)) ?? null;
   };
 
+  const scheduleVolumePersist = () => {
+    if (typeof writeAudioVolumeSetting !== 'function') {
+      return;
+    }
+    state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
+    state.volumePersistTimer = registry.addTimeout(setTimeout(async () => {
+      state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
+      await writeAudioVolumeSetting(state.volume);
+    }, 220));
+  };
+
   document.addEventListener('keydown', async (event) => {
     // An armed chip in the shortcuts panel owns the keyboard outright: the
     // next key is the one being bound, so nothing below may read it first --
@@ -242,10 +253,14 @@ const bindPopupUiEvents = ({
       return;
     }
 
-    // The cached-mapsets rows, the difficulty picker's and the time label are
-    // buttons too: Space and Enter on one belong to it, not to playback.
+    // Focused buttons and links own Space and Enter so keyboard users can
+    // activate any toolbar or panel control without hijacking playback.
+    const isInteractiveButtonOrLink = event.target?.tagName === 'BUTTON'
+      || event.target?.tagName === 'A'
+      || Boolean(event.target?.closest?.('button, a[href]'));
     if ((key === ' ' || key === 'Enter')
-      && (recentPanel?.contains(event.target)
+      && (isInteractiveButtonOrLink
+        || recentPanel?.contains(event.target)
         || compareControl?.contains(event.target)
         || event.target === timeLabel)) {
       return;
@@ -289,9 +304,11 @@ const bindPopupUiEvents = ({
         break;
       case 'volumeUp':
         applyAudioVolume(state.volume + 0.05);
+        scheduleVolumePersist();
         break;
       case 'volumeDown':
         applyAudioVolume(state.volume - 0.05);
+        scheduleVolumePersist();
         break;
       case 'cycleSpeed':
         cyclePlaybackSpeed();
@@ -301,6 +318,7 @@ const bindPopupUiEvents = ({
         break;
       case 'mute':
         toggleMute();
+        scheduleVolumePersist();
         break;
       case 'restart':
         restartPreview();
@@ -494,19 +512,14 @@ const bindPopupUiEvents = ({
   volumeSlider?.addEventListener('input', () => {
     const next = Number(volumeSlider.value) / 100;
     applyAudioVolume(next);
-
-    state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
-    state.volumePersistTimer = registry.addTimeout(setTimeout(async () => {
-      state.volumePersistTimer = null;
-      await writeAudioVolumeSetting(state.volume);
-    }, 220));
+    scheduleVolumePersist();
   });
 
   volumeSlider?.addEventListener('change', async () => {
     const next = Number(volumeSlider.value) / 100;
     applyAudioVolume(next);
     state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
-    await writeAudioVolumeSetting(state.volume);
+    await writeAudioVolumeSetting?.(state.volume);
   });
 
   // Single owner for Escape, so dismissing the timeline zoom or a dialog never
@@ -516,18 +529,31 @@ const bindPopupUiEvents = ({
       return;
     }
     if (state.shortcutsMenuOpen) {
+      event.preventDefault();
       setShortcutsMenuOpen(false);
       return;
     }
     if (state.infoMenuOpen) {
+      event.preventDefault();
       setInfoMenuOpen(false);
       return;
     }
     if (dismissComparePicker() || speedPopover.dismiss() || volumePopover.dismiss() || keysPopover.dismiss()) {
+      event.preventDefault();
+      return;
+    }
+    if (recentPanel && !recentPanel.hidden && closeCachedMapsetsPanel?.()) {
+      event.preventDefault();
+      return;
+    }
+    if (state.debugPanelOpen && typeof setDebugPanelOpen === 'function') {
+      event.preventDefault();
+      setDebugPanelOpen(false);
       return;
     }
     // Zooming back out is the step before closing, not instead of it.
     if (timelineControls.isZoomed()) {
+      event.preventDefault();
       timelineControls.resetZoom();
       return;
     }

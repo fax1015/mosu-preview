@@ -30,7 +30,7 @@ import {
 } from './webextension.js';
 import { registry } from './core/cleanup.js';
 import { buildCachedMapsetEntries } from './core/cachedMapsets.js';
-import { normalizeNumericId } from './core/beatmapUrl.js';
+import { MODE_URL_NAMES, normalizeNumericId } from './core/beatmapUrl.js';
 import { toFollowTarget } from './core/tabFollow.js';
 import {
   BEATMAP_FETCH_TIMEOUT_MS,
@@ -215,11 +215,23 @@ const shortcutsList = document.querySelector('#mapPreviewShortcutsList');
 const recentPanel = document.querySelector('#mapPreviewRecentPanel');
 const recentList = document.querySelector('#mapPreviewRecentList');
 const recentClearBtn = document.querySelector('#mapPreviewRecentClearBtn');
-attachOverlayScrollbar({
+if (recentPanel) {
+  recentPanel.inert = Boolean(recentPanel.hidden);
+}
+const recentScrollbar = attachOverlayScrollbar({
   scroller: recentList,
   track: document.querySelector('#mapPreviewRecentScrollbar'),
   thumb: document.querySelector('#mapPreviewRecentScrollbarThumb'),
 });
+
+const setRecentPanelHidden = (hidden) => {
+  if (!recentPanel) {
+    return;
+  }
+  const nextHidden = Boolean(hidden);
+  recentPanel.hidden = nextHidden;
+  recentPanel.inert = nextHidden;
+};
 
 let lastInfoFocus = null;
 let lastShortcutsFocus = null;
@@ -438,7 +450,9 @@ const tickTimelineDurationAnimation = () => {
     return;
   }
 
-  renderFrame();
+  // Only the timeline is animating while paused; repainting all playfields
+  // and compare panels on every tick is wasted work.
+  renderer.renderTimeline();
 
   if (renderer.isTimelineAnimating()) {
     state.timelineAnimationRafId = requestAnimationFrame(tickTimelineDurationAnimation);
@@ -663,19 +677,25 @@ const updateRecentClearButtonCacheUsage = async () => {
   recentClearBtn.setAttribute('aria-label', label);
 };
 
-const renderRecentPanel = async () => {
+let recentPanelRenderToken = 0;
+
+const renderRecentPanel = async ({ isStale = () => false } = {}) => {
   if (!recentPanel || !recentList) return;
+  const renderToken = ++recentPanelRenderToken;
+  const aborted = () => renderToken !== recentPanelRenderToken || isStale();
 
   const cachedMapsets = await getCachedMapsetSummaries();
+  if (aborted()) return;
   if (!cachedMapsets || cachedMapsets.length === 0) {
-    recentPanel.hidden = true;
+    setRecentPanelHidden(true);
     return;
   }
 
   const history = await getHistory();
+  if (aborted()) return;
   const cachedEntries = buildCachedMapsetEntries(cachedMapsets, history);
 
-  recentPanel.hidden = false;
+  setRecentPanelHidden(false);
   recentPanel.classList.remove('is-difficulty-view');
   const recentTitle = recentPanel.querySelector('.map-preview-recent-title');
   if (recentTitle) {
@@ -758,7 +778,7 @@ const toggleCachedMapsetsPanel = async () => {
   }
 
   if (!recentPanel.hidden) {
-    recentPanel.hidden = true;
+    setRecentPanelHidden(true);
     return;
   }
 
@@ -774,12 +794,15 @@ const toggleCachedMapsetsPanel = async () => {
  * Dismisses the floating cached list. Deliberately does nothing on the
  * unsupported view: there the list is not an overlay over a preview, it is the
  * whole page, so closing it would leave an empty popup with no way back.
+ *
+ * @returns {boolean} true when the floating panel was closed.
  */
 const closeCachedMapsetsPanel = () => {
   if (!recentPanel || recentPanel.hidden || popup?.classList.contains('is-unsupported')) {
-    return;
+    return false;
   }
-  recentPanel.hidden = true;
+  setRecentPanelHidden(true);
+  return true;
 };
 
 const openExtensionOptions = async () => {
@@ -1417,6 +1440,7 @@ const {
     getAudioOutputLatencyMapMs,
     isAudioClockAuthoritative,
     syncVisualClockToMapTime,
+    resetMediaClock: () => timingController.resetMediaClock?.(),
     renderFrame,
     waitForAudioSeek: (audioElement, expectedTimeSec) => waitForAudioElementSeek(audioElement, {
       expectedTimeSec,
@@ -1498,7 +1522,7 @@ const showCanvasToggleFeedback = (action) => {
 
   state.indicatorTimer = registry.addTimeout(setTimeout(() => {
     toggleIndicator.classList.remove('is-visible', 'is-play', 'is-pause');
-    state.indicatorTimer = null;
+    state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
   }, 400));
 };
 
@@ -1704,16 +1728,21 @@ const fetchBeatmapsetDifficulties = async (setId) => {
 const DIFFICULTY_MODE_LABELS = Object.freeze(['standard', 'taiko', 'catch', 'mania']);
 const difficultyModeLabel = (mode) => DIFFICULTY_MODE_LABELS[mode] || 'standard';
 
-const renderDifficultiesPanel = async (setId, requestedMode = null) => {
+const renderDifficultiesPanel = async (setId, requestedMode = null, { isStale = () => false } = {}) => {
   if (!recentPanel || !recentList || !setId) {
     return false;
   }
+  const renderToken = ++recentPanelRenderToken;
+  const aborted = () => renderToken !== recentPanelRenderToken || isStale();
 
   let difficulties;
   try {
     difficulties = await fetchBeatmapsetDifficulties(setId);
   } catch (error) {
     addDebugLog(`diff-list: could not fetch difficulties for set ${setId} (${error?.message || error})`);
+    return false;
+  }
+  if (aborted()) {
     return false;
   }
 
@@ -1734,7 +1763,7 @@ const renderDifficultiesPanel = async (setId, requestedMode = null) => {
     return false;
   }
 
-  recentPanel.hidden = false;
+  setRecentPanelHidden(false);
   recentPanel.classList.add('is-difficulty-view');
   const recentTitle = recentPanel.querySelector('.map-preview-recent-title');
   if (recentTitle) {
@@ -1789,8 +1818,12 @@ const renderDifficultiesPanel = async (setId, requestedMode = null) => {
     diffsInMode.forEach((diff) => {
       const item = document.createElement('a');
       item.className = 'map-preview-recent-item';
-      const targetUrl = `https://osu.ppy.sh/beatmapsets/${encodeURIComponent(setId)}/discussion/${encodeURIComponent(diff.beatmapId)}/timeline/total`;
+      const modeQuery = diff.convert && Number.isInteger(diff.mode) && MODE_URL_NAMES[diff.mode]
+        ? `?mode=${encodeURIComponent(MODE_URL_NAMES[diff.mode])}`
+        : '';
+      const targetUrl = `https://osu.ppy.sh/beatmapsets/${encodeURIComponent(setId)}/discussion/${encodeURIComponent(diff.beatmapId)}/timeline/total${modeQuery}`;
       item.href = targetUrl;
+      item.rel = 'noopener noreferrer';
 
       const badge = document.createElement('div');
       badge.className = 'map-preview-diff-badge';
@@ -1912,20 +1945,20 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
   // alongside the settings below rather than after them. The page's first load
   // finds that request already made, before this file had even arrived
   // (src/mapRequest.js); it is dropped rather than used for any other load.
-  const initialMapRequest = takeInitialMapRequest(isStaleLoad);
+  const initialMapRequest = takeInitialMapRequest(sourceUrlOverride ? () => true : isStaleLoad);
   const mapRequest = (!sourceUrlOverride && initialMapRequest)
     || requestBeatmapForLoad({ sourceUrlOverride, isStaleLoad });
 
   stopTimelineDurationAnimation();
   stopPlayback();
   setPlaybackSpeedControlEnabled(false);
+  state.mapData = null;
   state.sourceMapData = null;
   state.sectionMarks = [];
   syncManiaKeyControls();
   setUnsupportedMode(false);
-  if (recentPanel) {
-    recentPanel.hidden = true;
-  }
+  recentPanelRenderToken += 1;
+  setRecentPanelHidden(true);
   void pruneFullAudioCache();
   clearDebugLogs();
   state.hasAutoStarted = false;
@@ -1969,6 +2002,9 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
 
     // Which map this is, with its file already on the way.
     const { info, content: mapContentRequest } = await mapRequest;
+    if (isStaleLoad()) {
+      return;
+    }
 
     if (!info.valid) {
       addDebugLog(`init: invalid tab url (${info.reason})`);
@@ -1992,21 +2028,30 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
         // a moment to be in place before the popup shows rather than shoving
         // the art aside after. A slow cache read only holds it back so long.
         const listed = (info.needsDifficulty && info.setId
-          ? renderDifficultiesPanel(info.setId, info.mode).then((ok) => {
-            if (!ok) {
-              return renderRecentPanel();
+          ? renderDifficultiesPanel(info.setId, info.mode, { isStale: isStaleLoad }).then((ok) => {
+            if (!ok && !isStaleLoad()) {
+              return renderRecentPanel({ isStale: isStaleLoad });
             }
+            return ok;
           })
-          : renderRecentPanel()
+          : renderRecentPanel({ isStale: isStaleLoad })
         ).catch((error) => {
           addDebugLog(`init: panel list unavailable -> ${error?.message || 'unknown error'}`);
         });
-        await Promise.race([
-          listed,
-          new Promise((resolve) => {
-            registry.addTimeout(setTimeout(resolve, RECENT_PANEL_REVEAL_WAIT_MS));
-          }),
-        ]);
+        let revealTimeout = null;
+        try {
+          await Promise.race([
+            listed,
+            new Promise((resolve) => {
+              revealTimeout = registry.addTimeout(setTimeout(resolve, RECENT_PANEL_REVEAL_WAIT_MS));
+            }),
+          ]);
+        } finally {
+          registry.clearTimeout(revealTimeout);
+        }
+        if (isStaleLoad()) {
+          return;
+        }
       } else {
         setUnsupportedMode(false);
         titleLine.textContent = 'Preview unavailable';
@@ -2501,6 +2546,9 @@ window.addEventListener('pagehide', () => {
   stopTimelineDurationAnimation();
   releaseFullAudioObjectUrl();
   stopUnsupportedAsciiAnimation();
+  comparePanels?.dispose?.();
+  recentScrollbar?.dispose?.();
+  renderer?.dispose?.();
   hitsoundPlayer.dispose();
   resetState();
 });
@@ -2585,6 +2633,12 @@ addStorageChangedListener((changes, areaName) => {
       // separate call, so reacting here writes nothing back.
       applyAudioVolume(clamp(candidate, 0, 1));
     }
+  }
+
+  if (Object.hasOwn(changes, PROVIDER_OVERRIDE_KEY)) {
+    const providerOverride = normalizeProviderOverride(changes[PROVIDER_OVERRIDE_KEY]?.newValue);
+    setProviderState({ providerOverride });
+    addDebugLog(`settings: provider override updated -> ${getProviderDisplayName(providerOverride)}`);
   }
 
   if (!hasPreviewSettingChange(changes)) {

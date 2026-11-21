@@ -121,9 +121,10 @@ const createShortcutsPanel = ({
   };
 
   const resetOne = async (actionId) => {
-    const { bindings, replaced } = resetKeybinding(state.keybindings, actionId);
+    const { bindings, replaced, replacedAll } = resetKeybinding(state.keybindings, actionId);
     stopCapture({ redraw: false });
-    await applyBindings(bindings, { changed: [actionId, replaced].filter(Boolean) });
+    const displaced = Array.isArray(replacedAll) ? replacedAll : [replaced];
+    await applyBindings(bindings, { changed: [...new Set([actionId, ...displaced].filter(Boolean))] });
   };
 
   const resetAll = async () => {
@@ -162,7 +163,9 @@ const createShortcutsPanel = ({
       stopCapture();
       return true;
     }
-    if (event?.ctrlKey || event?.metaKey || event?.altKey) {
+    const hasCommandModifier = (event?.ctrlKey || event?.metaKey || event?.altKey)
+      && !event?.getModifierState?.('AltGraph');
+    if (hasCommandModifier) {
       showPopupToast?.('Shortcuts are single keys');
       stopCapture();
       return true;

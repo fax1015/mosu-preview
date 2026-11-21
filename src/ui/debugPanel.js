@@ -17,6 +17,7 @@ const createDebugPanelController = ({
   const render = () => {
     if (debugPanel) {
       debugPanel.hidden = !state.debugPanelOpen;
+      debugPanel.inert = !state.debugPanelOpen;
     }
 
     // Nothing below is observable while the panel is closed, and addLog() calls

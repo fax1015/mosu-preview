@@ -32,6 +32,9 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
   // Where the pointer last was over the timeline (or dragging from it), in the
   // canvas's own coordinates.
   let pointer = null;
+  let lastTooltipText = '';
+  let lastTooltipX = Number.NaN;
+  let cachedTooltipMetrics = null;
 
   const localPoint = (event) => {
     const rect = canvas.getBoundingClientRect();
@@ -90,13 +93,18 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
         seekToX(drag.x, { snap: !drag.noSnap });
       }
     }
-    renderer.renderTimeline();
+    const isFollowingUnderPointer = Boolean(pointer) && state.isPlaying && timeline.isZoomed();
+    // While playing without an active drag or view ease, the main playback loop
+    // already renders the timeline every frame; only refresh the hover readout
+    // here instead of double-rendering the canvas at 60-144Hz.
+    if (drag || !state.isPlaying || timeline.needsAnimationFrame()) {
+      renderer.renderTimeline();
+    }
     // The view can move under a still pointer (easing, edge scrolling, following
     // playback), so the readout is refreshed from where the pointer last was.
     if (pointer) {
       updateTooltip(pointer.x, pointer.y);
     }
-    const isFollowingUnderPointer = Boolean(pointer) && state.isPlaying && timeline.isZoomed();
     if (drag || timeline.needsAnimationFrame() || isFollowingUnderPointer) {
       requestFrame();
     }
@@ -108,19 +116,28 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
     }
   };
 
+  const cancelFrame = () => {
+    if (renderRafId !== null) {
+      cancelAnimationFrame(renderRafId);
+      renderRafId = null;
+    }
+  };
+
   const hideTooltip = () => {
+    lastTooltipText = '';
+    lastTooltipX = Number.NaN;
+    cachedTooltipMetrics = null;
     if (tooltip && !tooltip.hidden) {
       tooltip.hidden = true;
     }
   };
 
-  const updateTooltip = (x, y) => {
+  const updateTooltip = (x, y, { forceLayout = false } = {}) => {
     if (!tooltip) {
       return;
     }
     const timeline = getTimeline();
-    const rect = canvas.getBoundingClientRect();
-    if (!hasMap() || rect.width <= 0) {
+    if (!hasMap()) {
       hideTooltip();
       return;
     }
@@ -138,16 +155,44 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
     } else {
       text = timeline.formatTimeAtX(x);
     }
-    tooltip.textContent = text;
-    tooltip.hidden = false;
 
-    // Positioned against the timeline row, then held inside it so the label
-    // stays readable at both ends instead of hanging off the edge.
-    const parentRect = tooltip.offsetParent?.getBoundingClientRect() || rect;
-    const half = tooltip.offsetWidth / 2;
-    const rawLeft = (rect.left - parentRect.left) + clamp(x, 0, rect.width);
-    const minLeft = (rect.left - parentRect.left) + half;
-    const maxLeft = (rect.right - parentRect.left) - half;
+    const textChanged = text !== lastTooltipText;
+    const xChanged = x !== lastTooltipX;
+    if (!forceLayout && !tooltip.hidden && !textChanged && !xChanged) {
+      return;
+    }
+
+    if (textChanged) {
+      tooltip.textContent = text;
+      lastTooltipText = text;
+    }
+    const wasHidden = tooltip.hidden;
+    if (wasHidden) {
+      tooltip.hidden = false;
+    }
+
+    // Read layout geometry only when the pointer moved, text width changed, or
+    // the tooltip first appeared, avoiding synchronous reflows on every frame.
+    if (forceLayout || wasHidden || textChanged || !cachedTooltipMetrics) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0) {
+        hideTooltip();
+        return;
+      }
+      const parentRect = tooltip.offsetParent?.getBoundingClientRect() || rect;
+      cachedTooltipMetrics = {
+        width: rect.width,
+        leftOffset: rect.left - parentRect.left,
+        rightOffset: rect.right - parentRect.left,
+        half: tooltip.offsetWidth / 2,
+      };
+    }
+
+    lastTooltipX = x;
+    const { width, leftOffset, rightOffset, half } = cachedTooltipMetrics;
+    const rawLeft = leftOffset + clamp(x, 0, width);
+    const minLeft = leftOffset + half;
+    const maxLeft = rightOffset - half;
     tooltip.style.left = `${Math.min(Math.max(rawLeft, minLeft), maxLeft)}px`;
   };
 
@@ -329,7 +374,10 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
   }, { passive: false });
 
   // A tooltip stranded over a map that is no longer loaded would be lying.
+  const invalidateMetrics = () => { cachedTooltipMetrics = null; };
   window.addEventListener('blur', clearHover);
+  window.addEventListener('resize', invalidateMetrics);
+  window.addEventListener('pagehide', cancelFrame);
 
   const zoomAroundPlayhead = (factor) => {
     if (!hasMap()) {
@@ -346,6 +394,12 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
     resetZoom: () => {
       getTimeline()?.resetZoom();
       requestFrame();
+    },
+    dispose: () => {
+      cancelFrame();
+      window.removeEventListener('blur', clearHover);
+      window.removeEventListener('resize', invalidateMetrics);
+      window.removeEventListener('pagehide', cancelFrame);
     },
   };
 };

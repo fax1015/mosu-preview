@@ -98,7 +98,7 @@ const createIslandModel = ({
     update();
     const delayMs = Number.isFinite(durationMs) && durationMs > 0 ? durationMs : DEFAULT_MESSAGE_MS;
     state.toastHideTimer = registry.addTimeout(schedule(() => {
-      state.toastHideTimer = null;
+      state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
       message = null;
       update();
     }, delayMs));
@@ -205,9 +205,11 @@ const sameShape = (a, b) => (
 const createIslandRenderer = ({
   element,
   allowMotion = () => true,
+  registry = null,
   schedule = (callback, delayMs) => setTimeout(callback, delayMs),
 }) => {
   let current = null;
+  const retireTimers = new Set();
 
   const setSize = (width, height) => {
     element.style.width = `${width}px`;
@@ -261,7 +263,13 @@ const createIslandRenderer = ({
     layer.classList.add('is-leaving');
     layer.setAttribute('aria-hidden', 'true');
     if (allowMotion()) {
-      schedule(() => layer.remove(), LAYER_LEAVE_MS);
+      const timerId = schedule(() => {
+        retireTimers.delete(timerId);
+        registry?.clearTimeout?.(timerId);
+        layer.remove();
+      }, LAYER_LEAVE_MS);
+      retireTimers.add(timerId);
+      registry?.addTimeout?.(timerId);
     } else {
       layer.remove();
     }
@@ -333,7 +341,7 @@ const createIsland = ({
   allowMotion,
 }) => {
   const renderer = element
-    ? createIslandRenderer({ element, allowMotion })
+    ? createIslandRenderer({ element, allowMotion, registry })
     : { render: () => {} };
   const model = createIslandModel({ render: renderer.render, state, registry });
   element?.addEventListener('click', (event) => {

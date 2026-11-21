@@ -5,21 +5,6 @@
     font-style: normal;
     font-display: swap;
 }
-@font-face {
-    font-family: 'Torus';
-    src: url('./assets/fonts/Torus-Thin.otf') format('opentype');
-    font-weight: 100;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Torus';
-    src: url('./assets/fonts/Torus-Light.otf') format('opentype');
-    font-weight: 300;
-    font-style: normal;
-    font-display: swap;
-}
 
 @font-face {
     font-family: 'Torus';
@@ -41,14 +26,6 @@
     font-family: 'Torus';
     src: url('./assets/fonts/Torus-Bold.otf') format('opentype');
     font-weight: 700;
-    font-style: normal;
-    font-display: swap;
-}
-
-@font-face {
-    font-family: 'Torus';
-    src: url('./assets/fonts/Torus-Heavy.otf') format('opentype');
-    font-weight: 900;
     font-style: normal;
     font-display: swap;
 }
@@ -100,10 +77,10 @@
     --list-item-height: 170px;
     --list-item-gap: 12px;
     --media-height: 12px;
-    --popup-shell-width: 446px;
-    --popup-content-width: 430px;
-    --popup-shell-width-mobile: 392px;
-    --popup-content-width-mobile: 376px;
+    --popup-shell-width: 454px;
+    --popup-content-width: 438px;
+    --popup-shell-width-mobile: 398px;
+    --popup-content-width-mobile: 382px;
     --map-preview-info-modal-width: 238px;
     --map-preview-info-modal-height: 246px;
     --map-preview-info-modal-gap: 0.75rem;
@@ -1023,6 +1000,7 @@ body.is-firefox-popup .map-preview-toggle-indicator {
 
 .map-preview-debug-panel[hidden] {
     display: grid;
+    visibility: hidden;
     max-height: 0;
     opacity: 0;
     padding: 0;
@@ -1059,6 +1037,11 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     line-height: 1;
     padding: 0.24rem 0.4rem;
     cursor: pointer;
+}
+
+.map-preview-debug-btn:focus-visible {
+    outline: 2px solid rgba(135, 178, 233, 0.85);
+    outline-offset: 2px;
 }
 
 .map-preview-debug-status {
@@ -1600,7 +1583,7 @@ button.map-preview-shortcut-key:focus-visible {
 .map-preview-shortcut-hint {
     font-size: 0.6rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.34);
+    color: rgba(255, 255, 255, 0.58);
 }
 
 .map-preview-shortcut-reset {
@@ -1614,6 +1597,11 @@ button.map-preview-shortcut-key:focus-visible {
     font-size: 0.62rem;
     font-weight: 700;
     cursor: pointer;
+}
+
+.map-preview-shortcut-reset:focus-visible {
+    outline: 2px solid var(--accent-secondary);
+    outline-offset: 2px;
 }
 
 .map-preview-shortcut-reset[hidden] {
@@ -2376,6 +2364,7 @@ button.map-preview-shortcut-key:focus-visible {
 
 .map-preview-recent-panel[hidden] {
     display: flex;
+    visibility: hidden;
     max-height: 0;
     min-height: 0;
     opacity: 0;
@@ -2632,14 +2621,22 @@ button.map-preview-shortcut-key:focus-visible {
     flex: 0 0 20px;
     background: transparent;
     border: none;
+    border-radius: 0.32rem;
     color: var(--text-secondary);
     cursor: pointer;
-    opacity: 0.45;
+    opacity: 0.72;
     transition: opacity 0.2s ease, color 0.2s ease, transform 0.2s cubic-bezier(0.32, 0.72, 0, 1);
     padding: 0;
     font: inherit;
     font-size: 0.72rem;
     font-weight: 700;
+}
+
+.map-preview-recent-action-btn:focus-visible {
+    opacity: 1;
+    color: var(--text-primary);
+    outline: 2px solid var(--accent-secondary);
+    outline-offset: 2px;
 }
 
 .map-preview-recent-action-btn[hidden],
@@ -3193,6 +3190,11 @@ html.is-comparing .map-preview-compare-btn,
     cursor: pointer;
 }
 
+.map-preview-compare-retry:focus-visible {
+    outline: 2px solid var(--accent-secondary);
+    outline-offset: 2px;
+}
+
 .map-preview-compare-list {
     display: flex;
     flex-direction: column;
@@ -3308,12 +3310,17 @@ html.is-comparing .map-preview-compare-btn,
 }
 
 @media (prefers-reduced-motion: reduce) {
+    .map-preview-popup,
+    .map-preview-debug-panel,
+    .map-preview-recent-panel,
     .map-preview-compare-popover,
     .map-preview-compare-control.is-compare-open .map-preview-compare-popover {
         transition: none;
         transform: none;
     }
 
+    .map-preview-loading-spinner,
+    .map-preview-toggle-indicator,
     .map-preview-panel.is-loading .map-preview-panel-status,
     html.is-comparing .map-preview-panel-label,
     .map-preview-compare-check,

@@ -6,58 +6,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="dark" />
   <title>mosu! Beatmap Preview</title>
-  <style>
-    :root {
-      --popup-shell-width: 446px;
-      --popup-content-width: 430px;
-      --popup-shell-width-mobile: 392px;
-      --popup-content-width-mobile: 376px;
-    }
-
-    html {
-      margin: 0;
-      background: rgb(24, 23, 28);
-      color-scheme: dark;
-      color: rgb(255, 255, 255);
-      font-family: sans-serif;
-      overflow: hidden;
-    }
-
-    /* The toolbar popup is sized by its document; a detached window is sized by
-       the window itself, so the fixed widths are scoped to the popup case. */
-    html:not(.is-detached-window) {
-      width: var(--popup-shell-width);
-      min-width: var(--popup-shell-width);
-      max-width: var(--popup-shell-width);
-    }
-
-    body {
-      margin: 0;
-      width: 100%;
-      min-height: 0;
-      box-sizing: border-box;
-      padding: 8px;
-    }
-
-    html:not(.is-detached-window) #mapPreviewPopup {
-      width: var(--popup-content-width);
-      max-width: var(--popup-content-width);
-    }
-
-    @media (max-width: 420px),
-    (hover: none) and (pointer: coarse) {
-      html:not(.is-detached-window) {
-        width: var(--popup-shell-width-mobile);
-        min-width: var(--popup-shell-width-mobile);
-        max-width: var(--popup-shell-width-mobile);
-      }
-
-      html:not(.is-detached-window) #mapPreviewPopup {
-        width: var(--popup-content-width-mobile);
-        max-width: var(--popup-content-width-mobile);
-      }
-    }
-  </style>
   <link rel="stylesheet" href="popup.css" />
 </head>
 
@@ -120,7 +68,7 @@
         <button type="button" class="map-preview-info-btn js-map-preview-info-btn" id="mapPreviewHeaderInfoBtn"
           aria-haspopup="dialog" aria-expanded="false" aria-controls="mapPreviewInfoModal" title="Menu"
           aria-label="Open options menu">
-          <svg viewBox="0 0 448 512" width="12" height="12" fill="currentColor">
+          <svg viewBox="0 0 448 512" width="12" height="12" fill="currentColor" aria-hidden="true">
             <path
               d="M0 96C0 78.3 14.3 64 32 64l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 128C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 288c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32L32 448c-17.7 0-32-14.3-32-32s14.3-32 32-32l384 0c17.7 0 32 14.3 32 32z" />
           </svg>
@@ -293,14 +241,14 @@
           <div class="map-preview-info-header-actions">
             <button type="button" class="map-preview-info-icon-btn map-preview-info-cached-btn" id="mapPreviewInfoCachedBtn"
               aria-label="Toggle cached mapsets" title="Cached mapsets">
-              <svg viewBox="0 0 512 512">
+              <svg viewBox="0 0 512 512" aria-hidden="true">
                 <path
                   d="M64 64C28.7 64 0 92.7 0 128L0 384c0 35.3 28.7 64 64 64l384 0c35.3 0 64-28.7 64-64l0-256c0-35.3-28.7-64-64-64L64 64zm96 256a32 32 0 1 1 -64 0 32 32 0 1 1 64 0zm-32-96a32 32 0 1 1 0-64 32 32 0 1 1 0 64zm120-56l144 0c13.3 0 24 10.7 24 24s-10.7 24-24 24l-144 0c-13.3 0-24-10.7-24-24s10.7-24 24-24zm0 128l144 0c13.3 0 24 10.7 24 24s-10.7 24-24 24l-144 0c-13.3 0-24-10.7-24-24s10.7-24 24-24z" />
               </svg>
             </button>
             <button type="button" class="map-preview-info-icon-btn" id="mapPreviewHelpBtn" aria-label="Open shortcuts"
               title="Shortcuts">
-                <svg viewBox="0 0 576 512">
+                <svg viewBox="0 0 576 512" aria-hidden="true">
                   <path
                     d="M64 64C28.7 64 0 92.7 0 128L0 384c0 35.3 28.7 64 64 64l448 0c35.3 0 64-28.7 64-64l0-256c0-35.3-28.7-64-64-64L64 64zm16 64l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM64 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zM176 128l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zM160 240c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l224 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-224 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-176c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16zm80-80c0-8.8 7.2-16 16-16l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32zm16 80l32 0c8.8 0 16 7.2 16 16l0 32c0 8.8-7.2 16-16 16l-32 0c-8.8 0-16-7.2-16-16l0-32c0-8.8 7.2-16 16-16z" />
                 </svg>
@@ -377,14 +325,14 @@
             class="map-preview-recent-action-btn map-preview-recent-menu-btn js-map-preview-info-btn"
             id="mapPreviewRecentInfoBtn" aria-haspopup="dialog" aria-expanded="false"
             aria-controls="mapPreviewInfoModal" title="Menu" aria-label="Open options menu">
-            <svg viewBox="0 0 448 512" fill="currentColor">
+            <svg viewBox="0 0 448 512" fill="currentColor" aria-hidden="true">
               <path
                 d="M0 96C0 78.3 14.3 64 32 64l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 128C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 288c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32L32 448c-17.7 0-32-14.3-32-32s14.3-32 32-32l384 0c17.7 0 32 14.3 32 32z" />
             </svg>
           </button>
           <button type="button" class="map-preview-recent-action-btn map-preview-recent-clear-btn"
             id="mapPreviewRecentClearBtn" title="Clear cache" aria-label="Clear cache">
-            <svg viewBox="0 -16 448 528" fill="currentColor">
+            <svg viewBox="0 -16 448 528" fill="currentColor" aria-hidden="true">
               <path
                 d="M136.7 5.9C141.1-7.2 153.3-16 167.1-16l113.9 0c13.8 0 26 8.8 30.4 21.9L320 32 416 32c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 96C14.3 96 0 81.7 0 64S14.3 32 32 32l96 0 8.7-26.1zM32 144l384 0 0 304c0 35.3-28.7 64-64 64L96 512c-35.3 0-64-28.7-64-64l0-304zm88 64c-13.3 0-24 10.7-24 24l0 192c0 13.3 10.7 24 24 24s24-10.7 24-24l0-192c0-13.3-10.7-24-24-24zm104 0c-13.3 0-24 10.7-24 24l0 192c0 13.3 10.7 24 24 24s24-10.7 24-24l0-192c0-13.3-10.7-24-24-24zm104 0c-13.3 0-24 10.7-24 24l0 192c0 13.3 10.7 24 24 24s24-10.7 24-24l0-192c0-13.3-10.7-24-24-24z" />
             </svg>

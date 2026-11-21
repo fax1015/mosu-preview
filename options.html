@@ -5,27 +5,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>mosu! Preview Settings</title>
-  <style>
-    html,
-    body {
-      margin: 0;
-      min-height: 100%;
-      background: rgb(24, 23, 28);
-      color: rgb(255, 255, 255);
-      font-family: sans-serif;
-    }
-
-    body {
-      min-height: 100vh;
-    }
-
-    .settings-page {
-      width: 100%;
-      max-width: 780px;
-      margin: 0 auto;
-      padding: 24px 16px;
-    }
-  </style>
   <link rel="stylesheet" href="options.css" />
 </head>
 
@@ -119,7 +98,7 @@
           <label for="maniaScrollSpeedRange" class="settings-slider-copy">
             <span class="settings-slider-title">Scroll speed</span>
             <span class="settings-slider-value">
-              <span id="maniaScrollTimeValue">1429 ms</span>
+              <span id="maniaScrollTimeValue">410 ms</span>
               <span>(speed <span id="maniaScrollSpeedValue">28.0</span>)</span>
             </span>
           </label>
@@ -135,10 +114,10 @@
             <option value="down">Down</option>
             <option value="up">Up</option>
           </select>
-          <p class="settings-help">
+        </div>
+        <p class="settings-help">
           Swap the direction of note travel.
         </p>
-        </div>
         <label for="maniaScrollScaleWithBpm" class="settings-toggle-card">
           <input id="maniaScrollScaleWithBpm" type="checkbox" />
           <span class="settings-toggle-mark" aria-hidden="true"></span>
@@ -186,11 +165,11 @@
         </label>
 
         <div class="settings-priority-header">
-          <label for="providerPriorityList" class="settings-label">Provider priority</label>
+          <span id="providerPriorityLabel" class="settings-label">Provider priority</span>
           <p class="settings-help">The top enabled provider is tried first.</p>
         </div>
 
-        <div id="providerPriorityList" class="settings-priority-list">
+        <div id="providerPriorityList" class="settings-priority-list" role="list" aria-labelledby="providerPriorityLabel">
           <!-- Priority items with toggles injected here -->
         </div>
       </div>

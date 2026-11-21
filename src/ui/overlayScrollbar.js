@@ -33,20 +33,28 @@ const attachOverlayScrollbar = ({ scroller, track, thumb }) => {
   scroller.addEventListener('scroll', schedule, { passive: true });
   // The list changes size as the panel opens and closes, and its content
   // whenever it is rendered again.
-  new ResizeObserver(schedule).observe(scroller);
-  new MutationObserver(schedule).observe(scroller, { childList: true });
+  let resizeObserver = null;
+  if (typeof ResizeObserver === 'function') {
+    resizeObserver = new ResizeObserver(schedule);
+    resizeObserver.observe(scroller);
+  }
+  let mutationObserver = null;
+  if (typeof MutationObserver === 'function') {
+    mutationObserver = new MutationObserver(schedule);
+    mutationObserver.observe(scroller, { childList: true });
+  }
 
   let drag = null;
-  thumb.addEventListener('pointerdown', (event) => {
+  const onPointerDown = (event) => {
     if (event.button !== 0) {
       return;
     }
     event.preventDefault();
-    thumb.setPointerCapture(event.pointerId);
+    thumb.setPointerCapture?.(event.pointerId);
     drag = { startY: event.clientY, startScrollTop: scroller.scrollTop };
     track.classList.add('is-dragging');
-  });
-  thumb.addEventListener('pointermove', (event) => {
+  };
+  const onPointerMove = (event) => {
     if (!drag) {
       return;
     }
@@ -55,16 +63,37 @@ const attachOverlayScrollbar = ({ scroller, track, thumb }) => {
       const overflow = scroller.scrollHeight - scroller.clientHeight;
       scroller.scrollTop = drag.startScrollTop + ((event.clientY - drag.startY) * overflow) / travel;
     }
-  });
+  };
   const endDrag = () => {
     drag = null;
     track.classList.remove('is-dragging');
   };
+  thumb.addEventListener('pointerdown', onPointerDown);
+  thumb.addEventListener('pointermove', onPointerMove);
   thumb.addEventListener('pointerup', endDrag);
   thumb.addEventListener('pointercancel', endDrag);
   thumb.addEventListener('lostpointercapture', endDrag);
 
+  const dispose = () => {
+    if (frame !== null) {
+      cancelAnimationFrame(frame);
+      frame = null;
+    }
+    scroller.removeEventListener('scroll', schedule);
+    thumb.removeEventListener('pointerdown', onPointerDown);
+    thumb.removeEventListener('pointermove', onPointerMove);
+    thumb.removeEventListener('pointerup', endDrag);
+    thumb.removeEventListener('pointercancel', endDrag);
+    thumb.removeEventListener('lostpointercapture', endDrag);
+    resizeObserver?.disconnect();
+    mutationObserver?.disconnect();
+    resizeObserver = null;
+    mutationObserver = null;
+  };
+  globalThis.window?.addEventListener?.('pagehide', dispose, { once: true });
+
   schedule();
+  return { schedule, dispose };
 };
 
 export { attachOverlayScrollbar };

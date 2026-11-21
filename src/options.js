@@ -12,7 +12,7 @@ import {
   calculateManiaScrollTimeMs,
   ARCHIVE_DOWNLOAD_SOURCES,
 } from './settings.js';
-import { storageGet, storageSet } from './webextension.js';
+import { addStorageChangedListener, storageGet, storageSet } from './webextension.js';
 import {
   FULL_AUDIO_CACHE_TOTAL_MAX_BYTES,
   clearFullAudioCache,
@@ -338,14 +338,23 @@ const renderProviderPriority = () => {
       img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
       e.dataTransfer.setDragImage(img, 0, 0);
 
-      // Use requestAnimationFrame to avoid browser cancelling drag due to immediate style changes
-      requestAnimationFrame(() => {
+      // Use requestAnimationFrame to avoid browser cancelling drag due to immediate style changes.
+      // Store the frame id so a quick dragend cancels it instead of leaving pointer-events stuck off.
+      let dragStartRafId = requestAnimationFrame(() => {
+        dragStartRafId = null;
         item.classList.add('is-dragging');
         providerPriorityList.classList.add('is-dragging-active');
       });
+      item._dragStartRafId = () => {
+        if (dragStartRafId !== null) {
+          cancelAnimationFrame(dragStartRafId);
+          dragStartRafId = null;
+        }
+      };
     });
 
     item.addEventListener('dragend', async () => {
+      item._dragStartRafId?.();
       if (isMobileOptionsLayout) {
         return;
       }
@@ -489,7 +498,7 @@ const toggleProvider = async (id, isEnabled) => {
   await persistFormSettings();
 };
 
-const renderManiaScrollSpeed = (value) => {
+const renderManiaScrollSpeed = (value, { updateInput = true } = {}) => {
   const normalized = normalizePreviewSettings({ maniaScrollSpeed: value }).maniaScrollSpeed;
   const baseScrollTimeMs = calculateManiaScrollTimeMs(normalized);
 
@@ -497,7 +506,7 @@ const renderManiaScrollSpeed = (value) => {
     maniaScrollSpeedRange.value = String(normalized);
   }
   updateManiaScrollRangeProgress(normalized);
-  if (maniaScrollSpeedInput) {
+  if (maniaScrollSpeedInput && updateInput) {
     maniaScrollSpeedInput.value = String(normalized);
   }
   if (maniaScrollSpeedValue) {
@@ -508,10 +517,14 @@ const renderManiaScrollSpeed = (value) => {
   }
 };
 
-// Stored as 0-1, presented as a percentage.
-const renderPercentSetting = (labelEl, value) => {
+// Stored as 0-1, presented as a percentage, keeping the range fill in sync.
+const renderPercentSetting = (labelEl, value, rangeEl = null) => {
+  const percent = Math.min(100, Math.max(0, Math.round(Number(value) * 100)));
   if (labelEl) {
-    labelEl.textContent = `${Math.round(Number(value) * 100)}%`;
+    labelEl.textContent = `${percent}%`;
+  }
+  if (rangeEl) {
+    rangeEl.style.setProperty('--range-progress', `${percent}%`);
   }
 };
 
@@ -584,7 +597,7 @@ const applySettingsToForm = (settings) => {
   }
   if (hitsoundVolumeRange) {
     hitsoundVolumeRange.value = String(Math.round(settings.hitsoundVolume * 100));
-    renderPercentSetting(hitsoundVolumeValue, settings.hitsoundVolume);
+    renderPercentSetting(hitsoundVolumeValue, settings.hitsoundVolume, hitsoundVolumeRange);
   }
   if (hitsoundStyleSelect) {
     hitsoundStyleSelect.value = settings.hitsoundStyle;
@@ -594,7 +607,7 @@ const applySettingsToForm = (settings) => {
   if (audioVolumeRange && settings.audioVolume !== undefined) {
     const percent = Math.round(settings.audioVolume * 100);
     audioVolumeRange.value = String(percent);
-    renderPercentSetting(audioVolumeValue, settings.audioVolume);
+    renderPercentSetting(audioVolumeValue, settings.audioVolume, audioVolumeRange);
   }
 };
 
@@ -738,7 +751,7 @@ const initialize = async () => {
   });
 
   hitsoundVolumeRange?.addEventListener('input', () => {
-    renderPercentSetting(hitsoundVolumeValue, Number(hitsoundVolumeRange.value) / 100);
+    renderPercentSetting(hitsoundVolumeValue, Number(hitsoundVolumeRange.value) / 100, hitsoundVolumeRange);
   });
   hitsoundVolumeRange?.addEventListener('change', async () => {
     await persistFormSettings();
@@ -758,11 +771,15 @@ const initialize = async () => {
   });
 
   maniaScrollSpeedInput.addEventListener('input', () => {
-    const candidate = Number(maniaScrollSpeedInput.value);
+    const raw = maniaScrollSpeedInput.value.trim();
+    if (raw === '') {
+      return;
+    }
+    const candidate = Number(raw);
     if (!Number.isFinite(candidate)) {
       return;
     }
-    renderManiaScrollSpeed(candidate);
+    renderManiaScrollSpeed(candidate, { updateInput: false });
   });
 
   maniaScrollSpeedInput.addEventListener('change', async () => {
@@ -797,7 +814,7 @@ const initialize = async () => {
   });
 
   audioVolumeRange?.addEventListener('input', () => {
-    renderPercentSetting(audioVolumeValue, Number(audioVolumeRange.value) / 100);
+    renderPercentSetting(audioVolumeValue, Number(audioVolumeRange.value) / 100, audioVolumeRange);
   });
   audioVolumeRange?.addEventListener('change', async () => {
     const didSave = await writeAudioVolume(Number(audioVolumeRange.value) / 100);
@@ -873,3 +890,19 @@ initialize().catch((error) => {
 
 mobileWidthQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);
 coarsePointerQuery?.addEventListener?.('change', refreshProviderPriorityInteractionMode);
+
+addStorageChangedListener((changes, areaName) => {
+  if (areaName !== 'sync' || !changes) {
+    return;
+  }
+  const touchedPreview = PREVIEW_SETTING_KEYS.some((key) => Object.hasOwn(changes, key));
+  const touchedVolume = Object.hasOwn(changes, AUDIO_VOLUME_KEY);
+  if (!touchedPreview && !touchedVolume) {
+    return;
+  }
+  void readSettings().then((next) => {
+    currentProviderPriority = next.providerPriority || [];
+    disabledProviders = next.disabledProviders || [];
+    applySettingsToForm(next);
+  });
+});

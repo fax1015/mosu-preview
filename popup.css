@@ -308,7 +308,15 @@ html.is-detached-window .map-preview-canvas-wrap {
    shell's height transition. */
 html.is-embedded-player .map-preview-popup {
     overflow: hidden;
-    transition: padding 260ms cubic-bezier(0.32, 0.72, 0, 1);
+    transition: padding 280ms cubic-bezier(0.32, 0.72, 0, 1),
+                background-color 240ms ease;
+}
+
+html.is-embedded-player .map-preview-header,
+html.is-embedded-player .map-preview-canvas-wrap,
+html.is-embedded-player .map-preview-controls {
+    position: relative;
+    z-index: 3;
 }
 
 html.is-embedded-player .map-preview-canvas-wrap {
@@ -350,53 +358,184 @@ html.is-embedded-player .map-preview-follow-btn {
     display: inline-flex;
 }
 
-/* Beatmap cover thumbnail: only reveals when the embedded miniplayer collapses
-   into its compact audio-player layout. */
-.map-preview-mini-cover {
+/* Split album-art panel + dynamic cover-color edge bleed: hidden outside the
+   embedded miniplayer, and smoothly revealed when collapsed into audio mode. */
+.map-preview-mini-backdrop,
+.map-preview-mini-art {
     display: none;
 }
 
-html.is-embedded-player .map-preview-mini-cover {
+html.is-embedded-player .map-preview-mini-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0;
+    overflow: hidden;
+    transition: opacity 260ms ease;
+}
+
+/* Dynamic ambient bleed driven directly by the beatmap's own cover art (pure
+   CSS blur + mask, so multi-hue edges bleed organically with no CORS canvas). */
+html.is-embedded-player .map-preview-mini-art-bleed {
+    position: absolute;
+    inset: -24px -12px -24px -24px;
+    background-image: var(--mini-cover-image, linear-gradient(135deg, rgba(84, 58, 168, 0.7), rgba(140, 102, 255, 0.55)));
+    background-size: 220px 156px;
+    background-position: left center;
+    background-repeat: no-repeat;
+    filter: blur(36px) saturate(1.65) brightness(1.06);
+    opacity: 0.44;
+    -webkit-mask-image: linear-gradient(90deg,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0.78) 22%,
+        rgba(0, 0, 0, 0.36) 46%,
+        rgba(0, 0, 0, 0.12) 70%,
+        transparent 94%);
+    mask-image: linear-gradient(90deg,
+        rgba(0, 0, 0, 1) 0%,
+        rgba(0, 0, 0, 0.78) 22%,
+        rgba(0, 0, 0, 0.36) 46%,
+        rgba(0, 0, 0, 0.12) 70%,
+        transparent 94%);
+}
+
+/* Subtle darkening scrim over the right deck so typography & waveform stay crisp. */
+html.is-embedded-player .map-preview-mini-deck-scrim {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+        rgba(22, 20, 28, 0.08) 0%,
+        rgba(24, 22, 30, 0.36) 24%,
+        rgba(26, 24, 32, 0.66) 52%,
+        rgba(28, 26, 34, 0.84) 100%);
+}
+
+html.is-embedded-player .map-preview-mini-art {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 auto;
-    width: 0;
-    height: 0;
-    margin-right: -0.6rem;
-    border-radius: 10px;
-    border: 1px solid transparent;
-    background-color: rgba(140, 102, 255, 0.14);
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 108px;
+    z-index: 2;
+    opacity: 0;
+    transform: translateX(-16px);
+    pointer-events: none;
+    transition: opacity 220ms ease,
+                transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Sharp left core of the cover art, softly feathered before the text column. */
+html.is-embedded-player .map-preview-mini-art-sharp {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 110px;
+    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
     background-size: cover;
     background-position: center;
-    color: rgba(196, 174, 255, 0.75);
-    opacity: 0;
-    overflow: hidden;
-    transform: scale(0.84);
-    transition: width 260ms cubic-bezier(0.32, 0.72, 0, 1),
-                height 260ms cubic-bezier(0.32, 0.72, 0, 1),
-                margin-right 260ms cubic-bezier(0.32, 0.72, 0, 1),
-                opacity 200ms ease,
-                transform 260ms cubic-bezier(0.32, 0.72, 0, 1),
-                border-color 200ms ease;
+    -webkit-mask-image: linear-gradient(90deg,
+        #000 0%,
+        #000 44%,
+        rgba(0, 0, 0, 0.7) 62%,
+        rgba(0, 0, 0, 0.2) 82%,
+        transparent 98%);
+    mask-image: linear-gradient(90deg,
+        #000 0%,
+        #000 44%,
+        rgba(0, 0, 0, 0.7) 62%,
+        rgba(0, 0, 0, 0.2) 82%,
+        transparent 98%);
 }
 
-html.is-embedded-player .map-preview-mini-cover svg {
-    width: 15px;
-    height: 15px;
-    fill: currentColor;
-    transition: opacity 160ms ease;
+/* Progressive mid-blur band across the right edge of the cover art. */
+html.is-embedded-player .map-preview-mini-art-blur-mid {
+    position: absolute;
+    top: -8px;
+    left: 0;
+    bottom: -8px;
+    width: 128px;
+    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
+    background-size: cover;
+    background-position: center;
+    filter: blur(8px) saturate(1.25);
+    opacity: 0.82;
+    -webkit-mask-image: linear-gradient(90deg,
+        transparent 38%,
+        rgba(0, 0, 0, 0.82) 62%,
+        rgba(0, 0, 0, 0.3) 82%,
+        transparent 100%);
+    mask-image: linear-gradient(90deg,
+        transparent 38%,
+        rgba(0, 0, 0, 0.82) 62%,
+        rgba(0, 0, 0, 0.3) 82%,
+        transparent 100%);
 }
 
-html.is-embedded-player .map-preview-mini-cover.has-cover svg {
-    opacity: 0;
+/* Soft far-edge blur bloom extending gently into the right deck. */
+html.is-embedded-player .map-preview-mini-art-blur-far {
+    position: absolute;
+    top: -16px;
+    left: 14px;
+    bottom: -16px;
+    width: 175px;
+    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
+    background-size: cover;
+    background-position: right center;
+    filter: blur(22px) saturate(1.45) brightness(1.04);
+    opacity: 0.42;
+    -webkit-mask-image: linear-gradient(90deg,
+        transparent 28%,
+        rgba(0, 0, 0, 0.72) 52%,
+        rgba(0, 0, 0, 0.2) 76%,
+        transparent 100%);
+    mask-image: linear-gradient(90deg,
+        transparent 28%,
+        rgba(0, 0, 0, 0.72) 52%,
+        rgba(0, 0, 0, 0.2) 76%,
+        transparent 100%);
 }
 
-/* Collapsed audio-player mode inside osu.ppy.sh: hides the playfield smoothly
-   and rearranges the header + transport bar into a spacious music-player deck. */
+html.is-embedded-player .map-preview-mini-art-vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 46% 50%, rgba(16, 15, 22, 0.3) 0%, rgba(16, 15, 22, 0.08) 65%, transparent 100%);
+    pointer-events: none;
+}
+
+html.is-embedded-player .map-preview-mini-art-fallback {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    fill: rgba(210, 194, 255, 0.26);
+    transform: translateX(-4px);
+    pointer-events: none;
+}
+
+html.is-embedded-player .map-preview-popup.has-mini-cover .map-preview-mini-art-fallback {
+    display: none;
+}
+
+/* Collapsed split album-art audio deck inside osu.ppy.sh. */
 html.is-embedded-collapsed .map-preview-popup {
-    padding: 0.75rem 0.85rem;
+    padding: 10px 14px 9px 116px;
     justify-content: space-between;
+    background: rgb(30, 28, 36);
+}
+
+html.is-embedded-collapsed .map-preview-mini-backdrop {
+    opacity: 1;
+}
+
+html.is-embedded-collapsed .map-preview-mini-art {
+    opacity: 1;
+    transform: translateX(0);
+    pointer-events: auto;
 }
 
 html.is-embedded-collapsed .map-preview-canvas-wrap {
@@ -416,57 +555,54 @@ html.is-embedded-collapsed .map-preview-compare-control {
 }
 
 html.is-embedded-collapsed .map-preview-header {
-    margin-bottom: 0.65rem;
-    gap: 0.65rem;
-}
-
-html.is-embedded-collapsed .map-preview-mini-cover {
-    width: 38px;
-    height: 38px;
-    margin-right: 0;
-    border-color: rgba(255, 255, 255, 0.14);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.34);
-    opacity: 1;
-    transform: scale(1);
+    margin-bottom: 4px;
+    gap: 8px;
+    align-items: flex-start;
 }
 
 html.is-embedded-collapsed .map-preview-title {
-    font-size: 0.88rem;
+    font-size: 0.85rem;
+    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.34);
 }
 
 html.is-embedded-collapsed .map-preview-subtitle {
-    font-size: 0.68rem;
+    font-size: 0.66rem;
 }
 
 html.is-embedded-collapsed .map-preview-header-actions {
-    gap: 0.25rem;
+    gap: 3px;
 }
 
 html.is-embedded-collapsed .map-preview-info-btn {
-    width: 26px;
-    height: 26px;
-    flex: 0 0 26px;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
     border-color: transparent;
     border-radius: 999px;
-    color: rgba(176, 171, 192, 0.82);
+    color: rgba(214, 210, 228, 0.78);
 }
 
 html.is-embedded-collapsed .map-preview-info-btn:hover {
-    background: rgba(255, 255, 255, 0.09);
+    background: rgba(255, 255, 255, 0.12);
     border-color: transparent;
     color: var(--text-primary);
 }
 
 html.is-embedded-collapsed .map-preview-follow-btn.is-following {
-    color: rgb(192, 168, 255);
-    background: rgba(140, 102, 255, 0.18);
+    color: #fff;
+    background: rgba(255, 255, 255, 0.16);
     border-color: transparent;
 }
 
+/* 2-row right-hand transport deck: full-width waveform above, time + volume + speed below. */
 html.is-embedded-collapsed .map-preview-controls {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-rows: 26px 24px;
+    grid-auto-flow: row;
     align-items: center;
-    gap: 8px;
+    column-gap: 5px;
+    row-gap: 6px;
     padding: 0;
     border: none;
     border-radius: 0;
@@ -479,39 +615,46 @@ html.is-embedded-collapsed .map-preview-keys-control {
 }
 
 html.is-embedded-collapsed .map-preview-timeline {
-    order: 2;
-    flex: 1 1 0;
-    width: auto;
-    min-width: 60px;
-    height: 28px;
-    border-radius: 9px;
-    background: rgba(0, 0, 0, 0.24);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    grid-column: 1 / -1;
+    grid-row: 1;
+    width: 100%;
+    height: 26px;
+    border-radius: 8px;
+    background: rgba(12, 11, 16, 0.38);
+    backdrop-filter: blur(6px);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
+/* Static readout in collapsed mode: not clickable and shows no hover affordance. */
 html.is-embedded-collapsed .map-preview-time-label {
-    order: 3;
-    height: 26px;
-    padding: 0 5px;
-    font-size: 0.68rem;
-    color: rgba(214, 210, 226, 0.8);
+    grid-column: 1;
+    grid-row: 2;
+    justify-self: start;
+    justify-content: flex-start;
+    width: auto;
+    height: 22px;
+    padding: 0;
+    font-size: 0.69rem;
+    color: rgba(226, 222, 238, 0.82);
+    text-align: left;
+    pointer-events: none;
+    cursor: default;
 }
 
 html.is-embedded-collapsed .map-preview-volume-control {
-    order: 4;
-    flex: 0 0 auto;
-    --map-preview-pill-width: 28px;
-    height: 28px;
+    grid-column: 2;
+    grid-row: 2;
+    --map-preview-pill-width: 26px;
+    height: 24px;
 }
 
 html.is-embedded-collapsed .map-preview-volume-btn {
-    width: 28px;
-    height: 28px;
+    width: 26px;
+    height: 24px;
     border-radius: 999px;
 }
 
-/* Volume sits on the right side in collapsed audio mode, so anchor its popover
-   to the right edge instead of the left. */
+/* Volume sits on the right in collapsed mode, so anchor its popover rightwards. */
 html.is-embedded-collapsed .map-preview-volume-popover {
     left: auto;
     right: 0;
@@ -524,49 +667,55 @@ html.is-embedded-collapsed .map-preview-volume-panel::after {
 }
 
 html.is-embedded-collapsed .map-preview-speed-control {
-    order: 5;
-    flex: 0 0 auto;
+    grid-column: 3;
+    grid-row: 2;
     --map-preview-pill-width: 34px;
-    height: 26px;
+    height: 22px;
 }
 
 html.is-embedded-collapsed .map-preview-speed-btn {
     width: 34px;
-    height: 26px;
+    height: 22px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.09);
+    color: rgba(240, 238, 248, 0.92);
     font-size: 0.68rem;
 }
 
 html.is-embedded-collapsed .map-preview-speed-btn:hover {
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.15);
 }
 
 .map-preview-mini-play-btn {
-    display: none;
+    position: relative;
+    z-index: 3;
+    transform: translateX(-4px);
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 32px;
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     padding: 0;
-    border: none;
+    border: 1px solid rgba(255, 255, 255, 0.34);
     border-radius: 999px;
-    background: var(--accent-primary);
+    background: rgba(18, 17, 24, 0.58);
+    backdrop-filter: blur(10px);
     color: #fff;
-    box-shadow: 0 4px 14px rgba(140, 102, 255, 0.34);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
     cursor: pointer;
-    transition: background-color 160ms ease, transform 180ms cubic-bezier(0.32, 0.72, 0, 1), box-shadow 160ms ease;
+    transition: background-color 160ms ease,
+                border-color 160ms ease,
+                transform 180ms cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 .map-preview-mini-play-btn:hover {
-    background: rgb(156, 122, 255);
-    box-shadow: 0 6px 18px rgba(140, 102, 255, 0.44);
-    transform: scale(1.06);
+    background: rgba(255, 255, 255, 0.22);
+    border-color: rgba(255, 255, 255, 0.48);
+    transform: translateX(-4px) scale(1.07);
 }
 
 .map-preview-mini-play-btn:active {
-    transform: scale(0.94);
+    transform: translateX(-4px) scale(0.94);
 }
 
 .map-preview-mini-play-btn:focus-visible {
@@ -575,8 +724,8 @@ html.is-embedded-collapsed .map-preview-speed-btn:hover {
 }
 
 .map-preview-mini-play-btn svg {
-    width: 11px;
-    height: 11px;
+    width: 12px;
+    height: 12px;
     fill: currentColor;
 }
 
@@ -596,15 +745,11 @@ html.is-embedded-collapsed .map-preview-speed-btn:hover {
     display: block;
 }
 
-html.is-embedded-collapsed .map-preview-mini-play-btn {
-    order: 1;
-    display: inline-flex;
-}
-
 @media (prefers-reduced-motion: reduce) {
     html.is-embedded-player .map-preview-popup,
     html.is-embedded-player .map-preview-canvas-wrap,
-    html.is-embedded-player .map-preview-mini-cover,
+    html.is-embedded-player .map-preview-mini-backdrop,
+    html.is-embedded-player .map-preview-mini-art,
     .map-preview-mini-play-btn {
         transition: none;
     }

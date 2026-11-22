@@ -457,6 +457,9 @@ const bindPopupUiEvents = ({
   });
 
   timeLabel?.addEventListener('click', () => {
+    if (state.embeddedCollapsed) {
+      return;
+    }
     void copyEditorTimestamp?.();
   });
 

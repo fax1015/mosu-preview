@@ -80,7 +80,7 @@
 
   const MIN_WIDTH = 340;
   const MAX_WIDTH = 1400;
-  const COLLAPSED_HEIGHT = 140;
+  const COLLAPSED_HEIGHT = 142;
   const VIEWPORT_MARGIN = 8;
 
   const MODE_URL_NAMES = Object.freeze(['osu', 'taiko', 'fruits', 'mania']);

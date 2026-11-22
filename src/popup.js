@@ -186,6 +186,23 @@ const volumeControl = document.querySelector('#mapPreviewVolumeControl');
 const volumeValue = document.querySelector('#mapPreviewVolumeValue');
 const volumeSpeaker = document.querySelector('.map-preview-volume-icon-speaker');
 
+const syncCollapsedTimeLabelInteractivity = (collapsed) => {
+  if (!timeLabel) {
+    return;
+  }
+  timeLabel.tabIndex = collapsed ? -1 : 0;
+  timeLabel.setAttribute('aria-disabled', collapsed ? 'true' : 'false');
+  if (collapsed) {
+    timeLabel.removeAttribute('title');
+  } else {
+    lastSelectedCount = -1;
+  }
+};
+
+if (IS_EMBEDDED_PLAYER && state.embeddedCollapsed) {
+  syncCollapsedTimeLabelInteractivity(true);
+}
+
 // The volume icon only animates changes the user makes: the level restored as
 // the popup opens arrives before any click or keypress, and lands still.
 const enableVolumeIconMotion = () => volumeButton?.classList.add('is-animated');
@@ -211,7 +228,6 @@ const embedButton = document.querySelector('#mapPreviewEmbedBtn');
 const detachButton = document.querySelector('#mapPreviewDetachBtn');
 const followButton = document.querySelector('#mapPreviewFollowBtn');
 const miniPlayButton = document.querySelector('#mapPreviewMiniPlayBtn');
-const miniCover = document.querySelector('#mapPreviewMiniCover');
 const infoButtons = [...document.querySelectorAll('.js-map-preview-info-btn')];
 const infoButton = infoButtons[0] || null;
 const infoModal = document.querySelector('#mapPreviewInfoModal');
@@ -912,6 +928,7 @@ const {
   flushPendingCacheWrite: waitForPendingCacheWrite,
   onCollapsedChange: (collapsed) => {
     document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
+    syncCollapsedTimeLabelInteractivity(collapsed);
     if (!collapsed) {
       syncEmbeddedChromeMetrics();
       if (!state.isPlaying && state.mapData) {
@@ -1419,11 +1436,16 @@ const renderFrame = () => {
   const selectedCount = renderer.timeline?.getSelectedIndices?.().length ?? 0;
   if (selectedCount !== lastSelectedCount) {
     lastSelectedCount = selectedCount;
-    const label = selectedCount === 0
-      ? 'Copy timestamp (C)'
-      : `Copy timestamp with ${selectedCount} object${selectedCount === 1 ? '' : 's'} (C)`;
-    timeLabel.title = label;
-    timeLabel.setAttribute('aria-label', label.replace(' (C)', ''));
+    if (state.embeddedCollapsed) {
+      timeLabel.removeAttribute('title');
+      timeLabel.removeAttribute('aria-label');
+    } else {
+      const label = selectedCount === 0
+        ? 'Copy timestamp (C)'
+        : `Copy timestamp with ${selectedCount} object${selectedCount === 1 ? '' : 's'} (C)`;
+      timeLabel.title = label;
+      timeLabel.setAttribute('aria-label', label.replace(' (C)', ''));
+    }
   }
 };
 
@@ -1825,16 +1847,16 @@ const selectObjectAtPoint = (event, { target = renderer, canvas = playfieldCanva
 };
 
 const updateMiniCover = (setId) => {
-  if (!miniCover) {
+  if (!popup) {
     return;
   }
   const safeSetId = normalizeNumericId(setId);
   if (safeSetId) {
-    miniCover.style.backgroundImage = `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`;
-    miniCover.classList.add('has-cover');
+    popup.style.setProperty('--mini-cover-image', `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`);
+    popup.classList.add('has-mini-cover');
   } else {
-    miniCover.style.backgroundImage = '';
-    miniCover.classList.remove('has-cover');
+    popup.style.removeProperty('--mini-cover-image');
+    popup.classList.remove('has-mini-cover');
   }
 };
 

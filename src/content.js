@@ -124,7 +124,9 @@
     if (followEnabled === false) {
       params.set('follow', '0');
     }
-    return extensionApi.runtime.getURL(`popup.html?${params.toString()}`);
+    const url = new URL(extensionApi.runtime.getURL('popup.html'));
+    url.search = params.toString();
+    return url.toString();
   };
 
   const getViewport = () => ({
@@ -868,28 +870,38 @@
     }
   });
 
+  const safeSendResponse = (sendResponse, payload) => {
+    try {
+      sendResponse(payload);
+    } catch {
+      // Message channel already closed; ignore.
+    }
+  };
+
   extensionApi.runtime.onMessage?.addListener?.((message, _sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return false;
     }
     if (message.type === 'mosuEmbeddedOpen') {
-      void mountOverlay({
-        beatmapId: message.beatmapId,
-        setId: message.setId,
-        mode: message.mode,
-        resumeTimeMs: message.resumeTimeMs,
-        resumePaused: message.resumePaused,
-        expandOnOpen: true,
-      }).then(
-        (ok) => sendResponse({ ok }),
-        (error) => sendResponse({ ok: false, error: error?.message || String(error) }),
-      );
+      Promise.resolve()
+        .then(() => mountOverlay({
+          beatmapId: message.beatmapId,
+          setId: message.setId,
+          mode: message.mode,
+          resumeTimeMs: message.resumeTimeMs,
+          resumePaused: message.resumePaused,
+          expandOnOpen: true,
+        }))
+        .then(
+          (ok) => safeSendResponse(sendResponse, { ok }),
+          (error) => safeSendResponse(sendResponse, { ok: false, error: error?.message || String(error) }),
+        );
       return true;
     }
     if (message.type === 'mosuEmbeddedClose') {
       const wasOpen = Boolean(hostElement);
       unmountOverlay({ clearResume: true });
-      sendResponse({ ok: true, closed: wasOpen });
+      safeSendResponse(sendResponse, { ok: true, closed: wasOpen });
       return false;
     }
     return false;

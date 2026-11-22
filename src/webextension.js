@@ -170,6 +170,28 @@ export const sendTabMessage = async (tabId, message) => {
   });
 };
 
+export const executeContentScript = async (tabId, files) => {
+  if (!extensionApi?.scripting?.executeScript) {
+    throw new Error('Scripting API is unavailable.');
+  }
+
+  const injection = { target: { tabId }, files };
+  if (usesPromiseApi) {
+    return extensionApi.scripting.executeScript(injection);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.scripting.executeScript(injection, (results) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to inject content script.'));
+        return;
+      }
+      resolve(results || []);
+    });
+  });
+};
+
 export const hasWindowsApi = () => Boolean(extensionApi?.windows?.create);
 
 export const getExtensionUrl = (path) => (

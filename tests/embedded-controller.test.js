@@ -12,7 +12,9 @@ test('embeddedController opens embedded player once, closes detached window, and
   let windowClosed = 0;
   let detachedClosed = 0;
   const sentMessages = [];
-  let shouldFailSend = false;
+  const injectedScripts = [];
+  let failSendCount = 0;
+  let shouldFailInject = false;
 
   globalThis.window = {
     close: () => { windowClosed += 1; },
@@ -21,6 +23,15 @@ test('embeddedController opens embedded player once, closes detached window, and
   };
 
   globalThis.browser = {
+    scripting: {
+      executeScript: async (injection) => {
+        injectedScripts.push(injection);
+        if (shouldFailInject) {
+          throw new Error('Cannot access contents of url');
+        }
+        return [{ result: true }];
+      },
+    },
     tabs: {
       query: async (q) => {
         if (q?.url === 'https://osu.ppy.sh/*') {
@@ -30,7 +41,8 @@ test('embeddedController opens embedded player once, closes detached window, and
       },
       sendMessage: async (tabId, message) => {
         sentMessages.push({ tabId, message });
-        if (shouldFailSend) {
+        if (failSendCount > 0) {
+          failSendCount -= 1;
           throw new Error('Could not establish connection. Receiving end does not exist.');
         }
         return message.type === 'mosuEmbeddedClose' ? { ok: true, closed: tabId === 10 } : { ok: true };
@@ -97,11 +109,18 @@ test('embeddedController opens embedded player once, closes detached window, and
     const closedCount = await controller.closeEmbeddedPlayersOnOsuTabs();
     assert.equal(closedCount, 1);
 
-    // Missing content script fails cleanly with a helpful reload toast.
-    shouldFailSend = true;
+    // Missing content script triggers on-demand scripting.executeScript and retries cleanly.
+    failSendCount = 1;
+    const recoveredOpen = await controller.openEmbeddedPlayer();
+    assert.equal(recoveredOpen, true);
+    assert.deepEqual(injectedScripts, [{ target: { tabId: 10 }, files: ['src/content.js'] }]);
+
+    // If injection itself also fails, surface an error toast without crashing.
+    failSendCount = 1;
+    shouldFailInject = true;
     const failedOpen = await controller.openEmbeddedPlayer();
     assert.equal(failedOpen, false);
-    assert.match(toasts[toasts.length - 1], /Reload the osu! tab/i);
+    assert.match(toasts[toasts.length - 1], /Could not pin preview/i);
   } finally {
     if (prevBrowser === undefined) delete globalThis.browser;
     else globalThis.browser = prevBrowser;

@@ -120,10 +120,12 @@ a `.osu` file is whatever its uploader typed, so the numbers a map sets for itse
 
 ## permissions
 
-the manifest requests only two extension permissions:
+the manifest requests only three extension permissions:
 
 - `activeTab`
-  reads the current tab URL so the popup can detect supported osu! beatmap pages.
+  reads the current tab URL so the popup can detect supported osu! beatmap pages, and grants temporary access when pinning the experimental in-page miniplayer.
+- `scripting`
+  injects the `osu.ppy.sh` miniplayer shell on demand if a tab was already open or did not have static host permissions enabled yet.
 - `storage`
   reads and writes user settings (`storage.sync`), provider stats, view history, detached window geometry, cache prune metadata (`storage.local`), and short-lived preview/compare cache data (`storage.session`). full audio blobs are stored in the browser Cache API (`mosuPreviewFullAudioV1`).
 

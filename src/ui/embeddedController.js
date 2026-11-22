@@ -11,6 +11,7 @@
 
 import {
   addTabsUpdatedListener,
+  executeContentScript,
   getCurrentTab,
   queryTabs,
   sendTabMessage,
@@ -192,14 +193,28 @@ const createEmbeddedController = ({
         resumePaused: !state.isPlaying,
       };
 
-      try {
+      const sendOpen = async () => {
         const response = await sendTabMessage(targetTabId, payload);
         if (!response?.ok) {
           throw new Error(response?.error || 'Could not mount embedded player.');
         }
+        return response;
+      };
+
+      try {
+        try {
+          await sendOpen();
+        } catch (firstError) {
+          // Static content scripts are skipped on already-open tabs after an
+          // install/reload and in Firefox MV3 when host permissions have not
+          // been permanently granted. Inject on demand via activeTab + scripting.
+          addDebugLog(`embed: initial message failed (${firstError?.message || firstError}); injecting content script`);
+          await executeContentScript(targetTabId, ['src/content.js']);
+          await sendOpen();
+        }
       } catch (error) {
-        addDebugLog(`embed: could not reach osu! tab (${error?.message || error})`);
-        showPopupToast('Reload the osu! tab once to pin the preview', { tone: 'info' });
+        addDebugLog(`embed: could not mount on osu! tab (${error?.message || error})`);
+        showPopupToast('Could not pin preview to this osu! tab', { tone: 'error' });
         return false;
       }
 

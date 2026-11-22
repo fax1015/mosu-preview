@@ -6,6 +6,7 @@
   "description": "Preview osu! beatmaps from valid osu.ppy.sh beatmap URLs from the browser.",
   "permissions": [
     "activeTab",
+    "scripting",
     "storage"
   ],
   "host_permissions": [
@@ -71,8 +72,7 @@
       ],
       "matches": [
         "https://osu.ppy.sh/*"
-      ],
-      "use_dynamic_url": true
+      ]
     }
   ],
   "options_ui": {

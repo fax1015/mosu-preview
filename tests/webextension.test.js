@@ -26,6 +26,9 @@ test('webextension promise API (Firefox) handles storageGet empty fallback and g
       getCurrent: async () => ({ id: 7, url: 'https://osu.ppy.sh/beatmaps/123' }),
       sendMessage: async (tabId, message) => ({ tabId, echoed: message.type }),
     },
+    scripting: {
+      executeScript: async (injection) => [injection],
+    },
   };
   try {
     const ext = await importFreshWebExtension('promise');
@@ -35,6 +38,7 @@ test('webextension promise API (Firefox) handles storageGet empty fallback and g
     assert.equal('addTabsRemovedListener' in ext, false, 'dead export removed');
     assert.deepEqual(await ext.getCurrentTab(), { id: 7, url: 'https://osu.ppy.sh/beatmaps/123' });
     assert.deepEqual(await ext.sendTabMessage(7, { type: 'ping' }), { tabId: 7, echoed: 'ping' });
+    assert.deepEqual(await ext.executeContentScript(7, ['src/content.js']), [{ target: { tabId: 7 }, files: ['src/content.js'] }]);
 
     const fn = () => {};
     ext.addRuntimeMessageListener(fn);
@@ -69,6 +73,9 @@ test('webextension callback API (Chrome) surfaces runtime.lastError and resolves
       getCurrent: (cb) => cb({ id: 9, url: 'https://osu.ppy.sh/home' }),
       sendMessage: (tabId, message, cb) => cb({ tabId, type: message.type }),
     },
+    scripting: {
+      executeScript: (injection, cb) => cb([injection]),
+    },
   };
   try {
     const ext = await importFreshWebExtension('callback');
@@ -76,10 +83,12 @@ test('webextension callback API (Chrome) surfaces runtime.lastError and resolves
     assert.equal(await ext.getCommandShortcut('_execute_action'), 'Alt+P');
     assert.deepEqual(await ext.getCurrentTab(), { id: 9, url: 'https://osu.ppy.sh/home' });
     assert.deepEqual(await ext.sendTabMessage(9, { type: 'open' }), { tabId: 9, type: 'open' });
+    assert.deepEqual(await ext.executeContentScript(9, ['src/content.js']), [{ target: { tabId: 9 }, files: ['src/content.js'] }]);
 
     lastError = { message: 'quota error' };
     await assert.rejects(ext.storageSet('local', { key: 'x' }), /quota error/);
     await assert.rejects(ext.sendTabMessage(9, { type: 'open' }), /quota error/);
+    await assert.rejects(ext.executeContentScript(9, ['src/content.js']), /quota error/);
     assert.equal(await ext.getCommandShortcut('_execute_action'), null);
   } finally {
     if (prevBrowser === undefined) delete globalThis.browser;

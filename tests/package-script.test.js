@@ -95,15 +95,18 @@ test('stripJsComments ignores commented-out imports and validateJsImports catche
   }
 });
 
-test('target manifest transforms preserve Chrome use_dynamic_url and strip it for Firefox', async () => {
+test('target manifest transforms keep osu-scoped web_accessible_resources and strip Firefox-unsupported keys', async () => {
   const manifest = JSON.parse(await fs.readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 
   const chromeManifest = targets.chrome.manifest(manifest);
-  assert.equal(chromeManifest.web_accessible_resources?.[0]?.use_dynamic_url, true);
   assert.deepEqual(chromeManifest.web_accessible_resources?.[0]?.matches, ['https://osu.ppy.sh/*']);
   assert.deepEqual(chromeManifest.content_scripts?.[0]?.js, ['src/content.js']);
+  assert.ok(chromeManifest.permissions.includes('scripting'));
 
-  const firefoxManifest = targets.firefox.manifest(manifest);
+  // Even if use_dynamic_url is ever re-added, the Firefox transform strips it.
+  const withDynamicUrl = structuredClone(manifest);
+  withDynamicUrl.web_accessible_resources[0].use_dynamic_url = true;
+  const firefoxManifest = targets.firefox.manifest(withDynamicUrl);
   assert.equal(Object.hasOwn(firefoxManifest.web_accessible_resources?.[0] || {}, 'use_dynamic_url'), false);
   assert.deepEqual(firefoxManifest.web_accessible_resources?.[0]?.matches, ['https://osu.ppy.sh/*']);
   assert.deepEqual(firefoxManifest.content_scripts?.[0]?.js, ['src/content.js']);

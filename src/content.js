@@ -480,7 +480,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      padding: 0 12px 0 15px;
+      padding: 0 0 0 16px;
       background: rgba(24, 23, 28, 0.72);
       border-bottom: 1px solid rgba(255, 255, 255, 0.07);
       cursor: grab;
@@ -491,17 +491,8 @@
     .mosu-bar-left {
       display: flex;
       align-items: center;
-      gap: 7px;
       min-width: 0;
       pointer-events: none;
-    }
-    .mosu-brand-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 999px;
-      background: rgb(140, 102, 255);
-      box-shadow: 0 0 8px rgba(140, 102, 255, 0.55);
-      flex: 0 0 auto;
     }
     .mosu-brand {
       font-family: inherit;
@@ -537,43 +528,50 @@
     .mosu-bar-actions {
       position: relative;
       z-index: 5;
+      height: 100%;
       display: flex;
-      align-items: center;
-      gap: 4px;
+      align-items: stretch;
+      gap: 0;
       flex: 0 0 auto;
     }
     .mosu-btn {
       appearance: none;
-      border: 1px solid transparent;
+      border: none;
       background: transparent;
       color: rgb(148, 143, 163);
-      width: 22px;
-      height: 22px;
-      border-radius: 999px;
+      width: 34px;
+      height: 100%;
+      border-radius: 0;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       padding: 0;
-      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+      transition: background 0.16s ease, color 0.16s ease;
     }
     .mosu-btn:hover {
       background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.14);
       color: #fff;
-      transform: scale(1.06);
     }
     .mosu-btn:active {
-      transform: scale(0.94);
+      background: rgba(255, 255, 255, 0.12);
     }
     .mosu-btn:focus-visible {
       outline: 2px solid rgba(205, 223, 255, 0.9);
-      outline-offset: 1px;
+      outline-offset: -2px;
+    }
+    /* Matches the outer shell's 24px corner radius (minus 1px border). */
+    .mosu-btn--close {
+      width: 42px;
+      padding-right: 4px;
+      border-radius: 0 23px 0 0;
     }
     .mosu-btn--close:hover {
-      background: rgba(214, 64, 64, 0.22);
-      border-color: rgba(214, 64, 64, 0.36);
+      background: rgba(214, 64, 64, 0.28);
       color: #ffd7d7;
+    }
+    .mosu-btn--close:active {
+      background: rgba(214, 64, 64, 0.38);
     }
     .mosu-btn svg {
       width: 10px;
@@ -832,10 +830,7 @@
 
     const barLeft = document.createElement('div');
     barLeft.className = 'mosu-bar-left';
-    barLeft.innerHTML = `
-      <span class="mosu-brand-dot" aria-hidden="true"></span>
-      <span class="mosu-brand">mosu! preview</span>
-    `;
+    barLeft.innerHTML = '<span class="mosu-brand">mosu! preview</span>';
 
     const dragPill = document.createElement('span');
     dragPill.className = 'mosu-drag-pill';

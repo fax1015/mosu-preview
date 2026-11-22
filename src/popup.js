@@ -40,6 +40,7 @@ import {
   queryActiveTab,
   requestBeatmapForLoad,
   takeInitialMapRequest,
+  waitForPendingCacheWrite,
 } from './mapRequest.js';
 import {
   buildSectionMarks,
@@ -130,7 +131,7 @@ const IS_MOBILE_VIEW = /android|mobile|tablet|ipad|iphone|ipod/i.test(globalThis
 // from it opens behind that page: the user has to leave the popup to see it.
 const OPENS_TABS_OUT_OF_SIGHT = IS_FIREFOX && IS_MOBILE_VIEW;
 
-if (IS_FIREFOX) {
+if (IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_EMBEDDED_PLAYER) {
   document.body?.classList.add('is-firefox-popup');
 }
 
@@ -291,7 +292,12 @@ const setModalShellVisible = (modalShell, isVisible) => {
   modalHideTimers.set(modalShell, nextHideTimer);
 };
 
-const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas);
+// Inside an extension iframe embedded in a host page, synchronized 2D
+// compositing avoids desynchronized front-buffer frames being dropped before
+// the iframe's first composite (especially when opened paused).
+const renderer = new PreviewRenderer(playfieldCanvas, timelineCanvas, {
+  lowLatency: !IS_EMBEDDED_PLAYER,
+});
 // Assigned once the playback controller exists, which its actions need. Until
 // then there is nothing playing for it to report.
 let mediaSessionController = null;
@@ -902,6 +908,7 @@ const {
   showPopupToast,
   loadPreview: (options) => initializePreviewForCurrentTab(options),
   closeDetachedWindowIfOpen,
+  flushPendingCacheWrite: waitForPendingCacheWrite,
   onCollapsedChange: (collapsed) => {
     document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
     if (!collapsed) {
@@ -909,9 +916,51 @@ const {
       if (!state.isPlaying && state.mapData) {
         renderFrame();
       }
+      scheduleEmbeddedRepaint();
     }
   },
 });
+
+let embeddedRepaintRafId = null;
+let embeddedRepaintRetries = 0;
+const MAX_EMBEDDED_REPAINT_RETRIES = 10;
+
+const cancelEmbeddedRepaint = () => {
+  if (embeddedRepaintRafId !== null) {
+    cancelAnimationFrame(embeddedRepaintRafId);
+    embeddedRepaintRafId = null;
+  }
+  embeddedRepaintRetries = 0;
+};
+
+// Ensures the embedded iframe renders once its CSS box has real dimensions and
+// after the loading overlay clears, so a rapid open never leaves a 1x1 or blank
+// canvas when playback is paused or waiting on audio seek.
+const scheduleEmbeddedRepaint = () => {
+  if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || embeddedRepaintRafId !== null) {
+    return;
+  }
+  embeddedRepaintRafId = requestAnimationFrame(() => {
+    embeddedRepaintRafId = null;
+    if (state.embeddedCollapsed) {
+      embeddedRepaintRetries = 0;
+      return;
+    }
+    syncEmbeddedChromeMetrics();
+    const hasSize = playfieldCanvas && playfieldCanvas.clientWidth > 0 && playfieldCanvas.clientHeight > 0;
+    if (!hasSize) {
+      if (embeddedRepaintRetries < MAX_EMBEDDED_REPAINT_RETRIES) {
+        embeddedRepaintRetries += 1;
+        scheduleEmbeddedRepaint();
+      }
+      return;
+    }
+    embeddedRepaintRetries = 0;
+    if (!state.isPlaying && state.mapData) {
+      renderFrame();
+    }
+  });
+};
 
 const syncEmbeddedChromeMetrics = () => {
   if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || !popup || !canvasWrap) {
@@ -2325,6 +2374,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
     renderFrame();
     syncEmbeddedChromeMetrics();
     setPreviewLoading(false);
+    scheduleEmbeddedRepaint();
 
     setPlaybackSpeedControlEnabled(true);
 
@@ -2408,6 +2458,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
     renderFrame();
     syncEmbeddedChromeMetrics();
     setPreviewLoading(false);
+    scheduleEmbeddedRepaint();
   }
 };
 
@@ -2661,6 +2712,7 @@ window.addEventListener('pagehide', () => {
   state.audioBadgeHideTimer = registry.clearTimeout(state.audioBadgeHideTimer);
   state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
   stopPlayback();
+  cancelEmbeddedRepaint();
   state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
   stopTimelineDurationAnimation();
   releaseFullAudioObjectUrl();

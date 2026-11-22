@@ -334,6 +334,7 @@
   let iframeReady = false;
   let pendingMessages = [];
   let lastNotifiedUrl = '';
+  let mountGeneration = 0;
 
   const scheduleBoundsPersist = () => {
     if (boundsPersistTimer !== null) {
@@ -408,6 +409,7 @@
   };
 
   const unmountOverlay = ({ clearResume = true } = {}) => {
+    mountGeneration += 1;
     if (clearResume) {
       clearResumeSnapshot();
     }
@@ -767,17 +769,23 @@
   };
 
   const mountOverlay = async (options) => {
+    mountGeneration += 1;
+    const generation = mountGeneration;
     const storedBounds = await readStoredBounds();
+    if (generation !== mountGeneration) {
+      return false;
+    }
     const initialCollapsed = typeof options.collapsed === 'boolean'
       ? options.collapsed
       : Boolean(storedBounds.collapsed);
+    const effectiveCollapsed = options.expandOnOpen ? false : initialCollapsed;
     const iframeUrl = buildEmbeddedIframeUrl({
       beatmapId: options.beatmapId,
       setId: options.setId,
       mode: options.mode,
       resumeTimeMs: options.resumeTimeMs,
       resumePaused: options.resumePaused,
-      collapsed: initialCollapsed,
+      collapsed: effectiveCollapsed,
       followEnabled: options.followEnabled !== false,
     });
 
@@ -807,7 +815,7 @@
 
     currentBounds = normalizeBounds({
       ...storedBounds,
-      collapsed: options.expandOnOpen ? false : initialCollapsed,
+      collapsed: effectiveCollapsed,
     });
 
     ensureTopBarFonts();
@@ -989,19 +997,17 @@
       return false;
     }
     if (message.type === 'mosuEmbeddedOpen') {
-      Promise.resolve()
-        .then(() => mountOverlay({
-          beatmapId: message.beatmapId,
-          setId: message.setId,
-          mode: message.mode,
-          resumeTimeMs: message.resumeTimeMs,
-          resumePaused: message.resumePaused,
-          expandOnOpen: true,
-        }))
-        .then(
-          (ok) => safeSendResponse(sendResponse, { ok }),
-          (error) => safeSendResponse(sendResponse, { ok: false, error: error?.message || String(error) }),
-        );
+      mountOverlay({
+        beatmapId: message.beatmapId,
+        setId: message.setId,
+        mode: message.mode,
+        resumeTimeMs: message.resumeTimeMs,
+        resumePaused: message.resumePaused,
+        expandOnOpen: true,
+      }).then(
+        (ok) => safeSendResponse(sendResponse, { ok }),
+        (error) => safeSendResponse(sendResponse, { ok: false, error: error?.message || String(error) }),
+      );
       return true;
     }
     if (message.type === 'mosuEmbeddedClose') {

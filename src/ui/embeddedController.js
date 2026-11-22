@@ -37,6 +37,7 @@ const createEmbeddedController = ({
   showPopupToast,
   loadPreview,
   closeDetachedWindowIfOpen,
+  flushPendingCacheWrite,
   onCollapsedChange,
 }) => {
   let embedInFlight = false;
@@ -215,13 +216,37 @@ const createEmbeddedController = ({
         await closeDetachedWindowIfOpen();
       }
 
+      // Let an in-flight .osu session cache write finish before closing the
+      // toolbar popup so the embedded iframe gets an immediate cache hit.
+      if (typeof flushPendingCacheWrite === 'function') {
+        let flushTimer = null;
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => flushPendingCacheWrite()).catch(() => {}),
+            new Promise((resolve) => {
+              flushTimer = setTimeout(resolve, 150);
+            }),
+          ]);
+        } finally {
+          if (flushTimer !== null) {
+            clearTimeout(flushTimer);
+          }
+        }
+      }
+
+      // Only carry a resume timestamp and pause flag once playback has actually
+      // initialized (or been manually started). Clicking the miniplayer button
+      // immediately after the popup appears -- while afterNextPaint / WebAudio
+      // attach is still running before autoplay fires -- would otherwise see
+      // `state.mapData && !state.isPlaying` and hand over a spurious `paused=1`.
+      const hasLivePlaybackState = Boolean(state.mapData && (state.hasAutoStarted || state.isPlaying));
       const payload = {
         type: 'mosuEmbeddedOpen',
         beatmapId,
         setId: state.detachContext?.setId || '',
         mode: state.detachContext?.mode ?? null,
-        resumeTimeMs: state.mapData ? Math.round(state.currentTimeMs) : -1,
-        resumePaused: !state.isPlaying,
+        resumeTimeMs: hasLivePlaybackState ? Math.round(state.currentTimeMs) : -1,
+        resumePaused: hasLivePlaybackState ? !state.isPlaying : false,
       };
 
       const sendOpen = async () => {

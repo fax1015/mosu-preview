@@ -64,6 +64,7 @@ test('embeddedController opens embedded player once, closes detached window, and
       embeddedCollapsed: false,
       mapData: { mode: 0 },
       currentTimeMs: 12_345,
+      hasAutoStarted: true,
       isPlaying: true,
       playbackSpeed: 1,
       followEnabled: false,
@@ -73,6 +74,7 @@ test('embeddedController opens embedded player once, closes detached window, and
     const embedButton = { disabled: true };
     const toasts = [];
 
+    let cacheFlushCount = 0;
     const controller = createEmbeddedController({
       state,
       registry: new CleanupRegistry(),
@@ -82,6 +84,7 @@ test('embeddedController opens embedded player once, closes detached window, and
       showPopupToast: (msg) => toasts.push(msg),
       loadPreview: async () => {},
       closeDetachedWindowIfOpen: async () => { detachedClosed += 1; return true; },
+      flushPendingCacheWrite: async () => { cacheFlushCount += 1; },
     });
 
     // Disabled while the experimental toggle is off.
@@ -108,6 +111,25 @@ test('embeddedController opens embedded player once, closes detached window, and
     assert.equal(sentMessages[0].message.type, 'mosuEmbeddedOpen');
     assert.equal(sentMessages[0].message.resumeTimeMs, 12_345);
     assert.equal(sentMessages[0].message.resumePaused, false);
+    assert.equal(cacheFlushCount, 1);
+
+    // Fast click right after the popup loads (before autoplay has run): must NOT
+    // carry a spurious paused=1 handoff.
+    state.hasAutoStarted = false;
+    state.isPlaying = false;
+    const fastOpenIndex = sentMessages.length;
+    assert.equal(await controller.openEmbeddedPlayer(), true);
+    assert.equal(sentMessages[fastOpenIndex].message.resumeTimeMs, -1);
+    assert.equal(sentMessages[fastOpenIndex].message.resumePaused, false);
+
+    // Explicit pause after autoplay ran DOES preserve the paused timestamp.
+    state.hasAutoStarted = true;
+    state.isPlaying = false;
+    const pausedOpenIndex = sentMessages.length;
+    assert.equal(await controller.openEmbeddedPlayer(), true);
+    assert.equal(sentMessages[pausedOpenIndex].message.resumeTimeMs, 12_345);
+    assert.equal(sentMessages[pausedOpenIndex].message.resumePaused, true);
+    state.isPlaying = true;
 
     // Closing across osu tabs returns how many tabs actually closed an overlay.
     const closedCount = await controller.closeEmbeddedPlayersOnOsuTabs();
@@ -398,6 +420,8 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
     },
   };
 
+  let storedLocalBounds = {};
+  let boundsReadGate = null;
   const mockBrowser = {
     runtime: {
       getURL: (p) => `moz-extension://test-uuid/${p}`,
@@ -405,7 +429,12 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
     },
     storage: {
       local: {
-        get: async () => ({}),
+        get: async () => {
+          if (boundsReadGate) {
+            await boundsReadGate;
+          }
+          return { mosuEmbeddedPlayerBoundsV1: storedLocalBounds };
+        },
         set: async () => {},
       },
     },
@@ -487,5 +516,43 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
   let closeResponse = null;
   runtimeListeners[0]({ type: 'mosuEmbeddedClose' }, {}, (res) => { closeResponse = res; });
   assert.deepEqual({ ...closeResponse }, { ok: true, closed: true });
+  assert.equal(htmlEl.children.length, 1);
+
+  // Reopening from the toolbar popup when previously collapsed expands both the
+  // shell and the iframe URL (no stale collapsed=1 hiding the playfield).
+  storedLocalBounds = { width: 440, height: 443, right: 20, bottom: 72, collapsed: true };
+  const reopened = await new Promise((resolve) => {
+    runtimeListeners[0]({
+      type: 'mosuEmbeddedOpen',
+      beatmapId: '123',
+      setId: '55',
+      mode: 0,
+      resumeTimeMs: -1,
+      resumePaused: false,
+    }, {}, resolve);
+  });
+  assert.equal(reopened.ok, true);
+  const reopenedHost = htmlEl.children[1];
+  const reopenedIframe = reopenedHost.shadowRoot.children[1].children[1].children[0];
+  assert.doesNotMatch(reopenedIframe.src, /collapsed=1/);
+  runtimeListeners[0]({ type: 'mosuEmbeddedClose' }, {}, () => {});
+  assert.equal(htmlEl.children.length, 1);
+
+  // A close arriving while mountOverlay is awaiting stored bounds cancels the stale mount.
+  let releaseBounds;
+  boundsReadGate = new Promise((resolve) => { releaseBounds = resolve; });
+  const staleMountPromise = new Promise((resolve) => {
+    runtimeListeners[0]({
+      type: 'mosuEmbeddedOpen',
+      beatmapId: '123',
+      setId: '55',
+      mode: 0,
+    }, {}, resolve);
+  });
+  runtimeListeners[0]({ type: 'mosuEmbeddedClose' }, {}, () => {});
+  releaseBounds();
+  boundsReadGate = null;
+  const staleMountRes = await staleMountPromise;
+  assert.equal(staleMountRes.ok, false);
   assert.equal(htmlEl.children.length, 1);
 });

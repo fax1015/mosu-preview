@@ -163,6 +163,8 @@ const writeCachedPreview = (value) => {
   return cacheWriteInFlight;
 };
 
+const waitForPendingCacheWrite = () => cacheWriteInFlight ?? Promise.resolve(true);
+
 const isCachedPreviewUsable = (cached, beatmapId) => {
   if (
     !cached
@@ -276,4 +278,5 @@ export {
   queryActiveTab,
   requestBeatmapForLoad,
   takeInitialMapRequest,
+  waitForPendingCacheWrite,
 };

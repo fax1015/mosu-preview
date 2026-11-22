@@ -189,13 +189,16 @@ const createDetachController = ({
     if (openInFlight) {
       return;
     }
+    const hasLivePlaybackState = Boolean(state.mapData && (state.hasAutoStarted || state.isPlaying));
     const pagePath = buildDetachedPageUrl({
       beatmapId: state.detachContext.beatmapId,
       setId: state.detachContext.setId,
       mode: state.detachContext.mode,
-      // Hand over the playhead so the window picks up where the popup left off.
-      resumeTimeMs: state.mapData ? state.currentTimeMs : -1,
-      resumePaused: !state.isPlaying,
+      // Hand over the playhead once playback has initialized; before autoplay
+      // has run, let the detached window start fresh instead of carrying a
+      // spurious `paused=1`.
+      resumeTimeMs: hasLivePlaybackState ? state.currentTimeMs : -1,
+      resumePaused: hasLivePlaybackState ? !state.isPlaying : false,
     });
 
     if (!pagePath) {

@@ -19,6 +19,7 @@ export const HITSOUNDS_KEY = 'hitsounds';
 export const HITSOUND_VOLUME_KEY = 'hitsoundVolume';
 export const HITSOUND_STYLE_KEY = 'hitsoundStyle';
 export const AUTOPLAY_KEY = 'autoplay';
+export const EMBEDDED_PLAYER_KEY = 'embeddedPlayer';
 export const KEYBINDINGS_KEY = 'keybindings';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
@@ -44,6 +45,7 @@ export const DEFAULT_HITSOUND_STYLE = 'argon';
 // popup. Off is for whoever opens it with the volume up and would rather it
 // waited to be asked.
 export const DEFAULT_AUTOPLAY = true;
+export const DEFAULT_EMBEDDED_PLAYER = false;
 
 // The voices each style plays live in audio/hitsounds.js; this is only the list
 // a stored choice is checked against, so the options page does not have to load
@@ -130,6 +132,7 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   HITSOUND_VOLUME_KEY,
   HITSOUND_STYLE_KEY,
   AUTOPLAY_KEY,
+  EMBEDDED_PLAYER_KEY,
   KEYBINDINGS_KEY,
 ]);
 
@@ -292,6 +295,8 @@ export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFA
 
 export const normalizeAutoplay = (value) => normalizeBooleanSetting(value, DEFAULT_AUTOPLAY);
 
+export const normalizeEmbeddedPlayer = (value) => normalizeBooleanSetting(value, DEFAULT_EMBEDDED_PLAYER);
+
 export const normalizeHitsoundVolume = (value) => normalizeUnitRange(value, DEFAULT_HITSOUND_VOLUME);
 
 // A style removed in a later build, or a hand-edited value, plays the default
@@ -346,6 +351,7 @@ export const normalizePreviewSettings = (items = {}) => ({
   hitsoundVolume: normalizeHitsoundVolume(items?.[HITSOUND_VOLUME_KEY] ?? items?.hitsoundVolume),
   hitsoundStyle: normalizeHitsoundStyle(items?.[HITSOUND_STYLE_KEY] ?? items?.hitsoundStyle),
   autoplay: normalizeAutoplay(items?.[AUTOPLAY_KEY] ?? items?.autoplay),
+  embeddedPlayer: normalizeEmbeddedPlayer(items?.[EMBEDDED_PLAYER_KEY] ?? items?.embeddedPlayer),
   keybindings: normalizeKeybindings(items?.[KEYBINDINGS_KEY] ?? items?.keybindings),
 });
 
@@ -368,6 +374,7 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [HITSOUND_VOLUME_KEY]: normalized.hitsoundVolume,
     [HITSOUND_STYLE_KEY]: normalized.hitsoundStyle,
     [AUTOPLAY_KEY]: normalized.autoplay,
+    [EMBEDDED_PLAYER_KEY]: normalized.embeddedPlayer,
     // Sparse: only what the user moved off its default, so adding a shortcut
     // later does not need a migration of everyone's stored map.
     [KEYBINDINGS_KEY]: toStoredKeybindings(normalized.keybindings),

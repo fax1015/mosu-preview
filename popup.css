@@ -266,21 +266,26 @@ h6 {
     }
 }
 
-/* Detached window: the shell fills the OS window and the playfield takes the
-   slack, so resizing grows the preview instead of padding around a fixed box. */
+/* Detached window and embedded in-page miniplayer: the shell fills its host
+   viewport and the playfield takes the slack, so resizing grows the preview
+   instead of padding around a fixed box. */
 html.is-detached-window,
-html.is-detached-window body {
+html.is-detached-window body,
+html.is-embedded-player,
+html.is-embedded-player body {
     width: 100%;
     height: 100%;
     min-width: 0;
     max-width: none;
 }
 
-html.is-detached-window body {
+html.is-detached-window body,
+html.is-embedded-player body {
     padding: 0;
 }
 
-html.is-detached-window .map-preview-popup {
+html.is-detached-window .map-preview-popup,
+html.is-embedded-player .map-preview-popup {
     width: 100%;
     max-width: none;
     height: 100%;
@@ -291,7 +296,8 @@ html.is-detached-window .map-preview-popup {
     transform: none;
 }
 
-html.is-detached-window .map-preview-canvas-wrap {
+html.is-detached-window .map-preview-canvas-wrap,
+html.is-embedded-player .map-preview-canvas-wrap {
     flex: 1 1 auto;
     aspect-ratio: auto;
     min-height: 0;
@@ -302,15 +308,91 @@ html.is-detached-window .map-preview-detach-btn {
     display: none;
 }
 
-/* Following only means something for a window that outlives the tab it came
-   from, so the toggle is hidden in the toolbar popup. Qualified with the shared
-   button class so it outranks that rule's `display` rather than tying with it
-   and losing on source order. */
+/* Pinning to the osu! page is an experimental opt-in feature and only applies
+   from the desktop toolbar popup. */
+.map-preview-info-btn.map-preview-embed-btn {
+    display: none;
+}
+
+html.is-embedded-enabled:not(.is-detached-window):not(.is-embedded-player):not(.is-mobile-view) .map-preview-embed-btn {
+    display: inline-flex;
+}
+
+/* Following only means something for a preview that outlives the page click it
+   came from, so the toggle is hidden in the toolbar popup. Qualified with the
+   shared button class so it outranks that rule's `display` rather than tying
+   with it and losing on source order. */
 .map-preview-info-btn.map-preview-follow-btn {
     display: none;
 }
 
-html.is-detached-window .map-preview-follow-btn {
+html.is-detached-window .map-preview-follow-btn,
+html.is-embedded-player .map-preview-follow-btn {
+    display: inline-flex;
+}
+
+/* Collapsed mini-bar inside osu.ppy.sh: hides the playfield so only the header
+   and interactive timeline/controls row stay visible, SoundCloud-style. */
+html.is-embedded-collapsed .map-preview-popup {
+    padding: 0.45rem 0.65rem 0.5rem;
+    justify-content: space-between;
+}
+
+html.is-embedded-collapsed .map-preview-canvas-wrap,
+html.is-embedded-collapsed .map-preview-debug-panel,
+html.is-embedded-collapsed .map-preview-compare-control {
+    display: none;
+}
+
+html.is-embedded-collapsed .map-preview-header {
+    margin-bottom: 0.35rem;
+}
+
+.map-preview-mini-play-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: var(--map-preview-capsule-inner-height);
+    height: var(--map-preview-capsule-inner-height);
+    padding: 0;
+    border: none;
+    border-radius: calc(var(--map-preview-capsule-inner-height) / 2);
+    background: transparent;
+    color: rgb(214, 210, 226);
+    cursor: pointer;
+    transition: color var(--transition), background-color var(--transition);
+}
+
+.map-preview-mini-play-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.map-preview-mini-play-btn:focus-visible {
+    outline: 1px solid rgba(181, 164, 244, 0.9);
+    outline-offset: -1px;
+}
+
+.map-preview-mini-play-btn svg {
+    width: 10px;
+    height: 10px;
+    fill: currentColor;
+}
+
+.map-preview-mini-play-icon--pause {
+    display: none;
+}
+
+.map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--play {
+    display: none;
+}
+
+.map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--pause {
+    display: block;
+}
+
+html.is-embedded-collapsed .map-preview-mini-play-btn {
     display: inline-flex;
 }
 
@@ -440,8 +522,9 @@ html.is-detached-window .map-preview-follow-btn {
     }
 }
 
-/* A phone has no separate windows to open a preview in, and no keyboard for
-   the shortcuts list to describe. */
+/* A phone has no separate windows to open a preview in, no desktop corner for
+   an embedded miniplayer, and no keyboard for the shortcuts list to describe. */
+html.is-mobile-view .map-preview-embed-btn,
 html.is-mobile-view .map-preview-detach-btn,
 html.is-mobile-view #mapPreviewHelpBtn {
     display: none;
@@ -3329,11 +3412,11 @@ html.is-comparing .map-preview-compare-btn,
     }
 }
 
-/* Firefox's desktop toolbar popup only: a detached window and Firefox for
-   Android, where the popup is a full page, animate like everything else. */
-html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-panel-label,
-html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check,
-html:not(.is-detached-window):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check.is-leaving {
+/* Firefox's desktop toolbar popup only: a detached window, an embedded player,
+   and Firefox for Android animate like everything else. */
+html:not(.is-detached-window):not(.is-embedded-player):not(.is-mobile-view) body.is-firefox-popup .map-preview-panel-label,
+html:not(.is-detached-window):not(.is-embedded-player):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check,
+html:not(.is-detached-window):not(.is-embedded-player):not(.is-mobile-view) body.is-firefox-popup .map-preview-compare-check.is-leaving {
     animation: none;
 }
 

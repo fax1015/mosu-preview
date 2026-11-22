@@ -10,6 +10,7 @@ import { hasStorageArea, queryTabs, storageGet, storageSet } from './webextensio
 import { registry } from './core/cleanup.js';
 import { extractBeatmapInfoFromUrl, normalizeNumericId } from './core/beatmapUrl.js';
 import { buildBeatmapSourceUrl, readDetachedParams } from './core/detachedWindow.js';
+import { readEmbeddedParams } from './core/embeddedPlayer.js';
 
 const CACHE_KEY = 'mosuPreviewCacheV1';
 const CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 12;
@@ -19,9 +20,10 @@ const MAX_OSU_FILE_BYTES = 16 * 1024 * 1024;
 const HIT_OBJECTS_SECTION_RE = /\[hitobjects\]/i;
 const UTF8_DECODER = new TextDecoder('utf-8');
 
-// Whether this page is the toolbar popup or a detached window, and for a
-// window, the map it was opened on.
+// Whether this page is the toolbar popup, a detached window, or an embedded
+// in-page miniplayer, and for the latter two, the map it was opened on.
 const detachedParams = readDetachedParams(globalThis.location?.search || '');
+const embeddedParams = readEmbeddedParams(globalThis.location?.search || '');
 
 const queryActiveTab = async () => {
   const tabs = await queryTabs({ active: true, currentWindow: true });
@@ -219,6 +221,7 @@ const requestBeatmapForLoad = ({ sourceUrlOverride = '', isStaleLoad = () => fal
   const cachedRequest = readCachedPreview();
   const request = (async () => {
     let sourceUrl = '';
+    let activeTab = null;
     if (sourceUrlOverride) {
       // A followed tab already resolved to a beatmap URL.
       sourceUrl = sourceUrlOverride;
@@ -226,8 +229,10 @@ const requestBeatmapForLoad = ({ sourceUrlOverride = '', isStaleLoad = () => fal
       // The ids arrived in the page URL; rebuilding a canonical beatmap URL from
       // them keeps both entry points on the same validation path.
       sourceUrl = buildBeatmapSourceUrl(detachedParams);
+    } else if (embeddedParams.isEmbedded) {
+      sourceUrl = buildBeatmapSourceUrl(embeddedParams);
     } else {
-      const activeTab = await queryActiveTab().catch(() => null);
+      activeTab = await queryActiveTab().catch(() => null);
       // Chrome withholds the URL of tabs it will not let an extension read --
       // the new tab page, chrome:// pages, other extensions' pages. That is
       // not a failed load, it is simply a page with no map: the unsupported
@@ -238,7 +243,7 @@ const requestBeatmapForLoad = ({ sourceUrlOverride = '', isStaleLoad = () => fal
     const info = extractBeatmapInfoFromUrl(sourceUrl);
     const content = info.valid ? loadBeatmapContent(info, cachedRequest, isStaleLoad) : null;
     content?.catch(() => {});
-    return { info, content };
+    return { info, content, activeTab };
   })();
   request.catch(() => {});
   return request;
@@ -265,6 +270,7 @@ const takeInitialMapRequest = (isStaleLoad) => {
 export {
   BEATMAP_FETCH_TIMEOUT_MS,
   detachedParams,
+  embeddedParams,
   fetchBeatmapFile,
   isCachedPreviewUsable,
   queryActiveTab,

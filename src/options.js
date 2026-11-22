@@ -21,6 +21,7 @@ import {
 import { clearHistory } from './core/history.js';
 
 const popupSizeSelect = document.querySelector('#popupSize');
+const embeddedPlayerToggle = document.querySelector('#embeddedPlayer');
 const maniaScrollSpeedRange = document.querySelector('#maniaScrollSpeedRange');
 const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
 const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
@@ -542,6 +543,7 @@ const getFormSettings = () => ({
     disabledProviders,
     autoFallback: autoFallbackToggle?.checked ?? true,
     autoplay: autoplayToggle?.checked,
+    embeddedPlayer: embeddedPlayerToggle?.checked ?? false,
     hitsounds: hitsoundsToggle?.checked ?? false,
     hitsoundVolume: hitsoundVolumeRange ? Number(hitsoundVolumeRange.value) / 100 : undefined,
     hitsoundStyle: hitsoundStyleSelect?.value,
@@ -571,6 +573,9 @@ const applySettingsToForm = (settings) => {
   }
   if (popupSizeSelect) {
     popupSizeSelect.value = settings.popupSize;
+  }
+  if (embeddedPlayerToggle) {
+    embeddedPlayerToggle.checked = settings.embeddedPlayer;
   }
   renderManiaScrollSpeed(settings.maniaScrollSpeed);
   renderProviderPriority();
@@ -758,6 +763,10 @@ const initialize = async () => {
   });
 
   popupSizeSelect.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  embeddedPlayerToggle?.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

@@ -100,8 +100,10 @@ const bindPopupUiEvents = ({
     shortcutsCloseButton,
     recentClearBtn,
     recentPanel,
+    embedButton,
     detachButton,
     followButton,
+    miniPlayButton,
     timelineTooltip,
   } = elements;
 
@@ -134,8 +136,10 @@ const bindPopupUiEvents = ({
     toggleMute,
     setShortcutsMenuOpen,
     clearHistory,
+    openEmbeddedPlayer,
     openDetachedWindow,
     toggleFollowEnabled,
+    closePreview = () => window.close(),
     toggleCachedMapsetsPanel,
     closeCachedMapsetsPanel,
   } = actions;
@@ -389,12 +393,20 @@ const bindPopupUiEvents = ({
     void clearHistory();
   });
 
+  embedButton?.addEventListener('click', () => {
+    void openEmbeddedPlayer?.();
+  });
+
   detachButton?.addEventListener('click', () => {
     void openDetachedWindow?.();
   });
 
   followButton?.addEventListener('click', () => {
     toggleFollowEnabled?.();
+  });
+
+  miniPlayButton?.addEventListener('click', async () => {
+    await togglePlayback();
   });
 
   infoCachedButton?.addEventListener('click', () => {
@@ -557,7 +569,7 @@ const bindPopupUiEvents = ({
       timelineControls.resetZoom();
       return;
     }
-    window.close();
+    closePreview();
   });
 };
 

@@ -49,6 +49,8 @@ const createDetachController = ({
   addDebugLog,
   showPopupToast,
   loadPreview,
+  onContextChanged = null,
+  onAfterOpen = null,
 }) => {
   const setDetachContext = ({ beatmapId, setId, mode } = {}) => {
     state.detachContext = {
@@ -60,6 +62,7 @@ const createDetachController = ({
     if (detachButton) {
       detachButton.disabled = !state.detachContext.beatmapId;
     }
+    onContextChanged?.(state.detachContext);
   };
 
   const readStoredDetachedWindowId = async () => {
@@ -215,7 +218,11 @@ const createDetachController = ({
       if (!hasWindowsApi()) {
         try {
           await createTab({ url: pageUrl });
-          window.close();
+          if (typeof onAfterOpen === 'function') {
+            onAfterOpen();
+          } else {
+            window.close();
+          }
         } catch (error) {
           addDebugLog(`detach: tab fallback failed (${error?.message || error})`);
           showPopupToast('Could not open a separate view', { tone: 'error' });
@@ -224,7 +231,11 @@ const createDetachController = ({
       }
 
       if (await focusExistingDetachedWindow()) {
-        window.close();
+        if (typeof onAfterOpen === 'function') {
+          onAfterOpen();
+        } else {
+          window.close();
+        }
         return;
       }
 
@@ -246,7 +257,11 @@ const createDetachController = ({
         void storageSet('local', { [DETACHED_WINDOW_BOUNDS_KEY]: size }).catch(() => {});
       }
       await writeStoredDetachedWindowId(createdWindow?.id ?? null);
-      window.close();
+      if (typeof onAfterOpen === 'function') {
+        onAfterOpen();
+      } else {
+        window.close();
+      }
     } catch (error) {
       addDebugLog(`detach: failed (${error?.message || error})`);
       showPopupToast('Could not open a separate window', { tone: 'error' });

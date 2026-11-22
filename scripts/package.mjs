@@ -41,6 +41,17 @@ const targets = {
       const next = structuredClone(manifest);
       delete next.minimum_chrome_version;
       delete next.background.service_worker;
+      // Firefox does not support Chrome's `use_dynamic_url` key in
+      // `web_accessible_resources` (it randomises extension UUIDs per install).
+      if (Array.isArray(next.web_accessible_resources)) {
+        next.web_accessible_resources = next.web_accessible_resources.map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return entry;
+          }
+          const { use_dynamic_url: _omitted, ...rest } = entry;
+          return rest;
+        });
+      }
       return next;
     },
   },
@@ -519,6 +530,31 @@ function validateManifest(target, manifest, filesByName, errors, expectedVersion
 
   for (const [index, scriptPath] of (manifest.background?.scripts ?? []).entries()) {
     addPackageReference(filesByName, errors, `manifest.background.scripts[${index}]`, scriptPath);
+  }
+
+  for (const [entryIndex, entry] of (manifest.content_scripts ?? []).entries()) {
+    for (const [jsIndex, scriptPath] of (entry?.js ?? []).entries()) {
+      addPackageReference(filesByName, errors, `manifest.content_scripts[${entryIndex}].js[${jsIndex}]`, scriptPath);
+    }
+    for (const [cssIndex, cssPath] of (entry?.css ?? []).entries()) {
+      addPackageReference(filesByName, errors, `manifest.content_scripts[${entryIndex}].css[${cssIndex}]`, cssPath);
+    }
+  }
+
+  for (const [entryIndex, entry] of (manifest.web_accessible_resources ?? []).entries()) {
+    if (target === "firefox" && Object.hasOwn(entry ?? {}, "use_dynamic_url")) {
+      errors.push(`Firefox package must not include web_accessible_resources[${entryIndex}].use_dynamic_url.`);
+    }
+    for (const matchPattern of entry?.matches ?? []) {
+      if (matchPattern === "<all_urls>" || matchPattern === "*://*/*") {
+        errors.push(`web_accessible_resources[${entryIndex}] must not use wildcard match pattern: ${matchPattern}`);
+      }
+    }
+    for (const resource of entry?.resources ?? []) {
+      if (typeof resource === "string" && !resource.includes("*")) {
+        addPackageReference(filesByName, errors, `manifest.web_accessible_resources[${entryIndex}].resources`, resource);
+      }
+    }
   }
 }
 

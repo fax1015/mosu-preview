@@ -35,6 +35,7 @@ import { toFollowTarget } from './core/tabFollow.js';
 import {
   BEATMAP_FETCH_TIMEOUT_MS,
   detachedParams,
+  embeddedParams,
   fetchBeatmapFile,
   queryActiveTab,
   requestBeatmapForLoad,
@@ -74,6 +75,7 @@ import { createAudioBadgeController } from './ui/audioBadge.js';
 import { INSTRUCTION_MESSAGE_MS, createIsland } from './ui/island.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
+import { createEmbeddedController } from './ui/embeddedController.js';
 import { bindPopupUiEvents, bindPopover } from './ui/popupUI.js';
 import { createShortcutsPanel } from './ui/shortcutsPanel.js';
 import { toStoredKeybindings } from './core/keybindings.js';
@@ -90,16 +92,18 @@ import {
 } from './core/beatmapsetPage.js';
 import { MAX_PLAYBACK_SPEED, MIN_PLAYBACK_SPEED, normalizePlaybackSpeed } from './core/playbackSpeed.js';
 
-// Resolved and applied before anything else renders: the detached flag decides
-// whether the document is sized as a toolbar popup or as a window, and a late
-// class flip would repaint the shell at the wrong width.
+// Resolved and applied before anything else renders: the detached/embedded
+// flags decide whether the document is sized as a toolbar popup or fills a
+// host viewport, and a late class flip would repaint the shell at the wrong width.
 const IS_DETACHED_WINDOW = detachedParams.isDetached;
+const IS_EMBEDDED_PLAYER = !IS_DETACHED_WINDOW && embeddedParams.isEmbedded;
+const HANDOFF_PARAMS = IS_DETACHED_WINDOW ? detachedParams : (IS_EMBEDDED_PLAYER ? embeddedParams : null);
 
-// Applies to the map the window opened with, and only that one. Following on to
-// a different map afterwards should start at that map's own preview point, not
-// at a timestamp inherited from the map before it.
-let pendingResume = IS_DETACHED_WINDOW && detachedParams.resumeTimeMs >= 0
-  ? { timeMs: detachedParams.resumeTimeMs, paused: detachedParams.resumePaused }
+// Applies to the map the window/miniplayer opened with, and only that one.
+// Following on to a different map afterwards should start at that map's own
+// preview point, not at a timestamp inherited from the map before it.
+let pendingResume = HANDOFF_PARAMS && HANDOFF_PARAMS.resumeTimeMs >= 0
+  ? { timeMs: HANDOFF_PARAMS.resumeTimeMs, paused: HANDOFF_PARAMS.resumePaused }
   : null;
 
 const takePendingResume = () => {
@@ -110,6 +114,13 @@ const takePendingResume = () => {
 
 if (IS_DETACHED_WINDOW) {
   document.documentElement.classList.add('is-detached-window');
+}
+if (IS_EMBEDDED_PLAYER) {
+  document.documentElement.classList.add('is-embedded-player');
+  if (embeddedParams.collapsed) {
+    state.embeddedCollapsed = true;
+    document.documentElement.classList.add('is-embedded-collapsed');
+  }
 }
 
 const IS_FIREFOX = /firefox|fxios/i.test(globalThis.navigator?.userAgent || '');
@@ -195,8 +206,10 @@ const debugLog = document.querySelector('#mapPreviewDebugLog');
 const debugRunButton = document.querySelector('#mapPreviewDebugRunBtn');
 const debugClearButton = document.querySelector('#mapPreviewDebugClearBtn');
 const debugCloseButton = document.querySelector('#mapPreviewDebugCloseBtn');
+const embedButton = document.querySelector('#mapPreviewEmbedBtn');
 const detachButton = document.querySelector('#mapPreviewDetachBtn');
 const followButton = document.querySelector('#mapPreviewFollowBtn');
+const miniPlayButton = document.querySelector('#mapPreviewMiniPlayBtn');
 const infoButtons = [...document.querySelectorAll('.js-map-preview-info-btn')];
 const infoButton = infoButtons[0] || null;
 const infoModal = document.querySelector('#mapPreviewInfoModal');
@@ -259,6 +272,7 @@ const setModalShellVisible = (modalShell, isVisible) => {
   }
 
   if (isVisible) {
+    requestExpandEmbedded?.();
     modalShell.hidden = false;
     modalShell.classList.remove('is-closing');
     modalShell.classList.add('is-visible');
@@ -787,6 +801,8 @@ const toggleCachedMapsetsPanel = async () => {
   // rather than letting the menu entry look broken.
   if (recentPanel.hidden) {
     showPopupToast('No cached mapsets yet');
+  } else {
+    requestExpandEmbedded?.();
   }
 };
 
@@ -818,11 +834,10 @@ const openExtensionOptions = async () => {
 };
 
 // Whether things on the page move: off for reduced motion, and in Firefox's
-// desktop toolbar popup, which has no transitions. Its detached window does,
-// and so does Firefox for Android, where the popup is a page of its own rather
-// than a panel hung off the toolbar.
+// desktop toolbar popup, which has no transitions. Its detached window,
+// embedded player, and Firefox for Android all animate normally.
 const allowsMotion = () => !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
-  && !(IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_MOBILE_VIEW);
+  && !(IS_FIREFOX && !IS_DETACHED_WINDOW && !IS_EMBEDDED_PLAYER && !IS_MOBILE_VIEW);
 
 const island = createIsland({
   element: islandElement,
@@ -861,6 +876,37 @@ const {
   showPopupToast,
   // Declared further down; resolved when a followed tab actually changes.
   loadPreview: (options) => initializePreviewForCurrentTab(options),
+  onContextChanged: () => updateEmbedButtonState(),
+  onAfterOpen: IS_EMBEDDED_PLAYER ? () => requestCloseEmbedded() : null,
+});
+
+const {
+  setEmbedContext,
+  updateEmbedButtonState,
+  openEmbeddedPlayer,
+  closeEmbeddedPlayersOnOsuTabs,
+  setEmbeddedFollowEnabled,
+  toggleEmbeddedFollowEnabled,
+  startEmbeddedBridge,
+  disposeEmbeddedBridge,
+  publishResumeSnapshot,
+  requestCloseEmbedded,
+  requestExpandEmbedded,
+} = createEmbeddedController({
+  state,
+  registry,
+  isEmbedded: IS_EMBEDDED_PLAYER,
+  elements: { embedButton, followButton },
+  addDebugLog,
+  showPopupToast,
+  loadPreview: (options) => initializePreviewForCurrentTab(options),
+  closeDetachedWindowIfOpen,
+  onCollapsedChange: (collapsed) => {
+    document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
+    if (!collapsed && !state.isPlaying && state.mapData) {
+      renderFrame();
+    }
+  },
 });
 
 const readProviderOverrideSetting = async () => {
@@ -1027,7 +1073,13 @@ const applyPreviewSettings = (settings = {}) => {
   state.hitsoundVolume = normalized.hitsoundVolume;
   state.hitsoundStyle = normalized.hitsoundStyle;
   state.autoplay = normalized.autoplay;
+  state.embeddedPlayer = normalized.embeddedPlayer;
   state.keybindings = normalized.keybindings;
+  document.documentElement.classList.toggle('is-embedded-enabled', normalized.embeddedPlayer);
+  updateEmbedButtonState();
+  if (IS_EMBEDDED_PLAYER && !normalized.embeddedPlayer) {
+    requestCloseEmbedded();
+  }
   shortcutsPanel?.setKeybindings(normalized.keybindings);
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
@@ -1151,10 +1203,27 @@ state.audio.play = (...args) => {
 // Every jump in the clock -- a scrub, a restart, an audio resync -- funnels
 // through here, so it is the one place the hitsound cursor has to catch up.
 // Without it a seek would replay every object between the old and new position.
+let lastMiniPlayState = null;
+const syncMiniPlayButton = () => {
+  if (!miniPlayButton) {
+    return;
+  }
+  const playing = Boolean(state.isPlaying);
+  if (playing === lastMiniPlayState) {
+    return;
+  }
+  lastMiniPlayState = playing;
+  miniPlayButton.classList.toggle('is-playing', playing);
+  miniPlayButton.setAttribute('aria-pressed', playing ? 'true' : 'false');
+  miniPlayButton.title = playing ? 'Pause (Space)' : 'Play (Space)';
+  miniPlayButton.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+};
+
 const syncVisualClockToMapTime = (mapTimeMs, nowPerfMs) => {
   syncVisualClockToMapTimeRaw(mapTimeMs, nowPerfMs);
   hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
   mediaSessionController?.sync();
+  syncMiniPlayButton();
 };
 
 const applyPlaybackSpeed = (nextSpeed) => {
@@ -1220,6 +1289,7 @@ const afterNextPaint = () => new Promise((resolve) => {
 });
 
 const renderFrame = () => {
+  syncMiniPlayButton();
   // Cheap when nothing changed: it only re-sends a position that has drifted.
   mediaSessionController?.sync();
   // Only while playing: a paused scrub should show the map, not sound it.
@@ -1933,10 +2003,14 @@ const setPreviewLoading = (isLoading) => {
   popup.setAttribute('aria-busy', isLoading ? 'true' : 'false');
 };
 
-const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) => {
+const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOverride = null } = {}) => {
   previewLoadToken += 1;
   const loadToken = previewLoadToken;
   const isStaleLoad = () => loadToken !== previewLoadToken;
+
+  if (resumeOverride && Number.isFinite(resumeOverride.timeMs) && resumeOverride.timeMs >= 0) {
+    pendingResume = { timeMs: resumeOverride.timeMs, paused: Boolean(resumeOverride.paused) };
+  }
 
   setPreviewLoading(true);
 
@@ -1998,12 +2072,23 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
     if (IS_DETACHED_WINDOW && !sourceUrlOverride) {
       setStatus('Loading detached preview...');
       addDebugLog(`init: detached window for beatmap ${detachedParams.beatmapId}`);
+    } else if (IS_EMBEDDED_PLAYER && !sourceUrlOverride) {
+      setStatus('Loading embedded preview...');
+      addDebugLog(`init: embedded player for beatmap ${embeddedParams.beatmapId}`);
     }
 
     // Which map this is, with its file already on the way.
-    const { info, content: mapContentRequest } = await mapRequest;
+    const { info, content: mapContentRequest, activeTab } = await mapRequest;
     if (isStaleLoad()) {
       return;
+    }
+
+    if (!IS_DETACHED_WINDOW && !IS_EMBEDDED_PLAYER) {
+      if (activeTab) {
+        setEmbedContext({ tabId: activeTab.id ?? null, tabUrl: activeTab.url || '' });
+      } else if (sourceUrlOverride) {
+        setEmbedContext({ tabId: state.embedContext?.tabId ?? null, tabUrl: sourceUrlOverride });
+      }
     }
 
     if (!info.valid) {
@@ -2250,6 +2335,8 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '' } = {}) =
       return;
     }
 
+    publishResumeSnapshot();
+
     if (resolvedSetId && metadata.audio) {
       void upgradeToFullAudioIfPossible(resolvedSetId, metadata.audio);
     } else {
@@ -2463,8 +2550,10 @@ bindPopupUiEvents({
     recentClearBtn,
     recentPanel,
     popupToast,
+    embedButton,
     detachButton,
     followButton,
+    miniPlayButton,
     timelineTooltip,
   },
   state,
@@ -2500,8 +2589,10 @@ bindPopupUiEvents({
     restartPreview,
     toggleMute,
     setShortcutsMenuOpen,
+    openEmbeddedPlayer,
     openDetachedWindow,
-    toggleFollowEnabled,
+    toggleFollowEnabled: IS_EMBEDDED_PLAYER ? toggleEmbeddedFollowEnabled : toggleFollowEnabled,
+    closePreview: IS_EMBEDDED_PLAYER ? () => requestCloseEmbedded() : () => window.close(),
     toggleCachedMapsetsPanel,
     closeCachedMapsetsPanel,
     clearHistory: async () => {
@@ -2535,6 +2626,8 @@ document.addEventListener('pointerdown', (event) => {
 // fire, and blocks the back/forward cache. CleanupRegistry listens on the same
 // event, so both teardown paths now agree.
 window.addEventListener('pagehide', () => {
+  // Capture live playback position and playing intent before teardown zeroes them.
+  disposeEmbeddedBridge();
   state.fullAudioJobId += 1;
   setFullAudioLoading(false);
   state.volumePersistTimer = registry.clearTimeout(state.volumePersistTimer);
@@ -2574,9 +2667,11 @@ addRuntimeMessageListener((message) => {
 
 // The renderer resizes its backing store from the CSS box every frame, but a
 // paused preview has no frame loop, so a resize needs an explicit repaint.
-if (IS_DETACHED_WINDOW) {
+if (IS_DETACHED_WINDOW || IS_EMBEDDED_PLAYER) {
   window.addEventListener('resize', () => {
-    persistDetachedBounds();
+    if (IS_DETACHED_WINDOW) {
+      persistDetachedBounds();
+    }
     if (!state.isPlaying) {
       renderFrame();
     }
@@ -2587,26 +2682,32 @@ if (IS_DETACHED_WINDOW) {
 // timer, and back on frames once it is shown again.
 document.addEventListener('visibilitychange', refreshPlaybackLoop);
 
-// Fired before the preview loads so the detached window is gone before this one
-// starts playing, rather than both running for a moment.
-if (!IS_DETACHED_WINDOW) {
+// Fired before the preview loads so any other live preview surface is closed
+// before this one starts playing, rather than two previews playing over each other.
+if (!IS_DETACHED_WINDOW && !IS_EMBEDDED_PLAYER) {
   void closeDetachedWindowIfOpen();
+  void closeEmbeddedPlayersOnOsuTabs();
+} else if (IS_DETACHED_WINDOW) {
+  void closeEmbeddedPlayersOnOsuTabs();
 }
 
 setDetachContext({});
 // Matches the markup's default so the toggle is in step from the first paint,
 // even though the listeners only attach after the initial load.
-setFollowEnabled(IS_DETACHED_WINDOW);
+if (IS_EMBEDDED_PLAYER) {
+  setEmbeddedFollowEnabled(embeddedParams.followEnabled);
+} else {
+  setFollowEnabled(IS_DETACHED_WINDOW);
+}
 applyAudioVolume(DEFAULT_AUDIO_VOLUME);
 applyPlaybackSpeed(1);
 syncTimeLabelWidth();
 applyPreviewSettings(normalizePreviewSettings());
 renderDebugPanel();
 renderInfoMenu();
-// Following starts only once the detached window has loaded the map it was
-// opened with. Attaching the listeners earlier lets the new window's own focus
-// event fire a sync against a target that is not set yet, which reloads the same
-// map a second time on every open.
+// Following starts only once the detached window or embedded player has loaded
+// the map it was opened with. Attaching the listeners earlier lets initial
+// focus or tab events trigger a duplicate reload of the same map.
 initializePreviewForCurrentTab().finally(() => {
   // Whatever happened, the popup must not stay invisible -- or under its
   // loading screen, if the load threw before it could clear that itself.
@@ -2614,6 +2715,8 @@ initializePreviewForCurrentTab().finally(() => {
   revealPopup();
   if (IS_DETACHED_WINDOW) {
     startFollowingBrowsingTabs();
+  } else if (IS_EMBEDDED_PLAYER) {
+    startEmbeddedBridge({ initialFollowEnabled: embeddedParams.followEnabled });
   }
 });
 

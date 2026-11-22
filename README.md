@@ -31,6 +31,17 @@ if no osu! beatmap page is open, the window keeps showing the last map rather th
 
 the detached window cannot read the active tab, so the popup passes the beatmap and set ids in the page URL, and following reads tab URLs through the existing `https://osu.ppy.sh/*` host permission. no extra permission is needed. a phone has no separate windows to open a preview in, so the detach button is left out there.
 
+## pinned in-page miniplayer
+
+an experimental option (off by default, under **Settings → in-page miniplayer**) adds a pin-to-page button to the popup header on `osu.ppy.sh`. clicking it mounts the preview directly onto the osu! tab as a floating, draggable, resizable miniplayer. it attaches to `<html>` outside `<body>` so osu!'s Hotwire Turbo page switches leave the player running without resetting audio or canvas state, just like a persistent site miniplayer.
+
+- drag the slim top bar to place it anywhere, drag any edge or corner to resize it, or click the chevron (or double-click the bar) to collapse it into a compact audio and timeline bar with its own play/pause button. position, size and collapsed state are remembered.
+- by default it follows along as you switch beatmaps or difficulties on that osu! tab, and stays put on the current map when you visit profiles, rankings or forums; the eye button pins it to the current map.
+- opening the toolbar popup or a detached window closes any open in-page player so two previews never play over each other, and the in-page player's detach button pops it straight out into a separate window.
+- if the tab undergoes a hard reload (`F5`), the player restores itself from a short-lived per-tab session snapshot close to where it left off.
+
+the content script only runs on `https://osu.ppy.sh/*` and stays idle with nothing mounted until you pin a preview.
+
 ## preview
 
 hitsounds are available as an experimental option, off by default. every node of a slider sounds, not just its head: the tail and each reverse use their own `edgeSounds` entry from the beatmap, and spinners sound when they finish. the sounds themselves are generated in the browser rather than read from the beatmap's own samples, so custom hitsounds are not reproduced; volume is adjustable in settings, and so is the style: argon (the default), lazer or minimal, modelled on the argon skin, osu!lazer's default hitsounds and the Wintherest skin. none of those skins' samples are shipped; each style is re-made from synthesised layers.
@@ -148,7 +159,7 @@ host permissions are scoped to the services the extension actually fetches from:
 
 mapset cover thumbnails and media-session artwork are also loaded as images from `https://assets.ppy.sh` (allowed via `img-src`, no host permission needed).
 
-the extension does not inject content scripts into arbitrary pages. it runs in the popup, options page, and background service worker / event page (`src/background.js`), making network requests only to the hosts above.
+the extension does not inject content scripts into arbitrary pages. a thin content script (`src/content.js`) is scoped strictly to `https://osu.ppy.sh/*` to host the optional in-page miniplayer on demand; everything else runs in the popup, options page, and background service worker / event page (`src/background.js`), making network requests only to the hosts above.
 
 ## supported url formats
 

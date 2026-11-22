@@ -128,6 +128,48 @@ export const updateTab = async (tabId, updateProperties) => {
   });
 };
 
+export const getCurrentTab = async () => {
+  if (!extensionApi?.tabs?.getCurrent) {
+    return null;
+  }
+
+  if (usesPromiseApi) {
+    return (await extensionApi.tabs.getCurrent()) || null;
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.tabs.getCurrent((tab) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to read current tab.'));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+};
+
+export const sendTabMessage = async (tabId, message) => {
+  if (!extensionApi?.tabs?.sendMessage) {
+    throw new Error('Tab messaging API is unavailable.');
+  }
+
+  if (usesPromiseApi) {
+    return extensionApi.tabs.sendMessage(tabId, message);
+  }
+
+  return new Promise((resolve, reject) => {
+    extensionApi.tabs.sendMessage(tabId, message, (response) => {
+      const error = chromeApi?.runtime?.lastError;
+      if (error) {
+        reject(toError(error, 'Failed to message tab.'));
+        return;
+      }
+      resolve(response);
+    });
+  });
+};
+
 export const hasWindowsApi = () => Boolean(extensionApi?.windows?.create);
 
 export const getExtensionUrl = (path) => (

@@ -84,6 +84,9 @@ const createInitialState = ({ audio = null } = {}) => {
     // Ids the detach button hands to the separate window, since that window
     // cannot read them back off the active tab.
     detachContext: { beatmapId: '', setId: '', mode: null },
+    // Active osu.ppy.sh tab targeted by the "Pin to osu! page" button.
+    embedContext: { tabId: null, tabUrl: '' },
+    embeddedCollapsed: false,
     detachedBoundsTimer: null,
     // Detached-window tab following.
     followEnabled: false,
@@ -103,6 +106,7 @@ const createInitialState = ({ audio = null } = {}) => {
     disabledProviders: normalizedSettings.disabledProviders,
     autoFallback: normalizedSettings.autoFallback,
     autoplay: normalizedSettings.autoplay,
+    embeddedPlayer: normalizedSettings.embeddedPlayer,
     keybindings: normalizedSettings.keybindings,
     // Which action the shortcuts panel is waiting for a key for, or null.
     capturingShortcutAction: null,

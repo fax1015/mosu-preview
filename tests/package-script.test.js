@@ -9,6 +9,7 @@ import {
   normalizeLocalReference,
   resolveBuildDate,
   stripJsComments,
+  targets,
   validateJsImports,
 } from '../scripts/package.mjs';
 
@@ -92,4 +93,18 @@ test('stripJsComments ignores commented-out imports and validateJsImports catche
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('target manifest transforms preserve Chrome use_dynamic_url and strip it for Firefox', async () => {
+  const manifest = JSON.parse(await fs.readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
+
+  const chromeManifest = targets.chrome.manifest(manifest);
+  assert.equal(chromeManifest.web_accessible_resources?.[0]?.use_dynamic_url, true);
+  assert.deepEqual(chromeManifest.web_accessible_resources?.[0]?.matches, ['https://osu.ppy.sh/*']);
+  assert.deepEqual(chromeManifest.content_scripts?.[0]?.js, ['src/content.js']);
+
+  const firefoxManifest = targets.firefox.manifest(manifest);
+  assert.equal(Object.hasOwn(firefoxManifest.web_accessible_resources?.[0] || {}, 'use_dynamic_url'), false);
+  assert.deepEqual(firefoxManifest.web_accessible_resources?.[0]?.matches, ['https://osu.ppy.sh/*']);
+  assert.deepEqual(firefoxManifest.content_scripts?.[0]?.js, ['src/content.js']);
 });

@@ -58,6 +58,14 @@
             </div>
           </div>
         </div>
+        <button type="button" class="map-preview-info-btn map-preview-embed-btn" id="mapPreviewEmbedBtn"
+          title="Pin preview to this osu! page" aria-label="Pin preview to this osu! page" disabled>
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"
+            aria-hidden="true">
+            <rect x="1.5" y="2.25" width="13" height="11.5" rx="2" />
+            <rect x="7.5" y="7.25" width="5" height="4.5" rx="0.9" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
         <button type="button" class="map-preview-info-btn map-preview-detach-btn" id="mapPreviewDetachBtn"
           title="Open in a separate window" aria-label="Open in a separate window" disabled>
           <svg viewBox="0 0 512 512" width="12" height="12" fill="currentColor" aria-hidden="true">
@@ -117,6 +125,15 @@
       </div>
     </div>
     <div class="map-preview-controls">
+      <button type="button" class="map-preview-mini-play-btn" id="mapPreviewMiniPlayBtn"
+        aria-pressed="false" title="Play (Space)" aria-label="Play">
+        <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--play" viewBox="0 0 384 512" aria-hidden="true">
+          <path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80L0 432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z" />
+        </svg>
+        <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--pause" viewBox="0 0 320 512" aria-hidden="true">
+          <path d="M48 64C21.5 64 0 85.5 0 112L0 400c0 26.5 21.5 48 48 48l32 0c26.5 0 48-21.5 48-48l0-288c0-26.5-21.5-48-48-48L48 64zm192 0c-26.5 0-48 21.5-48 48l0 288c0 26.5 21.5 48 48 48l32 0c26.5 0 48-21.5 48-48l0-288c0-26.5-21.5-48-48-48l-32 0z" />
+        </svg>
+      </button>
       <div class="map-preview-volume-control" id="mapPreviewVolumeControl">
         <button type="button" class="secondary-button map-preview-volume-btn" id="mapPreviewVolumeBtn"
           aria-haspopup="true" aria-expanded="false" aria-controls="mapPreviewVolumePopover"

@@ -22,6 +22,10 @@ test('webextension promise API (Firefox) handles storageGet empty fallback and g
     commands: {
       getAll: async () => { throw new Error('commands unsupported'); },
     },
+    tabs: {
+      getCurrent: async () => ({ id: 7, url: 'https://osu.ppy.sh/beatmaps/123' }),
+      sendMessage: async (tabId, message) => ({ tabId, echoed: message.type }),
+    },
   };
   try {
     const ext = await importFreshWebExtension('promise');
@@ -29,6 +33,8 @@ test('webextension promise API (Firefox) handles storageGet empty fallback and g
     assert.equal(await ext.getCommandShortcut('_execute_action'), null);
     assert.equal(ext.getExtensionUrl('popup.html'), 'moz-extension://id/popup.html');
     assert.equal('addTabsRemovedListener' in ext, false, 'dead export removed');
+    assert.deepEqual(await ext.getCurrentTab(), { id: 7, url: 'https://osu.ppy.sh/beatmaps/123' });
+    assert.deepEqual(await ext.sendTabMessage(7, { type: 'ping' }), { tabId: 7, echoed: 'ping' });
 
     const fn = () => {};
     ext.addRuntimeMessageListener(fn);
@@ -59,14 +65,21 @@ test('webextension callback API (Chrome) surfaces runtime.lastError and resolves
     commands: {
       getAll: (cb) => cb([{ name: '_execute_action', shortcut: 'Alt+P' }]),
     },
+    tabs: {
+      getCurrent: (cb) => cb({ id: 9, url: 'https://osu.ppy.sh/home' }),
+      sendMessage: (tabId, message, cb) => cb({ tabId, type: message.type }),
+    },
   };
   try {
     const ext = await importFreshWebExtension('callback');
     assert.deepEqual(await ext.storageGet('local', ['key']), { key: 'val' });
     assert.equal(await ext.getCommandShortcut('_execute_action'), 'Alt+P');
+    assert.deepEqual(await ext.getCurrentTab(), { id: 9, url: 'https://osu.ppy.sh/home' });
+    assert.deepEqual(await ext.sendTabMessage(9, { type: 'open' }), { tabId: 9, type: 'open' });
 
     lastError = { message: 'quota error' };
     await assert.rejects(ext.storageSet('local', { key: 'x' }), /quota error/);
+    await assert.rejects(ext.sendTabMessage(9, { type: 'open' }), /quota error/);
     assert.equal(await ext.getCommandShortcut('_execute_action'), null);
   } finally {
     if (prevBrowser === undefined) delete globalThis.browser;

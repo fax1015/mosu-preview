@@ -50,6 +50,31 @@
     ],
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://osu.ppy.sh/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup.html",
+        "popup.css",
+        "src/*",
+        "assets/fonts/*"
+      ],
+      "matches": [
+        "https://osu.ppy.sh/*"
+      ],
+      "use_dynamic_url": true
+    }
+  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": true

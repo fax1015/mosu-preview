@@ -16,10 +16,13 @@ import {
   hasPreviewSettingChange,
   AUTOPLAY_KEY,
   DEFAULT_AUTOPLAY,
+  EMBEDDED_PLAYER_KEY,
+  DEFAULT_EMBEDDED_PLAYER,
   KEYBINDINGS_KEY,
   normalizeAutoFallback,
   normalizeAutoplay,
   normalizeDisabledProviders,
+  normalizeEmbeddedPlayer,
   normalizeHitsoundStyle,
   normalizeManiaKeyCount,
   normalizePreviewSettings,
@@ -301,4 +304,33 @@ test('saving the options form leaves a remapped shortcut alone', () => {
   const after = normalizePreviewSettings({ ...stored, ...formSave });
   assert.deepEqual(after.keybindings.mute, ['x']);
   assert.equal(after.hitsounds, true);
+});
+
+test('in-page miniplayer is off by default, experimental in options, and syncs through storage', () => {
+  assert.equal(DEFAULT_EMBEDDED_PLAYER, false);
+  assert.equal(normalizePreviewSettings().embeddedPlayer, false);
+  assert.ok(PREVIEW_SETTING_KEYS.includes(EMBEDDED_PLAYER_KEY));
+
+  assert.equal(normalizeEmbeddedPlayer(true), true);
+  assert.equal(normalizeEmbeddedPlayer('true'), true);
+  assert.equal(normalizeEmbeddedPlayer(1), true);
+  assert.equal(normalizeEmbeddedPlayer('false'), false);
+  assert.equal(normalizeEmbeddedPlayer(undefined), false);
+
+  const stored = toPreviewSettingsStorage({ embeddedPlayer: true });
+  assert.equal(stored[EMBEDDED_PLAYER_KEY], true);
+  assert.equal(normalizePreviewSettings(stored).embeddedPlayer, true);
+
+  const changed = applyPreviewSettingChanges(
+    normalizePreviewSettings(),
+    { [EMBEDDED_PLAYER_KEY]: { oldValue: false, newValue: true } },
+  );
+  assert.equal(changed.embeddedPlayer, true);
+
+  const cleared = applyPreviewSettingChanges(changed, { [EMBEDDED_PLAYER_KEY]: { oldValue: true } });
+  assert.equal(cleared.embeddedPlayer, false);
+
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  assert.match(html, /id="embeddedPlayer"/);
+  assert.match(html, /in-page miniplayer\s*<span class="settings-experimental-tag">experimental<\/span>/i);
 });

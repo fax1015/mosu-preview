@@ -33,53 +33,6 @@
       </div>
 
       <div class="settings-group">
-        <h2 class="settings-section-title">in-page miniplayer <span class="settings-experimental-tag">experimental</span></h2>
-        <label for="embeddedPlayer" class="settings-toggle-card">
-          <input id="embeddedPlayer" type="checkbox" />
-          <span class="settings-toggle-mark" aria-hidden="true"></span>
-          <span class="settings-toggle-copy">
-            <span class="settings-toggle-title">Pin preview to osu! page</span>
-            <span class="settings-toggle-description">Adds a header button to dock a floating miniplayer onto osu.ppy.sh across page switches.</span>
-          </span>
-        </label>
-        <p class="settings-help">
-          Stays open while browsing osu! pages and can collapse into a compact bar.
-        </p>
-      </div>
-
-      <div class="settings-group">
-        <h2 class="settings-section-title">hitsounds <span class="settings-experimental-tag">experimental</span></h2>
-        <label for="hitsounds" class="settings-toggle-card">
-          <input id="hitsounds" type="checkbox" />
-          <span class="settings-toggle-mark" aria-hidden="true"></span>
-          <span class="settings-toggle-copy">
-            <span class="settings-toggle-title">Play hitsounds</span>
-            <span class="settings-toggle-description">Synthesised claps, whistles and finishes.</span>
-          </span>
-        </label>
-        <label for="hitsoundStyle" class="settings-label">Hitsound style</label>
-        <div class="settings-select-wrap">
-          <select id="hitsoundStyle" class="settings-select">
-            <option value="argon">Argon (default)</option>
-            <option value="lazer">Lazer</option>
-            <option value="minimal">Minimal</option>
-          </select>
-        </div>
-        <div class="settings-slider-card settings-slider-card--single">
-          <label for="hitsoundVolume" class="settings-slider-copy">
-            <span class="settings-slider-title">Hitsound volume</span>
-            <span class="settings-slider-value"><span id="hitsoundVolumeValue">50%</span></span>
-          </label>
-          <div class="settings-slider-controls">
-            <input id="hitsoundVolume" class="settings-range" type="range" min="0" max="100" step="5" value="50" />
-          </div>
-        </div>
-        <p class="settings-help">
-          Hitsounds are generated in browser so custom hitsounds are not supported. Disable if performance is bad (It's somewhat resource intensive)
-        </p>
-      </div>
-
-      <div class="settings-group">
         <h2 class="settings-section-title">standard preview</h2>
         <label for="standardSnakingSliders" class="settings-toggle-card">
           <input id="standardSnakingSliders" type="checkbox" />
@@ -187,6 +140,53 @@
         <div id="providerPriorityList" class="settings-priority-list" role="list" aria-labelledby="providerPriorityLabel">
           <!-- Priority items with toggles injected here -->
         </div>
+      </div>
+
+      <div class="settings-group settings-group--experimental">
+        <h2 class="settings-section-title">experimental</h2>
+
+        <h3 class="settings-subsection-title">in-page miniplayer</h3>
+        <label for="embeddedPlayer" class="settings-toggle-card">
+          <input id="embeddedPlayer" type="checkbox" />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Open in miniplayer</span>
+            <span class="settings-toggle-description">Adds a header button to dock a floating miniplayer onto osu.ppy.sh across page switches.</span>
+          </span>
+        </label>
+        <p class="settings-help">
+          Stays open while browsing osu! pages and can collapse into a compact audio player.
+        </p>
+
+        <h3 class="settings-subsection-title settings-subsection-title--divided">hitsounds</h3>
+        <label for="hitsounds" class="settings-toggle-card">
+          <input id="hitsounds" type="checkbox" />
+          <span class="settings-toggle-mark" aria-hidden="true"></span>
+          <span class="settings-toggle-copy">
+            <span class="settings-toggle-title">Play hitsounds</span>
+            <span class="settings-toggle-description">Synthesised claps, whistles and finishes.</span>
+          </span>
+        </label>
+        <label for="hitsoundStyle" class="settings-label">Hitsound style</label>
+        <div class="settings-select-wrap">
+          <select id="hitsoundStyle" class="settings-select">
+            <option value="argon">Argon (default)</option>
+            <option value="lazer">Lazer</option>
+            <option value="minimal">Minimal</option>
+          </select>
+        </div>
+        <div class="settings-slider-card settings-slider-card--single">
+          <label for="hitsoundVolume" class="settings-slider-copy">
+            <span class="settings-slider-title">Hitsound volume</span>
+            <span class="settings-slider-value"><span id="hitsoundVolumeValue">50%</span></span>
+          </label>
+          <div class="settings-slider-controls">
+            <input id="hitsoundVolume" class="settings-range" type="range" min="0" max="100" step="5" value="50" />
+          </div>
+        </div>
+        <p class="settings-help">
+          Hitsounds are generated in browser so custom hitsounds are not supported. Disable if performance is bad (It's somewhat resource intensive)
+        </p>
       </div>
 
       <div class="settings-group">

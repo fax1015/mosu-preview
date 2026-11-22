@@ -1007,6 +1007,29 @@ body {
   }
 }
 
+.settings-group--experimental {
+  border-top-color: rgba(239, 196, 95, 0.24);
+}
+
+.settings-group--experimental > .settings-section-title {
+  color: rgba(239, 196, 95, 0.9);
+}
+
+.settings-subsection-title {
+  margin: 0.15rem 0 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.settings-subsection-title--divided {
+  margin-top: 0.45rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .settings-experimental-tag {
   margin-left: 0.45rem;
   padding: 0.12rem 0.4rem;

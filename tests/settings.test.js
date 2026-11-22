@@ -332,5 +332,13 @@ test('in-page miniplayer is off by default, experimental in options, and syncs t
 
   const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
   assert.match(html, /id="embeddedPlayer"/);
-  assert.match(html, /in-page miniplayer\s*<span class="settings-experimental-tag">experimental<\/span>/i);
+  const audioIdx = html.indexOf('>audio<');
+  const expIdx = html.indexOf('>experimental<');
+  const embeddedIdx = html.indexOf('id="embeddedPlayer"');
+  const hitsoundsIdx = html.indexOf('id="hitsounds"');
+  const cacheIdx = html.indexOf('>cache<');
+  const resetIdx = html.indexOf('>reset<');
+  assert.ok(audioIdx > 0 && expIdx > audioIdx, 'experimental section sits below audio');
+  assert.ok(embeddedIdx > expIdx && hitsoundsIdx > expIdx, 'experimental controls live inside the experimental section');
+  assert.ok(cacheIdx > hitsoundsIdx && resetIdx > cacheIdx, 'cache and reset stay below experimental');
 });

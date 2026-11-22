@@ -32,12 +32,34 @@
 
   const ASPECT_RATIO = 4 / 3;
   const CHROME_WIDTH = 26;
-  const OUTER_BAR_AND_BORDER_HEIGHT = 30; // 28px bar + 2px shell border
-  const DEFAULT_CHROME_HEIGHT = 132;
+  const OUTER_BAR_AND_BORDER_HEIGHT = 34; // 32px bar + 2px shell border
+  const DEFAULT_CHROME_HEIGHT = 136;
   const MIN_CHROME_HEIGHT = 80;
   const MAX_CHROME_HEIGHT = 240;
 
   let chromeHeight = DEFAULT_CHROME_HEIGHT;
+  let fontsLoaded = false;
+
+  const ensureTopBarFonts = () => {
+    if (fontsLoaded || typeof globalThis.FontFace !== 'function' || !document.fonts?.add) {
+      return;
+    }
+    fontsLoaded = true;
+    const faces = [
+      { file: 'assets/fonts/Torus-SemiBold.otf', weight: '600' },
+      { file: 'assets/fonts/Torus-Bold.otf', weight: '700' },
+    ];
+    for (const { file, weight } of faces) {
+      try {
+        const fontUrl = extensionApi.runtime.getURL(file);
+        const face = new globalThis.FontFace('MosuTorus', `url("${fontUrl}")`, { weight, style: 'normal' });
+        document.fonts.add(face);
+        void face.load().catch(() => {});
+      } catch {
+        // Fallback to site Torus / sans-serif if FontFace fails.
+      }
+    }
+  };
 
   const heightForWidth = (width, ch = chromeHeight) => (
     Math.round(ch + (Math.max(0, width - CHROME_WIDTH) / ASPECT_RATIO))
@@ -58,7 +80,7 @@
 
   const MIN_WIDTH = 340;
   const MAX_WIDTH = 1400;
-  const COLLAPSED_HEIGHT = 112;
+  const COLLAPSED_HEIGHT = 116;
   const VIEWPORT_MARGIN = 8;
 
   const MODE_URL_NAMES = Object.freeze(['osu', 'taiko', 'fruits', 'mania']);
@@ -435,12 +457,14 @@
       z-index: 2147483647;
       display: flex;
       flex-direction: column;
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.13);
-      background: rgb(24, 23, 28);
-      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(0, 0, 0, 0.35);
+      /* Matches Firefox's 24px extension popup window radius (see popup.css). */
+      border-radius: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      background: rgb(36, 34, 42);
+      box-shadow: 0 20px 52px rgba(0, 0, 0, 0.56), 0 0 0 1px rgba(0, 0, 0, 0.34);
       overflow: hidden;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: 'MosuTorus', 'Torus', sans-serif;
+      -webkit-font-smoothing: antialiased;
       color: #fff;
       user-select: none;
       touch-action: none;
@@ -449,15 +473,16 @@
       pointer-events: none;
     }
     .mosu-bar {
-      flex: 0 0 28px;
-      height: 28px;
+      position: relative;
+      flex: 0 0 32px;
+      height: 32px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      padding: 0 6px 0 10px;
-      background: linear-gradient(180deg, rgb(42, 40, 50) 0%, rgb(34, 32, 40) 100%);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 0 12px 0 15px;
+      background: rgba(24, 23, 28, 0.72);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
       cursor: grab;
     }
     .mosu-shell.is-dragging .mosu-bar {
@@ -470,53 +495,89 @@
       min-width: 0;
       pointer-events: none;
     }
-    .mosu-grip {
-      width: 10px;
-      height: 10px;
-      color: rgba(255, 255, 255, 0.38);
+    .mosu-brand-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: rgb(140, 102, 255);
+      box-shadow: 0 0 8px rgba(140, 102, 255, 0.55);
       flex: 0 0 auto;
     }
     .mosu-brand {
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      color: rgba(255, 255, 255, 0.72);
+      font-family: inherit;
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.015em;
+      line-height: 1;
+      color: rgba(255, 255, 255, 0.8);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .mosu-drag-pill {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 30px;
+      height: 3px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.16);
+      pointer-events: none;
+      transition: background 0.16s ease, width 0.16s cubic-bezier(0.32, 0.72, 0, 1);
+    }
+    .mosu-bar:hover .mosu-drag-pill {
+      background: rgba(255, 255, 255, 0.28);
+      width: 36px;
+    }
+    .mosu-shell.is-dragging .mosu-drag-pill {
+      background: rgba(140, 102, 255, 0.78);
+      width: 40px;
+    }
     .mosu-bar-actions {
+      position: relative;
+      z-index: 5;
       display: flex;
       align-items: center;
-      gap: 3px;
+      gap: 4px;
       flex: 0 0 auto;
     }
     .mosu-btn {
       appearance: none;
-      border: none;
+      border: 1px solid transparent;
       background: transparent;
-      color: rgba(255, 255, 255, 0.68);
+      color: rgb(148, 143, 163);
       width: 22px;
-      height: 20px;
-      border-radius: 6px;
+      height: 22px;
+      border-radius: 999px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
       padding: 0;
-      transition: background 0.14s ease, color 0.14s ease;
+      transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
     }
     .mosu-btn:hover {
-      background: rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.14);
       color: #fff;
+      transform: scale(1.06);
+    }
+    .mosu-btn:active {
+      transform: scale(0.94);
+    }
+    .mosu-btn:focus-visible {
+      outline: 2px solid rgba(205, 223, 255, 0.9);
+      outline-offset: 1px;
     }
     .mosu-btn--close:hover {
-      background: rgba(214, 64, 64, 0.28);
+      background: rgba(214, 64, 64, 0.22);
+      border-color: rgba(214, 64, 64, 0.36);
       color: #ffd7d7;
     }
     .mosu-btn svg {
-      width: 11px;
-      height: 11px;
+      width: 10px;
+      height: 10px;
       fill: currentColor;
       display: block;
     }
@@ -524,7 +585,7 @@
       transform: rotate(180deg);
     }
     .mosu-collapse-icon {
-      transition: transform 0.16s ease;
+      transition: transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
     }
     .mosu-body {
       position: relative;
@@ -544,14 +605,14 @@
       position: absolute;
       z-index: 4;
     }
-    .mosu-resize--n { top: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
-    .mosu-resize--s { bottom: 0; left: 10px; right: 10px; height: 5px; cursor: ns-resize; }
-    .mosu-resize--w { left: 0; top: 10px; bottom: 10px; width: 5px; cursor: ew-resize; }
-    .mosu-resize--e { right: 0; top: 10px; bottom: 10px; width: 5px; cursor: ew-resize; }
-    .mosu-resize--nw { top: 0; left: 0; width: 11px; height: 11px; cursor: nwse-resize; }
-    .mosu-resize--ne { top: 0; right: 0; width: 11px; height: 11px; cursor: nesw-resize; }
-    .mosu-resize--sw { bottom: 0; left: 0; width: 11px; height: 11px; cursor: nesw-resize; }
-    .mosu-resize--se { bottom: 0; right: 0; width: 11px; height: 11px; cursor: nwse-resize; }
+    .mosu-resize--n { top: 0; left: 16px; right: 16px; height: 5px; cursor: ns-resize; }
+    .mosu-resize--s { bottom: 0; left: 16px; right: 16px; height: 5px; cursor: ns-resize; }
+    .mosu-resize--w { left: 0; top: 16px; bottom: 16px; width: 5px; cursor: ew-resize; }
+    .mosu-resize--e { right: 0; top: 16px; bottom: 16px; width: 5px; cursor: ew-resize; }
+    .mosu-resize--nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+    .mosu-resize--ne { top: 0; right: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+    .mosu-resize--sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+    .mosu-resize--se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: nwse-resize; }
     .mosu-shell.is-collapsed .mosu-resize--n,
     .mosu-shell.is-collapsed .mosu-resize--s,
     .mosu-shell.is-collapsed .mosu-resize--nw,
@@ -751,6 +812,8 @@
       collapsed: options.expandOnOpen ? false : initialCollapsed,
     });
 
+    ensureTopBarFonts();
+
     const host = document.createElement('div');
     host.id = HOST_ID;
     const shadow = host.attachShadow({ mode: 'open' });
@@ -770,14 +833,13 @@
     const barLeft = document.createElement('div');
     barLeft.className = 'mosu-bar-left';
     barLeft.innerHTML = `
-      <svg class="mosu-grip" viewBox="0 0 12 12" aria-hidden="true">
-        <circle cx="3" cy="3" r="1.2" fill="currentColor"></circle>
-        <circle cx="9" cy="3" r="1.2" fill="currentColor"></circle>
-        <circle cx="3" cy="9" r="1.2" fill="currentColor"></circle>
-        <circle cx="9" cy="9" r="1.2" fill="currentColor"></circle>
-      </svg>
+      <span class="mosu-brand-dot" aria-hidden="true"></span>
       <span class="mosu-brand">mosu! preview</span>
     `;
+
+    const dragPill = document.createElement('span');
+    dragPill.className = 'mosu-drag-pill';
+    dragPill.setAttribute('aria-hidden', 'true');
 
     const actions = document.createElement('div');
     actions.className = 'mosu-bar-actions';
@@ -811,6 +873,7 @@
     actions.appendChild(collapseBtn);
     actions.appendChild(closeBtn);
     bar.appendChild(barLeft);
+    bar.appendChild(dragPill);
     bar.appendChild(actions);
 
     const body = document.createElement('div');

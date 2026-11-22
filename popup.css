@@ -340,7 +340,7 @@ html.is-embedded-player .map-preview-follow-btn {
 /* Collapsed mini-bar inside osu.ppy.sh: hides the playfield so only the header
    and interactive timeline/controls row stay visible, SoundCloud-style. */
 html.is-embedded-collapsed .map-preview-popup {
-    padding: 0.45rem 0.65rem 0.5rem;
+    padding: 0.45rem 0.75rem 0.6rem;
     justify-content: space-between;
 }
 

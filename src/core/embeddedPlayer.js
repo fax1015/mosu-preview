@@ -33,9 +33,9 @@ const OSU_ORIGIN = 'https://osu.ppy.sh';
 const EMBEDDED_ASPECT_RATIO = 4 / 3;
 // Outer shell border (2px) + popup horizontal padding (24px).
 const EMBEDDED_CHROME_WIDTH = 26;
-// Outer shell border (2px) + drag bar (28px) + popup vertical padding (24px)
+// Outer shell border (2px) + drag bar (32px) + popup vertical padding (24px)
 // + header (~38px) + canvas bottom margin (~10px) + controls capsule (30px).
-const DEFAULT_EMBEDDED_CHROME_HEIGHT = 132;
+const DEFAULT_EMBEDDED_CHROME_HEIGHT = 136;
 const MIN_EMBEDDED_CHROME_HEIGHT = 80;
 const MAX_EMBEDDED_CHROME_HEIGHT = 240;
 
@@ -75,7 +75,7 @@ const MIN_EMBEDDED_WIDTH = 340;
 const MIN_EMBEDDED_HEIGHT = embeddedHeightForWidth(MIN_EMBEDDED_WIDTH);
 const MAX_EMBEDDED_WIDTH = 1400;
 const MAX_EMBEDDED_HEIGHT = embeddedHeightForWidth(MAX_EMBEDDED_WIDTH);
-const COLLAPSED_EMBEDDED_HEIGHT = 112;
+const COLLAPSED_EMBEDDED_HEIGHT = 116;
 const VIEWPORT_MARGIN = 8;
 
 const isOsuWebsiteUrl = (rawUrl) => {

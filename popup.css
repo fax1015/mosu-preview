@@ -525,7 +525,7 @@ html.is-embedded-player .map-preview-popup.has-mini-cover .map-preview-mini-art-
    Right deck uses centered vertical rhythm (metadata -> 9px -> waveform -> 5px
    -> footer) aligned to a shared 126px left rail and 16px right rail. */
 html.is-embedded-collapsed .map-preview-popup {
-    padding: 10px 16px 10px 126px;
+    padding: 9px 16px 9px 126px;
     justify-content: center;
     background: rgb(30, 28, 36);
 }
@@ -567,15 +567,23 @@ html.is-embedded-collapsed .map-preview-headings {
 }
 
 html.is-embedded-collapsed .map-preview-title {
-    font-size: 0.88rem;
-    line-height: 1.2;
-    letter-spacing: -0.01em;
-    text-shadow: 0 1px 6px rgba(0, 0, 0, 0.34);
+    font-size: 1.02rem;
+    font-weight: 700;
+    line-height: 1.16;
+    letter-spacing: -0.015em;
+    color: #fff;
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.42);
 }
 
 html.is-embedded-collapsed .map-preview-subtitle {
-    font-size: 0.68rem;
+    font-size: 0.67rem;
     line-height: 1.2;
+    color: rgba(188, 183, 206, 0.72);
+}
+
+html.is-embedded-collapsed .map-preview-version {
+    color: rgba(212, 208, 226, 0.8);
+    font-weight: 600;
 }
 
 html.is-embedded-collapsed .map-preview-header-actions {
@@ -583,12 +591,12 @@ html.is-embedded-collapsed .map-preview-header-actions {
 }
 
 html.is-embedded-collapsed .map-preview-info-btn {
-    width: 24px;
-    height: 24px;
-    flex: 0 0 24px;
+    width: 22px;
+    height: 22px;
+    flex: 0 0 22px;
     border-color: transparent;
     border-radius: 999px;
-    color: rgba(214, 210, 228, 0.72);
+    color: rgba(204, 199, 220, 0.56);
 }
 
 html.is-embedded-collapsed .map-preview-info-btn:hover {
@@ -598,10 +606,10 @@ html.is-embedded-collapsed .map-preview-info-btn:hover {
 }
 
 html.is-embedded-collapsed .map-preview-follow-btn.is-following {
-    color: rgba(255, 255, 255, 0.94);
-    background: rgba(255, 255, 255, 0.09);
+    color: rgba(236, 233, 246, 0.86);
+    background: rgba(255, 255, 255, 0.06);
     border-color: transparent;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
 }
 
 /* 2-row right-hand transport deck: full-width waveform tightly paired with
@@ -646,10 +654,10 @@ html.is-embedded-collapsed .map-preview-time-label {
     width: auto;
     height: 22px;
     padding: 0 0 0.1em;
-    font-size: 0.69rem;
+    font-size: 0.68rem;
     font-weight: 600;
     letter-spacing: 0.01em;
-    color: rgba(214, 210, 228, 0.78);
+    color: rgba(206, 201, 222, 0.7);
     text-align: left;
     pointer-events: none;
     cursor: default;
@@ -666,9 +674,9 @@ html.is-embedded-collapsed .map-preview-volume-btn {
     width: 28px;
     height: 22px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.075);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
-    color: rgba(226, 222, 238, 0.88);
+    background: rgba(255, 255, 255, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    color: rgba(220, 216, 234, 0.82);
 }
 
 html.is-embedded-collapsed .map-preview-volume-icon {
@@ -699,10 +707,10 @@ html.is-embedded-collapsed .map-preview-speed-btn {
     width: 36px;
     height: 22px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.075);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
-    color: rgba(236, 234, 246, 0.92);
-    font-size: 0.68rem;
+    background: rgba(255, 255, 255, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    color: rgba(226, 222, 240, 0.84);
+    font-size: 0.67rem;
 }
 
 html.is-embedded-collapsed .map-preview-volume-btn:hover,

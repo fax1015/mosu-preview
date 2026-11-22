@@ -994,6 +994,9 @@
     }
 
     if (data.type === 'chromeMetrics') {
+      if (currentBounds.collapsed || shellElement?.classList.contains('is-collapse-animating')) {
+        return;
+      }
       const innerHeight = Number(data.innerChromeHeight);
       if (Number.isFinite(innerHeight) && innerHeight > 0) {
         const nextChrome = Math.round(clamp(

@@ -927,10 +927,10 @@ const {
   closeDetachedWindowIfOpen,
   flushPendingCacheWrite: waitForPendingCacheWrite,
   onCollapsedChange: (collapsed) => {
+    isCollapseTransitioning = true;
     document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
     syncCollapsedTimeLabelInteractivity(collapsed);
     if (!collapsed) {
-      syncEmbeddedChromeMetrics();
       if (!state.isPlaying && state.mapData) {
         renderFrame();
       }
@@ -938,11 +938,13 @@ const {
     } else if (!state.isPlaying && state.mapData) {
       requestAnimationFrame(() => renderer.renderTimeline());
     }
-    // Repaint once the 280ms container height transition settles so the
-    // playfield and waveform timeline match their final CSS dimensions.
+    // Wait until the 280ms container height transition settles before re-measuring
+    // chrome metrics, otherwise mid-transition padding/margin values retarget the
+    // height animation and cause a visible two-stage snap.
     collapseRepaintTimer = registry.clearTimeout(collapseRepaintTimer);
     collapseRepaintTimer = registry.addTimeout(setTimeout(() => {
       collapseRepaintTimer = registry.clearTimeout(collapseRepaintTimer);
+      isCollapseTransitioning = false;
       if (!state.mapData) {
         return;
       }
@@ -952,11 +954,12 @@ const {
       if (!state.isPlaying) {
         renderFrame();
       }
-    }, 310));
+    }, 320));
   },
 });
 
 let collapseRepaintTimer = null;
+let isCollapseTransitioning = false;
 
 let embeddedRepaintRafId = null;
 let embeddedRepaintRetries = 0;
@@ -1000,7 +1003,7 @@ const scheduleEmbeddedRepaint = () => {
 };
 
 const syncEmbeddedChromeMetrics = () => {
-  if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || !popup || !canvasWrap) {
+  if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || isCollapseTransitioning || !popup || !canvasWrap) {
     return;
   }
   const header = popup.querySelector('.map-preview-header');

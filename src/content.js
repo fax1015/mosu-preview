@@ -80,7 +80,7 @@
 
   const MIN_WIDTH = 340;
   const MAX_WIDTH = 1400;
-  const COLLAPSED_HEIGHT = 116;
+  const COLLAPSED_HEIGHT = 140;
   const VIEWPORT_MARGIN = 8;
 
   const MODE_URL_NAMES = Object.freeze(['osu', 'taiko', 'fruits', 'mania']);
@@ -330,6 +330,7 @@
   let collapseButton = null;
   let currentBounds = { ...DEFAULT_BOUNDS };
   let boundsPersistTimer = null;
+  let collapseTransitionTimer = null;
   let iframeOrigin = null;
   let iframeReady = false;
   let pendingMessages = [];
@@ -397,19 +398,34 @@
     }
   };
 
+  const clearCollapseAnimation = () => {
+    if (collapseTransitionTimer !== null) {
+      clearTimeout(collapseTransitionTimer);
+      collapseTransitionTimer = null;
+    }
+    shellElement?.classList.remove('is-collapse-animating');
+  };
+
   const setCollapsed = (nextCollapsed) => {
     const collapsed = Boolean(nextCollapsed);
     if (currentBounds.collapsed === collapsed) {
       return;
     }
+    clearCollapseAnimation();
+    shellElement?.classList.add('is-collapse-animating');
     currentBounds = normalizeBounds({ ...currentBounds, collapsed });
     applyShellBounds();
     scheduleBoundsPersist();
     postToIframe({ type: 'collapsedChanged', collapsed });
+    collapseTransitionTimer = setTimeout(() => {
+      collapseTransitionTimer = null;
+      shellElement?.classList.remove('is-collapse-animating');
+    }, 320);
   };
 
   const unmountOverlay = ({ clearResume = true } = {}) => {
     mountGeneration += 1;
+    clearCollapseAnimation();
     if (clearResume) {
       clearResumeSnapshot();
     }
@@ -470,6 +486,15 @@
       color: #fff;
       user-select: none;
       touch-action: none;
+    }
+    .mosu-shell.is-collapse-animating:not(.is-interacting) {
+      transition: height 280ms cubic-bezier(0.32, 0.72, 0, 1),
+                  bottom 280ms cubic-bezier(0.32, 0.72, 0, 1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .mosu-shell.is-collapse-animating:not(.is-interacting) {
+        transition: none;
+      }
     }
     .mosu-shell.is-interacting .mosu-frame {
       pointer-events: none;
@@ -594,7 +619,7 @@
       transform: rotate(180deg);
     }
     .mosu-collapse-icon {
-      transition: transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+      transition: transform 240ms cubic-bezier(0.32, 0.72, 0, 1);
     }
     .mosu-body {
       position: relative;
@@ -640,6 +665,7 @@
         return;
       }
       event.preventDefault();
+      clearCollapseAnimation();
       dragState = {
         pointerId: event.pointerId,
         startX: event.clientX,
@@ -692,6 +718,7 @@
       }
       event.preventDefault();
       event.stopPropagation();
+      clearCollapseAnimation();
       resizeState = {
         pointerId: event.pointerId,
         startX: event.clientX,

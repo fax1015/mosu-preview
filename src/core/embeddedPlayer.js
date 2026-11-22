@@ -75,7 +75,7 @@ const MIN_EMBEDDED_WIDTH = 340;
 const MIN_EMBEDDED_HEIGHT = embeddedHeightForWidth(MIN_EMBEDDED_WIDTH);
 const MAX_EMBEDDED_WIDTH = 1400;
 const MAX_EMBEDDED_HEIGHT = embeddedHeightForWidth(MAX_EMBEDDED_WIDTH);
-const COLLAPSED_EMBEDDED_HEIGHT = 116;
+const COLLAPSED_EMBEDDED_HEIGHT = 140;
 const VIEWPORT_MARGIN = 8;
 
 const isOsuWebsiteUrl = (rawUrl) => {

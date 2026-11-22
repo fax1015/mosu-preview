@@ -302,11 +302,24 @@ html.is-detached-window .map-preview-canvas-wrap {
     min-height: 0;
 }
 
-/* The embedded miniplayer snaps its outer shell to the original 4:3 playfield
-   proportions, so the playfield keeps its exact 4:3 aspect ratio. */
+/* The embedded miniplayer's outer shell snaps to exact 4:3 playfield
+   proportions, so letting the playfield flex within the remaining height keeps
+   exact 4:3 at rest while smoothly collapsing/expanding in lockstep with the
+   shell's height transition. */
+html.is-embedded-player .map-preview-popup {
+    overflow: hidden;
+    transition: padding 260ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
 html.is-embedded-player .map-preview-canvas-wrap {
-    flex: 0 0 auto;
-    aspect-ratio: 4 / 3;
+    flex: 1 1 0;
+    min-height: 0;
+    aspect-ratio: auto;
+    opacity: 1;
+    transition: flex-grow 280ms cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 180ms ease,
+                margin-bottom 260ms cubic-bezier(0.32, 0.72, 0, 1),
+                border-color 180ms ease;
 }
 
 /* Detaching from a detached window would just spawn a duplicate. */
@@ -337,53 +350,238 @@ html.is-embedded-player .map-preview-follow-btn {
     display: inline-flex;
 }
 
-/* Collapsed mini-bar inside osu.ppy.sh: hides the playfield so only the header
-   and interactive timeline/controls row stay visible, SoundCloud-style. */
+/* Beatmap cover thumbnail: only reveals when the embedded miniplayer collapses
+   into its compact audio-player layout. */
+.map-preview-mini-cover {
+    display: none;
+}
+
+html.is-embedded-player .map-preview-mini-cover {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 0;
+    height: 0;
+    margin-right: -0.6rem;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background-color: rgba(140, 102, 255, 0.14);
+    background-size: cover;
+    background-position: center;
+    color: rgba(196, 174, 255, 0.75);
+    opacity: 0;
+    overflow: hidden;
+    transform: scale(0.84);
+    transition: width 260ms cubic-bezier(0.32, 0.72, 0, 1),
+                height 260ms cubic-bezier(0.32, 0.72, 0, 1),
+                margin-right 260ms cubic-bezier(0.32, 0.72, 0, 1),
+                opacity 200ms ease,
+                transform 260ms cubic-bezier(0.32, 0.72, 0, 1),
+                border-color 200ms ease;
+}
+
+html.is-embedded-player .map-preview-mini-cover svg {
+    width: 15px;
+    height: 15px;
+    fill: currentColor;
+    transition: opacity 160ms ease;
+}
+
+html.is-embedded-player .map-preview-mini-cover.has-cover svg {
+    opacity: 0;
+}
+
+/* Collapsed audio-player mode inside osu.ppy.sh: hides the playfield smoothly
+   and rearranges the header + transport bar into a spacious music-player deck. */
 html.is-embedded-collapsed .map-preview-popup {
-    padding: 0.45rem 0.75rem 0.6rem;
+    padding: 0.75rem 0.85rem;
     justify-content: space-between;
 }
 
-html.is-embedded-collapsed .map-preview-canvas-wrap,
+html.is-embedded-collapsed .map-preview-canvas-wrap {
+    flex: 0 0 0;
+    min-height: 0;
+    height: 0;
+    margin-bottom: 0;
+    border-width: 0;
+    border-color: transparent;
+    opacity: 0;
+    pointer-events: none;
+}
+
 html.is-embedded-collapsed .map-preview-debug-panel,
 html.is-embedded-collapsed .map-preview-compare-control {
     display: none;
 }
 
 html.is-embedded-collapsed .map-preview-header {
-    margin-bottom: 0.35rem;
+    margin-bottom: 0.65rem;
+    gap: 0.65rem;
+}
+
+html.is-embedded-collapsed .map-preview-mini-cover {
+    width: 38px;
+    height: 38px;
+    margin-right: 0;
+    border-color: rgba(255, 255, 255, 0.14);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.34);
+    opacity: 1;
+    transform: scale(1);
+}
+
+html.is-embedded-collapsed .map-preview-title {
+    font-size: 0.88rem;
+}
+
+html.is-embedded-collapsed .map-preview-subtitle {
+    font-size: 0.68rem;
+}
+
+html.is-embedded-collapsed .map-preview-header-actions {
+    gap: 0.25rem;
+}
+
+html.is-embedded-collapsed .map-preview-info-btn {
+    width: 26px;
+    height: 26px;
+    flex: 0 0 26px;
+    border-color: transparent;
+    border-radius: 999px;
+    color: rgba(176, 171, 192, 0.82);
+}
+
+html.is-embedded-collapsed .map-preview-info-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: transparent;
+    color: var(--text-primary);
+}
+
+html.is-embedded-collapsed .map-preview-follow-btn.is-following {
+    color: rgb(192, 168, 255);
+    background: rgba(140, 102, 255, 0.18);
+    border-color: transparent;
+}
+
+html.is-embedded-collapsed .map-preview-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+}
+
+html.is-embedded-collapsed .map-preview-control-divider,
+html.is-embedded-collapsed .map-preview-keys-control {
+    display: none;
+}
+
+html.is-embedded-collapsed .map-preview-timeline {
+    order: 2;
+    flex: 1 1 0;
+    width: auto;
+    min-width: 60px;
+    height: 28px;
+    border-radius: 9px;
+    background: rgba(0, 0, 0, 0.24);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+html.is-embedded-collapsed .map-preview-time-label {
+    order: 3;
+    height: 26px;
+    padding: 0 5px;
+    font-size: 0.68rem;
+    color: rgba(214, 210, 226, 0.8);
+}
+
+html.is-embedded-collapsed .map-preview-volume-control {
+    order: 4;
+    flex: 0 0 auto;
+    --map-preview-pill-width: 28px;
+    height: 28px;
+}
+
+html.is-embedded-collapsed .map-preview-volume-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+}
+
+/* Volume sits on the right side in collapsed audio mode, so anchor its popover
+   to the right edge instead of the left. */
+html.is-embedded-collapsed .map-preview-volume-popover {
+    left: auto;
+    right: 0;
+    transform-origin: 80% 100%;
+}
+
+html.is-embedded-collapsed .map-preview-volume-panel::after {
+    left: auto;
+    right: calc((var(--map-preview-pill-width) / 2) - 5px);
+}
+
+html.is-embedded-collapsed .map-preview-speed-control {
+    order: 5;
+    flex: 0 0 auto;
+    --map-preview-pill-width: 34px;
+    height: 26px;
+}
+
+html.is-embedded-collapsed .map-preview-speed-btn {
+    width: 34px;
+    height: 26px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    font-size: 0.68rem;
+}
+
+html.is-embedded-collapsed .map-preview-speed-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
 }
 
 .map-preview-mini-play-btn {
     display: none;
     align-items: center;
     justify-content: center;
-    flex: 0 0 auto;
-    width: var(--map-preview-capsule-inner-height);
-    height: var(--map-preview-capsule-inner-height);
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     border: none;
-    border-radius: calc(var(--map-preview-capsule-inner-height) / 2);
-    background: transparent;
-    color: rgb(214, 210, 226);
+    border-radius: 999px;
+    background: var(--accent-primary);
+    color: #fff;
+    box-shadow: 0 4px 14px rgba(140, 102, 255, 0.34);
     cursor: pointer;
-    transition: color var(--transition), background-color var(--transition);
+    transition: background-color 160ms ease, transform 180ms cubic-bezier(0.32, 0.72, 0, 1), box-shadow 160ms ease;
 }
 
 .map-preview-mini-play-btn:hover {
-    color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.12);
+    background: rgb(156, 122, 255);
+    box-shadow: 0 6px 18px rgba(140, 102, 255, 0.44);
+    transform: scale(1.06);
+}
+
+.map-preview-mini-play-btn:active {
+    transform: scale(0.94);
 }
 
 .map-preview-mini-play-btn:focus-visible {
-    outline: 1px solid rgba(181, 164, 244, 0.9);
-    outline-offset: -1px;
+    outline: 2px solid rgba(205, 223, 255, 0.9);
+    outline-offset: 2px;
 }
 
 .map-preview-mini-play-btn svg {
-    width: 10px;
-    height: 10px;
+    width: 11px;
+    height: 11px;
     fill: currentColor;
+}
+
+.map-preview-mini-play-icon--play {
+    transform: translateX(1px);
 }
 
 .map-preview-mini-play-icon--pause {
@@ -399,7 +597,17 @@ html.is-embedded-collapsed .map-preview-header {
 }
 
 html.is-embedded-collapsed .map-preview-mini-play-btn {
+    order: 1;
     display: inline-flex;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html.is-embedded-player .map-preview-popup,
+    html.is-embedded-player .map-preview-canvas-wrap,
+    html.is-embedded-player .map-preview-mini-cover,
+    .map-preview-mini-play-btn {
+        transition: none;
+    }
 }
 
 .map-preview-follow-btn.is-following {

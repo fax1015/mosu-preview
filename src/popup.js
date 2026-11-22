@@ -211,6 +211,7 @@ const embedButton = document.querySelector('#mapPreviewEmbedBtn');
 const detachButton = document.querySelector('#mapPreviewDetachBtn');
 const followButton = document.querySelector('#mapPreviewFollowBtn');
 const miniPlayButton = document.querySelector('#mapPreviewMiniPlayBtn');
+const miniCover = document.querySelector('#mapPreviewMiniCover');
 const infoButtons = [...document.querySelectorAll('.js-map-preview-info-btn')];
 const infoButton = infoButtons[0] || null;
 const infoModal = document.querySelector('#mapPreviewInfoModal');
@@ -917,9 +918,28 @@ const {
         renderFrame();
       }
       scheduleEmbeddedRepaint();
+    } else if (!state.isPlaying && state.mapData) {
+      requestAnimationFrame(() => renderer.renderTimeline());
     }
+    // Repaint once the 280ms container height transition settles so the
+    // playfield and waveform timeline match their final CSS dimensions.
+    collapseRepaintTimer = registry.clearTimeout(collapseRepaintTimer);
+    collapseRepaintTimer = registry.addTimeout(setTimeout(() => {
+      collapseRepaintTimer = registry.clearTimeout(collapseRepaintTimer);
+      if (!state.mapData) {
+        return;
+      }
+      if (!state.embeddedCollapsed) {
+        syncEmbeddedChromeMetrics();
+      }
+      if (!state.isPlaying) {
+        renderFrame();
+      }
+    }, 310));
   },
 });
+
+let collapseRepaintTimer = null;
 
 let embeddedRepaintRafId = null;
 let embeddedRepaintRetries = 0;
@@ -1804,15 +1824,31 @@ const selectObjectAtPoint = (event, { target = renderer, canvas = playfieldCanva
   return true;
 };
 
+const updateMiniCover = (setId) => {
+  if (!miniCover) {
+    return;
+  }
+  const safeSetId = normalizeNumericId(setId);
+  if (safeSetId) {
+    miniCover.style.backgroundImage = `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`;
+    miniCover.classList.add('has-cover');
+  } else {
+    miniCover.style.backgroundImage = '';
+    miniCover.classList.remove('has-cover');
+  }
+};
+
 const setMetadataText = () => {
   if (!state.metadata || !state.mapData) {
     titleLine.textContent = 'Map Preview';
     setHeaderSubtitle();
+    updateMiniCover('');
     return;
   }
 
   titleLine.textContent = state.metadata.title || 'Untitled';
   setHeaderSubtitle({ artist: state.metadata.artist || '', version: state.metadata.version || '' });
+  updateMiniCover(state.detachContext?.setId || state.activeSetId || '');
 
   const objectCount = state.mapData.objects.length;
   const modeLabel = MODE_LABELS[state.mapData.mode] || 'unknown';

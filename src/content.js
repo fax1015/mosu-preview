@@ -485,10 +485,6 @@
       padding: 0 0 0 16px;
       background: rgba(24, 23, 28, 0.72);
       border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-      cursor: grab;
-    }
-    .mosu-shell.is-dragging .mosu-bar {
-      cursor: grabbing;
     }
     .mosu-bar-left {
       display: flex;
@@ -507,11 +503,24 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .mosu-drag-pill {
+    .mosu-drag-handle {
       position: absolute;
       left: 50%;
       top: 50%;
       transform: translate(-50%, -50%);
+      z-index: 5;
+      height: 22px;
+      padding: 0 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: grab;
+    }
+    .mosu-shell.is-dragging .mosu-drag-handle {
+      cursor: grabbing;
+    }
+    .mosu-drag-pill {
+      display: block;
       width: 30px;
       height: 3px;
       border-radius: 999px;
@@ -519,8 +528,8 @@
       pointer-events: none;
       transition: background 0.16s ease, width 0.16s cubic-bezier(0.32, 0.72, 0, 1);
     }
-    .mosu-bar:hover .mosu-drag-pill {
-      background: rgba(255, 255, 255, 0.28);
+    .mosu-drag-handle:hover .mosu-drag-pill {
+      background: rgba(255, 255, 255, 0.32);
       width: 36px;
     }
     .mosu-shell.is-dragging .mosu-drag-pill {
@@ -840,9 +849,14 @@
     barLeft.className = 'mosu-bar-left';
     barLeft.innerHTML = '<span class="mosu-brand">mosu! preview</span>';
 
+    const dragHandle = document.createElement('div');
+    dragHandle.className = 'mosu-drag-handle';
+    dragHandle.title = 'Drag to move';
+
     const dragPill = document.createElement('span');
     dragPill.className = 'mosu-drag-pill';
     dragPill.setAttribute('aria-hidden', 'true');
+    dragHandle.appendChild(dragPill);
 
     const actions = document.createElement('div');
     actions.className = 'mosu-bar-actions';
@@ -876,7 +890,7 @@
     actions.appendChild(collapseBtn);
     actions.appendChild(closeBtn);
     bar.appendChild(barLeft);
-    bar.appendChild(dragPill);
+    bar.appendChild(dragHandle);
     bar.appendChild(actions);
 
     const body = document.createElement('div');
@@ -910,7 +924,7 @@
     pendingMessages = [];
     lastNotifiedUrl = window.location.href;
 
-    bindDrag(bar);
+    bindDrag(dragHandle);
     applyShellBounds();
 
     // Mounted on <html> rather than <body> so Hotwire Turbo Drive body swaps

@@ -40,6 +40,7 @@ const createEmbeddedController = ({
   onCollapsedChange,
 }) => {
   let embedInFlight = false;
+  let pendingClosePromise = null;
   let hasUserToggledFollow = false;
   let ownTabId = null;
   let latestTabUrl = '';
@@ -71,35 +72,46 @@ const createEmbeddedController = ({
    * Closes any open embedded players across osu.ppy.sh tabs so two previews
    * never play over each other when the toolbar popup or detached window opens.
    */
-  const closeEmbeddedPlayersOnOsuTabs = async () => {
-    let tabs = [];
-    try {
-      tabs = await queryTabs({ url: 'https://osu.ppy.sh/*' });
-    } catch {
-      return 0;
+  const closeEmbeddedPlayersOnOsuTabs = () => {
+    if (pendingClosePromise) {
+      return pendingClosePromise;
     }
+    const run = (async () => {
+      let tabs = [];
+      try {
+        tabs = await queryTabs({ url: 'https://osu.ppy.sh/*' });
+      } catch {
+        return 0;
+      }
 
-    let closedCount = 0;
-    await Promise.all(
-      (tabs || []).map(async (tab) => {
-        if (!Number.isInteger(tab?.id)) {
-          return;
-        }
-        try {
-          const response = await sendTabMessage(tab.id, { type: 'mosuEmbeddedClose' });
-          if (response?.closed) {
-            closedCount += 1;
+      let closedCount = 0;
+      await Promise.all(
+        (tabs || []).map(async (tab) => {
+          if (!Number.isInteger(tab?.id)) {
+            return;
           }
-        } catch {
-          // Tab may not have the content script injected (e.g. opened before install).
-        }
-      }),
-    );
+          try {
+            const response = await sendTabMessage(tab.id, { type: 'mosuEmbeddedClose' });
+            if (response?.closed) {
+              closedCount += 1;
+            }
+          } catch {
+            // Tab may not have the content script injected (e.g. opened before install).
+          }
+        }),
+      );
 
-    if (closedCount > 0) {
-      addDebugLog(`embed: closed ${closedCount} embedded player(s)`);
-    }
-    return closedCount;
+      if (closedCount > 0) {
+        addDebugLog(`embed: closed ${closedCount} embedded player(s)`);
+      }
+      return closedCount;
+    })().finally(() => {
+      if (pendingClosePromise === run) {
+        pendingClosePromise = null;
+      }
+    });
+    pendingClosePromise = run;
+    return run;
   };
 
   const postToHost = (payload) => {
@@ -163,6 +175,12 @@ const createEmbeddedController = ({
 
     embedInFlight = true;
     try {
+      // Wait for any startup close sweep so it cannot arrive after mosuEmbeddedOpen
+      // and tear down the newly mounted overlay.
+      if (pendingClosePromise) {
+        await pendingClosePromise;
+      }
+
       let targetTabId = state.embedContext?.tabId ?? null;
       let targetTabUrl = state.embedContext?.tabUrl || '';
 

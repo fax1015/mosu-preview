@@ -1077,9 +1077,6 @@ const applyPreviewSettings = (settings = {}) => {
   state.keybindings = normalized.keybindings;
   document.documentElement.classList.toggle('is-embedded-enabled', normalized.embeddedPlayer);
   updateEmbedButtonState();
-  if (IS_EMBEDDED_PLAYER && !normalized.embeddedPlayer) {
-    requestCloseEmbedded();
-  }
   shortcutsPanel?.setKeybindings(normalized.keybindings);
   hitsoundPlayer.setEnabled(normalized.hitsounds);
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
@@ -2750,6 +2747,11 @@ addStorageChangedListener((changes, areaName) => {
 
   // `state` carries every preview setting under its own key, so it stands in
   // for the settings in force.
-  applyPreviewSettings(applyPreviewSettingChanges(state, changes));
+  const nextSettings = applyPreviewSettingChanges(state, changes);
+  applyPreviewSettings(nextSettings);
+  if (IS_EMBEDDED_PLAYER && !nextSettings.embeddedPlayer) {
+    requestCloseEmbedded();
+    return;
+  }
   renderFrame();
 });

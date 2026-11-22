@@ -15,6 +15,7 @@ test('embeddedController opens embedded player once, closes detached window, and
   const injectedScripts = [];
   let failSendCount = 0;
   let shouldFailInject = false;
+  let closeQueryGate = null;
 
   globalThis.window = {
     close: () => { windowClosed += 1; },
@@ -35,6 +36,9 @@ test('embeddedController opens embedded player once, closes detached window, and
     tabs: {
       query: async (q) => {
         if (q?.url === 'https://osu.ppy.sh/*') {
+          if (closeQueryGate) {
+            await closeQueryGate;
+          }
           return [{ id: 10, url: 'https://osu.ppy.sh/beatmapsets/55#osu/123' }, { id: 11, url: 'https://osu.ppy.sh/home' }];
         }
         return [{ id: 10, active: true, url: 'https://osu.ppy.sh/beatmapsets/55#osu/123' }];
@@ -108,6 +112,19 @@ test('embeddedController opens embedded player once, closes detached window, and
     // Closing across osu tabs returns how many tabs actually closed an overlay.
     const closedCount = await controller.closeEmbeddedPlayersOnOsuTabs();
     assert.equal(closedCount, 1);
+
+    // An in-flight startup close sweep finishes before openEmbeddedPlayer sends mosuEmbeddedOpen.
+    let releaseClose;
+    closeQueryGate = new Promise((resolve) => { releaseClose = resolve; });
+    const orderStart = sentMessages.length;
+    const closing = controller.closeEmbeddedPlayersOnOsuTabs();
+    const opening = controller.openEmbeddedPlayer();
+    releaseClose();
+    await Promise.all([closing, opening]);
+    closeQueryGate = null;
+    const types = sentMessages.slice(orderStart).map((entry) => entry.message.type);
+    assert.equal(types[types.length - 1], 'mosuEmbeddedOpen');
+    assert.ok(types.slice(0, -1).every((t) => t === 'mosuEmbeddedClose'));
 
     // Missing content script triggers on-demand scripting.executeScript and retries cleanly.
     failSendCount = 1;

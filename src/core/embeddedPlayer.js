@@ -29,20 +29,52 @@ const MAX_RESUME_TIME_MS = 24 * 60 * 60 * 1000;
 const EMBEDDED_MESSAGE_CHANNEL = 'mosu-preview-embedded-v1';
 const OSU_ORIGIN = 'https://osu.ppy.sh';
 
-// Sized to mirror the toolbar popup's 4:3 proportions while leaving room for
-// the slim outer drag bar, positioned just above osu!'s own #main-player bar.
+// Matches the original popup's 4:3 playfield (see popup.css & core/panelLayout.js).
+const EMBEDDED_ASPECT_RATIO = 4 / 3;
+// Outer shell border (2px) + popup horizontal padding (24px).
+const EMBEDDED_CHROME_WIDTH = 26;
+// Outer shell border (2px) + drag bar (28px) + popup vertical padding (24px)
+// + header (~38px) + canvas bottom margin (~10px) + controls capsule (30px).
+const DEFAULT_EMBEDDED_CHROME_HEIGHT = 132;
+const MIN_EMBEDDED_CHROME_HEIGHT = 80;
+const MAX_EMBEDDED_CHROME_HEIGHT = 240;
+
+const normalizeChromeHeight = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_EMBEDDED_CHROME_HEIGHT;
+  }
+  return Math.round(clamp(numeric, MIN_EMBEDDED_CHROME_HEIGHT, MAX_EMBEDDED_CHROME_HEIGHT));
+};
+
+const embeddedHeightForWidth = (width, chromeHeight = DEFAULT_EMBEDDED_CHROME_HEIGHT) => {
+  const safeChrome = normalizeChromeHeight(chromeHeight);
+  const canvasWidth = Math.max(0, Number(width) - EMBEDDED_CHROME_WIDTH);
+  return Math.round(safeChrome + (canvasWidth / EMBEDDED_ASPECT_RATIO));
+};
+
+const embeddedWidthForHeight = (height, chromeHeight = DEFAULT_EMBEDDED_CHROME_HEIGHT) => {
+  const safeChrome = normalizeChromeHeight(chromeHeight);
+  const canvasHeight = Math.max(0, Number(height) - safeChrome);
+  return Math.round(EMBEDDED_CHROME_WIDTH + (canvasHeight * EMBEDDED_ASPECT_RATIO));
+};
+
+// Sized to match the default toolbar popup's 438px content width (+2px shell
+// border) and exact 4:3 playfield height, positioned just above osu!'s own
+// #main-player bar.
+const DEFAULT_EMBEDDED_WIDTH = 440;
 const DEFAULT_EMBEDDED_BOUNDS = Object.freeze({
-  width: 456,
-  height: 432,
+  width: DEFAULT_EMBEDDED_WIDTH,
+  height: embeddedHeightForWidth(DEFAULT_EMBEDDED_WIDTH),
   right: 20,
   bottom: 72,
   collapsed: false,
 });
 
 const MIN_EMBEDDED_WIDTH = 340;
-const MIN_EMBEDDED_HEIGHT = 280;
+const MIN_EMBEDDED_HEIGHT = embeddedHeightForWidth(MIN_EMBEDDED_WIDTH);
 const MAX_EMBEDDED_WIDTH = 1400;
-const MAX_EMBEDDED_HEIGHT = 1100;
+const MAX_EMBEDDED_HEIGHT = embeddedHeightForWidth(MAX_EMBEDDED_WIDTH);
 const COLLAPSED_EMBEDDED_HEIGHT = 112;
 const VIEWPORT_MARGIN = 8;
 
@@ -164,37 +196,37 @@ const getEffectiveViewport = (viewport) => {
 };
 
 /**
- * Clamps persisted overlay geometry into a usable range and, when a viewport is
- * supplied, guarantees the shell stays reachable inside the visible window.
+ * Clamps persisted overlay geometry into a usable range while keeping the
+ * playfield snapped strictly to the original 4:3 aspect ratio.
  */
-const normalizeEmbeddedBounds = (bounds = {}, viewport = null) => {
+const normalizeEmbeddedBounds = (bounds = {}, viewport = null, chromeHeight = DEFAULT_EMBEDDED_CHROME_HEIGHT) => {
   const vp = getEffectiveViewport(viewport);
   const collapsed = Boolean(bounds?.collapsed);
+  const safeChrome = normalizeChromeHeight(chromeHeight);
 
-  const maxAllowedWidth = vp
-    ? Math.max(200, Math.min(MAX_EMBEDDED_WIDTH, Math.floor(vp.width - (VIEWPORT_MARGIN * 2))))
+  const maxViewportW = vp
+    ? Math.max(200, Math.floor(vp.width - (VIEWPORT_MARGIN * 2)))
     : MAX_EMBEDDED_WIDTH;
+  const maxViewportH = vp
+    ? Math.max(COLLAPSED_EMBEDDED_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2)))
+    : MAX_EMBEDDED_HEIGHT;
+
+  // When expanded, cap width so the 4:3-derived height also fits the viewport.
+  const maxWByHeight = collapsed
+    ? MAX_EMBEDDED_WIDTH
+    : Math.max(200, Math.floor(EMBEDDED_CHROME_WIDTH + (Math.max(0, maxViewportH - safeChrome) * EMBEDDED_ASPECT_RATIO)));
+  const maxAllowedWidth = Math.max(200, Math.min(MAX_EMBEDDED_WIDTH, maxViewportW, maxWByHeight));
   const minAllowedWidth = Math.min(MIN_EMBEDDED_WIDTH, maxAllowedWidth);
 
-  const maxAllowedHeight = vp
-    ? Math.max(COLLAPSED_EMBEDDED_HEIGHT, Math.min(MAX_EMBEDDED_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2))))
-    : MAX_EMBEDDED_HEIGHT;
-  const minAllowedHeight = Math.min(MIN_EMBEDDED_HEIGHT, maxAllowedHeight);
-
   const rawWidth = toFiniteNumber(bounds?.width);
-  const rawHeight = toFiniteNumber(bounds?.height);
   const width = Math.round(clamp(
     Number.isFinite(rawWidth) ? rawWidth : DEFAULT_EMBEDDED_BOUNDS.width,
     minAllowedWidth,
     maxAllowedWidth,
   ));
-  const height = Math.round(clamp(
-    Number.isFinite(rawHeight) ? rawHeight : DEFAULT_EMBEDDED_BOUNDS.height,
-    minAllowedHeight,
-    maxAllowedHeight,
-  ));
+  const height = embeddedHeightForWidth(width, safeChrome);
 
-  const effectiveHeight = collapsed ? Math.min(COLLAPSED_EMBEDDED_HEIGHT, maxAllowedHeight) : height;
+  const effectiveHeight = collapsed ? Math.min(COLLAPSED_EMBEDDED_HEIGHT, maxViewportH) : height;
 
   const rawRight = toFiniteNumber(bounds?.right);
   const rawBottom = toFiniteNumber(bounds?.bottom);
@@ -221,65 +253,73 @@ const normalizeEmbeddedBounds = (bounds = {}, viewport = null) => {
  * Moves the bottom-right anchored shell by `(deltaX, deltaY)` pointer movement,
  * clamped to keep the entire shell inside the viewport.
  */
-const computeDraggedBounds = (startBounds, deltaX, deltaY, viewport) => {
-  const base = normalizeEmbeddedBounds(startBounds, viewport);
+const computeDraggedBounds = (startBounds, deltaX, deltaY, viewport, chromeHeight = DEFAULT_EMBEDDED_CHROME_HEIGHT) => {
+  const base = normalizeEmbeddedBounds(startBounds, viewport, chromeHeight);
   const dx = Number.isFinite(Number(deltaX)) ? Number(deltaX) : 0;
   const dy = Number.isFinite(Number(deltaY)) ? Number(deltaY) : 0;
   return normalizeEmbeddedBounds({
     ...base,
     right: base.right - dx,
     bottom: base.bottom - dy,
-  }, viewport);
+  }, viewport, chromeHeight);
 };
 
 /**
  * Resizes the bottom-right anchored shell from any edge or corner (`n`, `s`,
- * `e`, `w`, `nw`, `ne`, `sw`, `se`) while keeping the opposite edge pinned.
+ * `e`, `w`, `nw`, `ne`, `sw`, `se`) while snapping to the original 4:3
+ * playfield aspect ratio and keeping the opposite edge/corner pinned.
  */
-const computeResizedBounds = (startBounds, edge, deltaX, deltaY, viewport) => {
-  const base = normalizeEmbeddedBounds(startBounds, viewport);
+const computeResizedBounds = (startBounds, edge, deltaX, deltaY, viewport, chromeHeight = DEFAULT_EMBEDDED_CHROME_HEIGHT) => {
+  const safeChrome = normalizeChromeHeight(chromeHeight);
+  const base = normalizeEmbeddedBounds(startBounds, viewport, safeChrome);
   const vp = getEffectiveViewport(viewport);
   const dir = String(edge || '').toLowerCase();
   const dx = Number.isFinite(Number(deltaX)) ? Number(deltaX) : 0;
   const dy = Number.isFinite(Number(deltaY)) ? Number(deltaY) : 0;
 
-  let { width, height, right, bottom } = base;
+  const hasW = dir.includes('w');
+  const hasE = dir.includes('e');
+  const hasN = !base.collapsed && dir.includes('n');
+  const hasS = !base.collapsed && dir.includes('s');
+
+  if (!hasW && !hasE && !hasN && !hasS) {
+    return base;
+  }
 
   const maxViewportW = vp ? Math.max(200, Math.floor(vp.width - (VIEWPORT_MARGIN * 2))) : MAX_EMBEDDED_WIDTH;
   const minW = Math.min(MIN_EMBEDDED_WIDTH, maxViewportW);
 
-  if (dir.includes('w')) {
-    const maxW = vp
-      ? Math.min(MAX_EMBEDDED_WIDTH, Math.max(minW, Math.floor(vp.width - base.right - VIEWPORT_MARGIN)))
-      : MAX_EMBEDDED_WIDTH;
-    width = Math.round(clamp(base.width - dx, minW, maxW));
-  } else if (dir.includes('e')) {
-    const maxW = Math.min(
-      MAX_EMBEDDED_WIDTH,
-      Math.max(minW, Math.floor(base.width + base.right - VIEWPORT_MARGIN)),
-    );
-    width = Math.round(clamp(base.width + dx, minW, maxW));
-    right = Math.round(base.right - (width - base.width));
-  }
+  const maxWByHoriz = hasE
+    ? Math.floor(base.width + base.right - VIEWPORT_MARGIN)
+    : (vp ? Math.floor(vp.width - base.right - VIEWPORT_MARGIN) : MAX_EMBEDDED_WIDTH);
 
+  let maxWByVert = MAX_EMBEDDED_WIDTH;
   if (!base.collapsed) {
-    const maxViewportH = vp ? Math.max(COLLAPSED_EMBEDDED_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2))) : MAX_EMBEDDED_HEIGHT;
-    const minH = Math.min(MIN_EMBEDDED_HEIGHT, maxViewportH);
-
-    if (dir.includes('n')) {
-      const maxH = vp
-        ? Math.min(MAX_EMBEDDED_HEIGHT, Math.max(minH, Math.floor(vp.height - base.bottom - VIEWPORT_MARGIN)))
-        : MAX_EMBEDDED_HEIGHT;
-      height = Math.round(clamp(base.height - dy, minH, maxH));
-    } else if (dir.includes('s')) {
-      const maxH = Math.min(
-        MAX_EMBEDDED_HEIGHT,
-        Math.max(minH, Math.floor(base.height + base.bottom - VIEWPORT_MARGIN)),
-      );
-      height = Math.round(clamp(base.height + dy, minH, maxH));
-      bottom = Math.round(base.bottom - (height - base.height));
-    }
+    const maxHAvail = hasS
+      ? Math.floor(base.height + base.bottom - VIEWPORT_MARGIN)
+      : (vp ? Math.floor(vp.height - base.bottom - VIEWPORT_MARGIN) : MAX_EMBEDDED_HEIGHT);
+    maxWByVert = Math.floor(EMBEDDED_CHROME_WIDTH + (Math.max(0, maxHAvail - safeChrome) * EMBEDDED_ASPECT_RATIO));
   }
+
+  const maxW = Math.max(minW, Math.min(MAX_EMBEDDED_WIDTH, maxWByHoriz, maxWByVert));
+
+  let targetWidth = base.width;
+  if ((hasW || hasE) && (hasN || hasS)) {
+    const signedDx = hasW ? -dx : dx;
+    const signedDy = hasN ? -dy : dy;
+    targetWidth = Math.abs(signedDx) >= Math.abs(signedDy) * EMBEDDED_ASPECT_RATIO
+      ? base.width + signedDx
+      : embeddedWidthForHeight(base.height + signedDy, safeChrome);
+  } else if (hasW || hasE) {
+    targetWidth = base.width + (hasW ? -dx : dx);
+  } else {
+    targetWidth = embeddedWidthForHeight(base.height + (hasN ? -dy : dy), safeChrome);
+  }
+
+  const width = Math.round(clamp(targetWidth, minW, maxW));
+  const height = embeddedHeightForWidth(width, safeChrome);
+  const right = hasE ? Math.round(base.right - (width - base.width)) : base.right;
+  const bottom = hasS ? Math.round(base.bottom - (height - base.height)) : base.bottom;
 
   return normalizeEmbeddedBounds({
     width,
@@ -287,7 +327,7 @@ const computeResizedBounds = (startBounds, edge, deltaX, deltaY, viewport) => {
     right,
     bottom,
     collapsed: base.collapsed,
-  }, viewport);
+  }, viewport, safeChrome);
 };
 
 /**
@@ -372,6 +412,9 @@ export {
   EMBEDDED_MESSAGE_CHANNEL,
   OSU_ORIGIN,
   DEFAULT_EMBEDDED_BOUNDS,
+  EMBEDDED_ASPECT_RATIO,
+  EMBEDDED_CHROME_WIDTH,
+  DEFAULT_EMBEDDED_CHROME_HEIGHT,
   MIN_EMBEDDED_WIDTH,
   MIN_EMBEDDED_HEIGHT,
   MAX_EMBEDDED_WIDTH,
@@ -381,6 +424,8 @@ export {
   isOsuWebsiteUrl,
   readEmbeddedParams,
   buildEmbeddedPageUrl,
+  embeddedHeightForWidth,
+  embeddedWidthForHeight,
   normalizeEmbeddedBounds,
   computeDraggedBounds,
   computeResizedBounds,

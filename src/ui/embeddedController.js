@@ -46,6 +46,7 @@ const createEmbeddedController = ({
   let latestTabUrl = '';
   let snapshotTimer = null;
   let bridgeStarted = false;
+  let lastReportedInnerChromeHeight = null;
 
   const updateEmbedButtonState = () => {
     if (!embedButton) {
@@ -161,6 +162,18 @@ const createEmbeddedController = ({
       return false;
     }
     return postToHost({ type: 'requestExpand' });
+  };
+
+  const reportChromeMetrics = (innerChromeHeight) => {
+    if (!isEmbedded || state.embeddedCollapsed) {
+      return false;
+    }
+    const rounded = Math.ceil(Number(innerChromeHeight));
+    if (!Number.isFinite(rounded) || rounded <= 0 || rounded === lastReportedInnerChromeHeight) {
+      return false;
+    }
+    lastReportedInnerChromeHeight = rounded;
+    return postToHost({ type: 'chromeMetrics', innerChromeHeight: rounded });
   };
 
   const openEmbeddedPlayer = async () => {
@@ -432,6 +445,7 @@ const createEmbeddedController = ({
     publishResumeSnapshot,
     requestCloseEmbedded,
     requestExpandEmbedded,
+    reportChromeMetrics,
   };
 };
 

@@ -30,18 +30,34 @@
   const RESUME_FUTURE_SKEW_MS = 5 * 1000;
   const MAX_RESUME_TIME_MS = 24 * 60 * 60 * 1000;
 
+  const ASPECT_RATIO = 4 / 3;
+  const CHROME_WIDTH = 26;
+  const OUTER_BAR_AND_BORDER_HEIGHT = 30; // 28px bar + 2px shell border
+  const DEFAULT_CHROME_HEIGHT = 132;
+  const MIN_CHROME_HEIGHT = 80;
+  const MAX_CHROME_HEIGHT = 240;
+
+  let chromeHeight = DEFAULT_CHROME_HEIGHT;
+
+  const heightForWidth = (width, ch = chromeHeight) => (
+    Math.round(ch + (Math.max(0, width - CHROME_WIDTH) / ASPECT_RATIO))
+  );
+
+  const widthForHeight = (height, ch = chromeHeight) => (
+    Math.round(CHROME_WIDTH + (Math.max(0, height - ch) * ASPECT_RATIO))
+  );
+
+  const DEFAULT_WIDTH = 440;
   const DEFAULT_BOUNDS = Object.freeze({
-    width: 456,
-    height: 432,
+    width: DEFAULT_WIDTH,
+    height: heightForWidth(DEFAULT_WIDTH, DEFAULT_CHROME_HEIGHT),
     right: 20,
     bottom: 72,
     collapsed: false,
   });
 
   const MIN_WIDTH = 340;
-  const MIN_HEIGHT = 280;
   const MAX_WIDTH = 1400;
-  const MAX_HEIGHT = 1100;
   const COLLAPSED_HEIGHT = 112;
   const VIEWPORT_MARGIN = 8;
 
@@ -137,23 +153,22 @@
   const normalizeBounds = (raw = {}) => {
     const vp = getViewport();
     const collapsed = Boolean(raw?.collapsed);
-    const maxW = Math.max(200, Math.min(MAX_WIDTH, Math.floor(vp.width - (VIEWPORT_MARGIN * 2))));
+    const maxViewportW = Math.max(200, Math.floor(vp.width - (VIEWPORT_MARGIN * 2)));
+    const maxViewportH = Math.max(COLLAPSED_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2)));
+    const maxWByHeight = collapsed
+      ? MAX_WIDTH
+      : Math.max(200, Math.floor(CHROME_WIDTH + (Math.max(0, maxViewportH - chromeHeight) * ASPECT_RATIO)));
+    const maxW = Math.max(200, Math.min(MAX_WIDTH, maxViewportW, maxWByHeight));
     const minW = Math.min(MIN_WIDTH, maxW);
-    const maxH = Math.max(COLLAPSED_HEIGHT, Math.min(MAX_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2))));
-    const minH = Math.min(MIN_HEIGHT, maxH);
 
     const width = Math.round(clamp(
       Number.isFinite(Number(raw?.width)) ? Number(raw.width) : DEFAULT_BOUNDS.width,
       minW,
       maxW,
     ));
-    const height = Math.round(clamp(
-      Number.isFinite(Number(raw?.height)) ? Number(raw.height) : DEFAULT_BOUNDS.height,
-      minH,
-      maxH,
-    ));
+    const height = heightForWidth(width);
 
-    const effectiveHeight = collapsed ? Math.min(COLLAPSED_HEIGHT, maxH) : height;
+    const effectiveHeight = collapsed ? Math.min(COLLAPSED_HEIGHT, maxViewportH) : height;
     const maxRight = Math.max(VIEWPORT_MARGIN, Math.floor(vp.width - width - VIEWPORT_MARGIN));
     const maxBottom = Math.max(VIEWPORT_MARGIN, Math.floor(vp.height - effectiveHeight - VIEWPORT_MARGIN));
 
@@ -626,31 +641,48 @@
       const base = resizeState.startBounds;
       const vp = getViewport();
 
-      let { width, height, right, bottom } = base;
+      const hasW = edge.includes('w');
+      const hasE = edge.includes('e');
+      const hasN = !base.collapsed && edge.includes('n');
+      const hasS = !base.collapsed && edge.includes('s');
+      if (!hasW && !hasE && !hasN && !hasS) {
+        return;
+      }
+
       const maxViewportW = Math.max(200, Math.floor(vp.width - (VIEWPORT_MARGIN * 2)));
       const minW = Math.min(MIN_WIDTH, maxViewportW);
 
-      if (edge.includes('w')) {
-        const maxW = Math.min(MAX_WIDTH, Math.max(minW, Math.floor(vp.width - base.right - VIEWPORT_MARGIN)));
-        width = Math.round(clamp(base.width - dx, minW, maxW));
-      } else if (edge.includes('e')) {
-        const maxW = Math.min(MAX_WIDTH, Math.max(minW, Math.floor(base.width + base.right - VIEWPORT_MARGIN)));
-        width = Math.round(clamp(base.width + dx, minW, maxW));
-        right = Math.round(base.right - (width - base.width));
+      const maxWByHoriz = hasE
+        ? Math.floor(base.width + base.right - VIEWPORT_MARGIN)
+        : Math.floor(vp.width - base.right - VIEWPORT_MARGIN);
+
+      let maxWByVert = MAX_WIDTH;
+      if (!base.collapsed) {
+        const maxHAvail = hasS
+          ? Math.floor(base.height + base.bottom - VIEWPORT_MARGIN)
+          : Math.floor(vp.height - base.bottom - VIEWPORT_MARGIN);
+        maxWByVert = Math.floor(CHROME_WIDTH + (Math.max(0, maxHAvail - chromeHeight) * ASPECT_RATIO));
       }
 
-      if (!base.collapsed) {
-        const maxViewportH = Math.max(COLLAPSED_HEIGHT, Math.floor(vp.height - (VIEWPORT_MARGIN * 2)));
-        const minH = Math.min(MIN_HEIGHT, maxViewportH);
-        if (edge.includes('n')) {
-          const maxH = Math.min(MAX_HEIGHT, Math.max(minH, Math.floor(vp.height - base.bottom - VIEWPORT_MARGIN)));
-          height = Math.round(clamp(base.height - dy, minH, maxH));
-        } else if (edge.includes('s')) {
-          const maxH = Math.min(MAX_HEIGHT, Math.max(minH, Math.floor(base.height + base.bottom - VIEWPORT_MARGIN)));
-          height = Math.round(clamp(base.height + dy, minH, maxH));
-          bottom = Math.round(base.bottom - (height - base.height));
-        }
+      const maxW = Math.max(minW, Math.min(MAX_WIDTH, maxWByHoriz, maxWByVert));
+
+      let targetWidth = base.width;
+      if ((hasW || hasE) && (hasN || hasS)) {
+        const signedDx = hasW ? -dx : dx;
+        const signedDy = hasN ? -dy : dy;
+        targetWidth = Math.abs(signedDx) >= Math.abs(signedDy) * ASPECT_RATIO
+          ? base.width + signedDx
+          : widthForHeight(base.height + signedDy);
+      } else if (hasW || hasE) {
+        targetWidth = base.width + (hasW ? -dx : dx);
+      } else {
+        targetWidth = widthForHeight(base.height + (hasN ? -dy : dy));
       }
+
+      const width = Math.round(clamp(targetWidth, minW, maxW));
+      const height = heightForWidth(width);
+      const right = hasE ? Math.round(base.right - (width - base.width)) : base.right;
+      const bottom = hasS ? Math.round(base.bottom - (height - base.height)) : base.bottom;
 
       currentBounds = normalizeBounds({
         width,
@@ -851,6 +883,22 @@
 
     if (data.type === 'requestExpand') {
       setCollapsed(false);
+      return;
+    }
+
+    if (data.type === 'chromeMetrics') {
+      const innerHeight = Number(data.innerChromeHeight);
+      if (Number.isFinite(innerHeight) && innerHeight > 0) {
+        const nextChrome = Math.round(clamp(
+          innerHeight + OUTER_BAR_AND_BORDER_HEIGHT,
+          MIN_CHROME_HEIGHT,
+          MAX_CHROME_HEIGHT,
+        ));
+        if (nextChrome !== chromeHeight) {
+          chromeHeight = nextChrome;
+          applyShellBounds();
+        }
+      }
       return;
     }
 

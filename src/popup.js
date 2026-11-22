@@ -892,6 +892,7 @@ const {
   publishResumeSnapshot,
   requestCloseEmbedded,
   requestExpandEmbedded,
+  reportChromeMetrics,
 } = createEmbeddedController({
   state,
   registry,
@@ -903,11 +904,37 @@ const {
   closeDetachedWindowIfOpen,
   onCollapsedChange: (collapsed) => {
     document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
-    if (!collapsed && !state.isPlaying && state.mapData) {
-      renderFrame();
+    if (!collapsed) {
+      syncEmbeddedChromeMetrics();
+      if (!state.isPlaying && state.mapData) {
+        renderFrame();
+      }
     }
   },
 });
+
+const syncEmbeddedChromeMetrics = () => {
+  if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || !popup || !canvasWrap) {
+    return;
+  }
+  const header = popup.querySelector('.map-preview-header');
+  const controls = popup.querySelector('.map-preview-controls');
+  if (!header || !controls) {
+    return;
+  }
+  const popupStyle = getComputedStyle(popup);
+  const headerStyle = getComputedStyle(header);
+  const wrapStyle = getComputedStyle(canvasWrap);
+  const innerChrome = (Number.parseFloat(popupStyle.paddingTop) || 0)
+    + (Number.parseFloat(popupStyle.paddingBottom) || 0)
+    + header.getBoundingClientRect().height
+    + (Number.parseFloat(headerStyle.marginBottom) || 0)
+    + (Number.parseFloat(wrapStyle.marginBottom) || 0)
+    + controls.getBoundingClientRect().height;
+  if (Number.isFinite(innerChrome) && innerChrome > 0) {
+    reportChromeMetrics(innerChrome);
+  }
+};
 
 const readProviderOverrideSetting = async () => {
   try {
@@ -2296,6 +2323,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
       creator: metadata.creator,
     });
     renderFrame();
+    syncEmbeddedChromeMetrics();
     setPreviewLoading(false);
 
     setPlaybackSpeedControlEnabled(true);
@@ -2378,6 +2406,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
     setTimelineState({ currentTimeMs: 0, durationMs: 1 });
     syncTimeLabelWidth();
     renderFrame();
+    syncEmbeddedChromeMetrics();
     setPreviewLoading(false);
   }
 };

@@ -296,11 +296,17 @@ html.is-embedded-player .map-preview-popup {
     transform: none;
 }
 
-html.is-detached-window .map-preview-canvas-wrap,
-html.is-embedded-player .map-preview-canvas-wrap {
+html.is-detached-window .map-preview-canvas-wrap {
     flex: 1 1 auto;
     aspect-ratio: auto;
     min-height: 0;
+}
+
+/* The embedded miniplayer snaps its outer shell to the original 4:3 playfield
+   proportions, so the playfield keeps its exact 4:3 aspect ratio. */
+html.is-embedded-player .map-preview-canvas-wrap {
+    flex: 0 0 auto;
+    aspect-ratio: 4 / 3;
 }
 
 /* Detaching from a detached window would just spawn a duplicate. */

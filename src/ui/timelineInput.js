@@ -395,6 +395,16 @@ const bindTimelineInput = ({ canvas, tooltip, state, renderer, seekTo }) => {
       getTimeline()?.resetZoom();
       requestFrame();
     },
+    // Forgets the pointer, as leaving the canvas does, for when the timeline
+    // moves out from under it without a pointerleave (the in-page
+    // miniplayer switching layout). A drag in progress keeps it.
+    clearHover: () => {
+      if (drag) {
+        return;
+      }
+      clearHover();
+      requestFrame();
+    },
     dispose: () => {
       cancelFrame();
       window.removeEventListener('blur', clearHover);

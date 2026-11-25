@@ -232,7 +232,9 @@ const requestBeatmapForLoad = ({ sourceUrlOverride = '', isStaleLoad = () => fal
       // them keeps both entry points on the same validation path.
       sourceUrl = buildBeatmapSourceUrl(detachedParams);
     } else if (embeddedParams.isEmbedded) {
-      sourceUrl = buildBeatmapSourceUrl(embeddedParams);
+      sourceUrl = embeddedParams.beatmapId
+        ? buildBeatmapSourceUrl(embeddedParams)
+        : embeddedParams.sourceUrl;
     } else {
       activeTab = await queryActiveTab().catch(() => null);
       // Chrome withholds the URL of tabs it will not let an extension read --

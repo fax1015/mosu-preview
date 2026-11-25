@@ -66,9 +66,8 @@
     {
       "resources": [
         "popup.html",
-        "popup.css",
-        "src/*",
-        "assets/fonts/*"
+        "assets/fonts/Torus-SemiBold.otf",
+        "assets/fonts/Torus-Bold.otf"
       ],
       "matches": [
         "https://osu.ppy.sh/*"
@@ -94,6 +93,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; base-uri 'none'; form-action 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src 'self' https://osu.ppy.sh https://catboy.best https://osu.direct https://storage.osu.direct https://api.nerinyan.moe https://dl.nerinyan.moe https://txy1.sayobot.cn https://tc1.sayobot.cn:25225; font-src 'self';"
+    "extension_pages": "default-src 'self'; base-uri 'none'; form-action 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://assets.ppy.sh; media-src 'self' blob: https://b.ppy.sh; connect-src 'self' https://osu.ppy.sh https://b.ppy.sh https://catboy.best https://osu.direct https://storage.osu.direct https://api.nerinyan.moe https://dl.nerinyan.moe https://txy1.sayobot.cn https://tc1.sayobot.cn:25225; font-src 'self';"
   }
 }

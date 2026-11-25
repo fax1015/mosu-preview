@@ -27,6 +27,10 @@ import {
   normalizeManiaKeyCount,
   normalizePreviewSettings,
   toPreviewSettingsStorage,
+  DEFAULT_MINI_HITSOUNDS_WHEN_COLLAPSED,
+  MINI_HITSOUNDS_WHEN_COLLAPSED_KEY,
+  normalizeMiniHitsoundsWhenCollapsed,
+  shouldPlayHitsounds,
 } from '../src/settings.js';
 
 test('disabled providers never alias the shared default array', () => {
@@ -75,6 +79,37 @@ test('a stored hitsound preference survives a read', () => {
 
   assert.equal(readBack.hitsounds, true);
   assert.equal(readBack.hitsoundVolume, 0.25);
+});
+
+test('hitsounds in the collapsed miniplayer bar: on by default, stored, and obeyed', () => {
+  assert.equal(DEFAULT_MINI_HITSOUNDS_WHEN_COLLAPSED, true);
+  assert.ok(PREVIEW_SETTING_KEYS.includes(MINI_HITSOUNDS_WHEN_COLLAPSED_KEY));
+  assert.equal(normalizePreviewSettings().miniHitsoundsWhenCollapsed, true);
+  assert.equal(normalizeMiniHitsoundsWhenCollapsed('false'), false);
+  assert.equal(normalizeMiniHitsoundsWhenCollapsed(undefined), true);
+
+  const stored = toPreviewSettingsStorage({ miniHitsoundsWhenCollapsed: false });
+  assert.equal(stored[MINI_HITSOUNDS_WHEN_COLLAPSED_KEY], false);
+  assert.equal(normalizePreviewSettings(stored).miniHitsoundsWhenCollapsed, false);
+  const changed = applyPreviewSettingChanges(
+    normalizePreviewSettings(),
+    { [MINI_HITSOUNDS_WHEN_COLLAPSED_KEY]: { oldValue: true, newValue: false } },
+  );
+  assert.equal(changed.miniHitsoundsWhenCollapsed, false);
+
+  const play = (overrides) => shouldPlayHitsounds({
+    hitsounds: true, isEmbedded: true, collapsed: true, whenCollapsed: false, ...overrides,
+  });
+  assert.equal(play({}), false, 'the collapsed bar stays quiet when the setting is off');
+  assert.equal(play({ whenCollapsed: true }), true);
+  assert.equal(play({ collapsed: false }), true, 'expanded, it plays as usual');
+  assert.equal(play({ isEmbedded: false }), true, 'the toolbar popup has no collapsed bar');
+  assert.equal(play({ hitsounds: false, whenCollapsed: true }), false, 'hitsounds off is off everywhere');
+
+  const html = readFileSync(new URL('../options.html', import.meta.url), 'utf8');
+  assert.match(html, /id="miniHitsoundsWhenCollapsed"/);
+  const optionsSource = readFileSync(new URL('../src/options.js', import.meta.url), 'utf8');
+  assert.match(optionsSource, /miniHitsoundsWhenCollapsed: miniHitsoundsWhenCollapsedToggle\?\.checked/);
 });
 
 test('a storage change only moves the settings it names', () => {

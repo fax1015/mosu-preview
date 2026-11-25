@@ -319,6 +319,10 @@ export const addTabsUpdatedListener = (listener) => {
   extensionApi?.tabs?.onUpdated?.addListener?.(listener);
 };
 
+export const removeTabsUpdatedListener = (listener) => {
+  extensionApi?.tabs?.onUpdated?.removeListener?.(listener);
+};
+
 export const addTabsActivatedListener = (listener) => {
   extensionApi?.tabs?.onActivated?.addListener?.(listener);
 };
@@ -333,6 +337,10 @@ export const addStorageChangedListener = (listener) => {
 
 export const addRuntimeMessageListener = (listener) => {
   extensionApi?.runtime?.onMessage?.addListener?.(listener);
+};
+
+export const removeRuntimeMessageListener = (listener) => {
+  extensionApi?.runtime?.onMessage?.removeListener?.(listener);
 };
 
 export const sendRuntimeMessage = async (message) => {

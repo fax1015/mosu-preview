@@ -10,20 +10,27 @@
 //   expand when needed.
 
 import {
+  addRuntimeMessageListener,
   addTabsUpdatedListener,
   executeContentScript,
   getCurrentTab,
   queryTabs,
+  removeRuntimeMessageListener,
+  removeTabsUpdatedListener,
   sendTabMessage,
 } from '../webextension.js';
 import {
+  EMBEDDED_HOST_TOKEN_MESSAGE,
   EMBEDDED_MESSAGE_CHANNEL,
   OSU_ORIGIN,
   isOsuWebsiteUrl,
+  normalizeHostToken,
+  normalizeMountId,
   serializeResumeSnapshot,
 } from '../core/embeddedPlayer.js';
 import { extractBeatmapInfoFromUrl } from '../core/beatmapUrl.js';
 import { isSameFollowTarget, toFollowTarget } from '../core/tabFollow.js';
+import { formatRgb, formatRgba } from '../core/coverPalette.js';
 
 const FOLLOW_SYNC_DEBOUNCE_MS = 250;
 const SNAPSHOT_INTERVAL_MS = 2000;
@@ -32,13 +39,16 @@ const createEmbeddedController = ({
   state,
   registry,
   isEmbedded = false,
-  elements: { embedButton, followButton },
+  // The `mount` id in this iframe's URL: which shell's secret to take.
+  hostMountId = '',
+  elements: { embedButton, unsupportedEmbedButton, followButton },
   addDebugLog,
   showPopupToast,
   loadPreview,
   closeDetachedWindowIfOpen,
   flushPendingCacheWrite,
   onCollapsedChange,
+  onHostClosing,
 }) => {
   let embedInFlight = false;
   let pendingClosePromise = null;
@@ -47,19 +57,27 @@ const createEmbeddedController = ({
   let latestTabUrl = '';
   let snapshotTimer = null;
   let bridgeStarted = false;
+  // Bumped each time the bridge stops, so work started before then lets go.
+  let bridgeGeneration = 0;
   let lastReportedInnerChromeHeight = null;
+  const ownMountId = normalizeMountId(hostMountId);
+  // The secret the shell around this iframe handed over by extension
+  // messaging. The osu! page shares the shell's origin and can post to this
+  // window too, so a message from the shell counts only if it carries this.
+  let hostToken = '';
 
   const updateEmbedButtonState = () => {
-    if (!embedButton) {
-      return;
-    }
     const canEmbed = Boolean(
       !isEmbedded
       && state.embeddedPlayer
-      && state.detachContext?.beatmapId
       && isOsuWebsiteUrl(state.embedContext?.tabUrl || ''),
     );
-    embedButton.disabled = !canEmbed;
+    if (embedButton) {
+      embedButton.disabled = !canEmbed;
+    }
+    if (unsupportedEmbedButton) {
+      unsupportedEmbedButton.disabled = !canEmbed;
+    }
   };
 
   const setEmbedContext = ({ tabId = null, tabUrl = '' } = {}) => {
@@ -156,6 +174,25 @@ const createEmbeddedController = ({
     return postToHost({ type: 'playbackSnapshot', snapshot });
   };
 
+  /**
+   * Hands the shell around the iframe the cover-art colours its own bar is
+   * drawn in while collapsed (src/ui/miniTheme.js), so the top row it draws
+   * over this page matches the page under it.
+   */
+  const publishMiniPalette = (palette) => {
+    if (!palette?.surface || !palette.onSurfaceVariant || !palette.onSurface) {
+      return false;
+    }
+    return postToHost({
+      type: 'miniPalette',
+      palette: {
+        surface: formatRgb(palette.surface),
+        chromeForeground: formatRgb(palette.onSurfaceVariant),
+        chromeButton: formatRgba(palette.onSurface, 0.07),
+      },
+    });
+  };
+
   const requestCloseEmbedded = () => postToHost({ type: 'requestClose' });
 
   const requestExpandEmbedded = () => {
@@ -182,10 +219,6 @@ const createEmbeddedController = ({
       return false;
     }
     const beatmapId = state.detachContext?.beatmapId || '';
-    if (!beatmapId) {
-      showPopupToast('No beatmap to pin yet');
-      return false;
-    }
 
     embedInFlight = true;
     try {
@@ -243,30 +276,39 @@ const createEmbeddedController = ({
       const payload = {
         type: 'mosuEmbeddedOpen',
         beatmapId,
+        sourceUrl: beatmapId ? '' : targetTabUrl,
         setId: state.detachContext?.setId || '',
         mode: state.detachContext?.mode ?? null,
         resumeTimeMs: hasLivePlaybackState ? Math.round(state.currentTimeMs) : -1,
         resumePaused: hasLivePlaybackState ? !state.isPlaying : false,
       };
 
+      // Whether a content script answered at all, and what it said. One that
+      // answers { ok: false } is there and turned the mount down (a close
+      // overtook it), which injecting it again would not change.
       const sendOpen = async () => {
-        const response = await sendTabMessage(targetTabId, payload);
-        if (!response?.ok) {
-          throw new Error(response?.error || 'Could not mount embedded player.');
+        try {
+          const response = await sendTabMessage(targetTabId, payload);
+          return response && typeof response === 'object'
+            ? { reached: true, response }
+            : { reached: false, error: new Error('No content script answered.') };
+        } catch (error) {
+          return { reached: false, error };
         }
-        return response;
       };
 
       try {
-        try {
-          await sendOpen();
-        } catch (firstError) {
+        let result = await sendOpen();
+        if (!result.reached) {
           // Static content scripts are skipped on already-open tabs after an
           // install/reload and in Firefox MV3 when host permissions have not
           // been permanently granted. Inject on demand via activeTab + scripting.
-          addDebugLog(`embed: initial message failed (${firstError?.message || firstError}); injecting content script`);
+          addDebugLog(`embed: initial message failed (${result.error?.message || result.error}); injecting content script`);
           await executeContentScript(targetTabId, ['src/content.js']);
-          await sendOpen();
+          result = await sendOpen();
+        }
+        if (!result.reached || !result.response.ok) {
+          throw result.error || new Error(result.response?.error || 'Could not mount embedded player.');
         }
       } catch (error) {
         addDebugLog(`embed: could not mount on osu! tab (${error?.message || error})`);
@@ -286,7 +328,8 @@ const createEmbeddedController = ({
 
     if (followButton) {
       followButton.classList.toggle('is-following', state.followEnabled);
-      followButton.setAttribute('aria-pressed', state.followEnabled ? 'true' : 'false');
+      // Pressed means pinned: that is the state the button shows as on.
+      followButton.setAttribute('aria-pressed', state.followEnabled ? 'false' : 'true');
       const label = state.followEnabled
         ? 'Following this osu! tab — click to pin this map'
         : 'Pinned to this map — click to follow this osu! tab';
@@ -363,14 +406,14 @@ const createEmbeddedController = ({
     if (!isEmbedded) {
       return;
     }
-    if (event.origin !== OSU_ORIGIN) {
-      return;
-    }
-    if (globalThis.parent && event.source && event.source !== globalThis.parent) {
+    if (event.origin !== OSU_ORIGIN || !globalThis.parent || event.source !== globalThis.parent) {
       return;
     }
     const data = event.data;
     if (!data || typeof data !== 'object' || data.channel !== EMBEDDED_MESSAGE_CHANNEL) {
+      return;
+    }
+    if (!hostToken || data.token !== hostToken) {
       return;
     }
 
@@ -381,6 +424,13 @@ const createEmbeddedController = ({
 
     if (data.type === 'collapsedChanged') {
       applyCollapsedState(Boolean(data.collapsed));
+      return;
+    }
+
+    // The shell is fading out and will remove this page once it has: stop
+    // now, so nothing plays on under a window that is already going.
+    if (data.type === 'closing') {
+      onHostClosing?.();
       return;
     }
 
@@ -399,42 +449,65 @@ const createEmbeddedController = ({
     }
   };
 
+  // The shell's content script handing over its secret, keyed by the mount id
+  // in this iframe's URL; every other tab's shell has its own. Only extension
+  // contexts can send runtime messages, and the page cannot see them.
+  const handleHostTokenMessage = (message, sender, sendResponse) => {
+    if (message?.type !== EMBEDDED_HOST_TOKEN_MESSAGE || !ownMountId || message.mount !== ownMountId) {
+      return false;
+    }
+    const token = normalizeHostToken(message.token);
+    if (!token || !isOsuWebsiteUrl(sender?.url || '')) {
+      return false;
+    }
+    hostToken = token;
+    sendResponse?.({ ok: true });
+    return false;
+  };
+
+  const handleTabUpdated = (tabId, changeInfo) => {
+    if (ownTabId === null || tabId !== ownTabId) {
+      return;
+    }
+    if (changeInfo?.url) {
+      scheduleEmbeddedFollowSync(changeInfo.url);
+    }
+  };
+
   const startEmbeddedBridge = ({ initialFollowEnabled = true } = {}) => {
     if (!isEmbedded || bridgeStarted) {
       return;
     }
     bridgeStarted = true;
+    const generation = bridgeGeneration;
 
     if (!hasUserToggledFollow) {
       setEmbeddedFollowEnabled(initialFollowEnabled);
     }
 
     globalThis.window?.addEventListener?.('message', handleHostMessage);
+    // Listening before saying ready: the shell hands its secret over on hearing it.
+    addRuntimeMessageListener(handleHostTokenMessage);
 
     // Fallback for in-page React `history.pushState` transitions that do not
     // fire `turbo:load` or `hashchange`: scoped strictly to our hosting tab.
     void (async () => {
+      let currentTab = null;
       try {
-        const currentTab = await getCurrentTab();
-        if (Number.isInteger(currentTab?.id)) {
-          ownTabId = currentTab.id;
-          if (currentTab.url) {
-            latestTabUrl = currentTab.url;
-          }
-        }
+        currentTab = await getCurrentTab();
       } catch {
-        ownTabId = null;
+        currentTab = null;
+      }
+      if (!bridgeStarted || generation !== bridgeGeneration) {
+        return;
+      }
+      ownTabId = Number.isInteger(currentTab?.id) ? currentTab.id : null;
+      if (ownTabId !== null && currentTab.url) {
+        latestTabUrl = currentTab.url;
       }
     })();
 
-    addTabsUpdatedListener((tabId, changeInfo) => {
-      if (ownTabId === null || tabId !== ownTabId) {
-        return;
-      }
-      if (changeInfo?.url) {
-        scheduleEmbeddedFollowSync(changeInfo.url);
-      }
-    });
+    addTabsUpdatedListener(handleTabUpdated);
 
     snapshotTimer = registry.addInterval(setInterval(() => {
       if (state.isPlaying) {
@@ -455,7 +528,12 @@ const createEmbeddedController = ({
     publishResumeSnapshot();
     snapshotTimer = registry.clearInterval(snapshotTimer);
     globalThis.window?.removeEventListener?.('message', handleHostMessage);
+    removeRuntimeMessageListener(handleHostTokenMessage);
+    removeTabsUpdatedListener(handleTabUpdated);
+    bridgeGeneration += 1;
     bridgeStarted = false;
+    hostToken = '';
+    ownTabId = null;
   };
 
   return {
@@ -468,6 +546,7 @@ const createEmbeddedController = ({
     startEmbeddedBridge,
     disposeEmbeddedBridge,
     publishResumeSnapshot,
+    publishMiniPalette,
     requestCloseEmbedded,
     requestExpandEmbedded,
     reportChromeMetrics,

@@ -15,28 +15,32 @@
   <!-- Opens (is-open) only once src/popup.js knows whether this tab gets the
        preview or the unsupported view, so neither is shown and then swapped. -->
   <div class="map-preview-popup" id="mapPreviewPopup">
+    <!-- The collapsed miniplayer's own pieces (see "Collapsed in-page
+         miniplayer" in popup.css): the cover's colours bleeding in from the
+         left, the cover itself, and the play button. Hidden everywhere else. -->
     <div class="map-preview-mini-backdrop" aria-hidden="true">
       <div class="map-preview-mini-art-bleed"></div>
+      <div class="map-preview-mini-art-far"></div>
       <div class="map-preview-mini-deck-scrim"></div>
     </div>
-    <div class="map-preview-mini-art" id="mapPreviewMiniArt">
-      <div class="map-preview-mini-art-sharp" aria-hidden="true"></div>
-      <div class="map-preview-mini-art-blur-mid" aria-hidden="true"></div>
-      <div class="map-preview-mini-art-blur-far" aria-hidden="true"></div>
-      <div class="map-preview-mini-art-vignette" aria-hidden="true"></div>
-      <svg class="map-preview-mini-art-fallback" viewBox="0 0 512 512" aria-hidden="true">
-        <path d="M499.1 6.3c8.1 6 12.9 15.6 12.9 25.7l0 72 0 264c0 44.2-43 80-96 80s-96-35.8-96-80s43-80 96-80c11.2 0 22 1.6 32 4.6L448 147 192 223.8 192 432c0 44.2-43 80-96 80s-96-35.8-96-80s43-80 96-80c11.2 0 22 1.6 32 4.6L128 200l0-72c0-14.1 9.3-26.6 22.8-30.7l320-96c9.7-2.9 20.2-1.1 28.3 5z" />
-      </svg>
-      <button type="button" class="map-preview-mini-play-btn" id="mapPreviewMiniPlayBtn"
-        aria-pressed="false" title="Play (Space)" aria-label="Play">
-        <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--play" viewBox="0 0 384 512" aria-hidden="true">
-          <path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80L0 432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z" />
+    <div class="map-preview-mini-art" id="mapPreviewMiniArt" aria-hidden="true">
+      <div class="map-preview-mini-art-halo"></div>
+      <div class="map-preview-mini-art-tile">
+        <img class="map-preview-mini-art-image" id="mapPreviewMiniArtImage" alt="" />
+        <svg class="map-preview-mini-art-fallback" viewBox="0 0 512 512">
+          <path d="M499.1 6.3c8.1 6 12.9 15.6 12.9 25.7l0 72 0 264c0 44.2-43 80-96 80s-96-35.8-96-80s43-80 96-80c11.2 0 22 1.6 32 4.6L448 147 192 223.8 192 432c0 44.2-43 80-96 80s-96-35.8-96-80s43-80 96-80c11.2 0 22 1.6 32 4.6L128 200l0-72c0-14.1 9.3-26.6 22.8-30.7l320-96c9.7-2.9 20.2-1.1 28.3 5z" />
         </svg>
-        <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--pause" viewBox="0 0 320 512" aria-hidden="true">
-          <path d="M48 64C21.5 64 0 85.5 0 112L0 400c0 26.5 21.5 48 48 48l32 0c26.5 0 48-21.5 48-48l0-288c0-26.5-21.5-48-48-48L48 64zm192 0c-26.5 0-48 21.5-48 48l0 288c0 26.5 21.5 48 48 48l32 0c26.5 0 48-21.5 48-48l0-288c0-26.5-21.5-48-48-48l-32 0z" />
-        </svg>
-      </button>
+      </div>
     </div>
+    <button type="button" class="map-preview-mini-play-btn" id="mapPreviewMiniPlayBtn"
+      aria-pressed="false" title="Play (Space)" aria-label="Play">
+      <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--play" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8 5.14v13.72a1 1 0 0 0 1.52.85l10.9-6.86a1 1 0 0 0 0-1.7L9.52 4.29A1 1 0 0 0 8 5.14z" />
+      </svg>
+      <svg class="map-preview-mini-play-icon map-preview-mini-play-icon--pause" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M7 5h3a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm7 0h3a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" />
+      </svg>
+    </button>
     <div class="map-preview-header">
       <!-- The song's title gets a line to itself; artist and difficulty share the
            one under it, which is hidden while there is no map. -->
@@ -49,7 +53,7 @@
       </div>
       <div class="map-preview-header-actions">
         <button type="button" class="map-preview-info-btn map-preview-follow-btn is-following" id="mapPreviewFollowBtn"
-          aria-pressed="true" title="Following the browser — click to pin this map"
+          aria-pressed="false" title="Following the browser — click to pin this map"
           aria-label="Following the browser — click to pin this map">
           <svg class="map-preview-follow-icon map-preview-follow-icon--on" viewBox="0 0 576 512" width="12" height="12"
             fill="currentColor" aria-hidden="true">
@@ -98,9 +102,13 @@
         <button type="button" class="map-preview-info-btn js-map-preview-info-btn" id="mapPreviewHeaderInfoBtn"
           aria-haspopup="dialog" aria-expanded="false" aria-controls="mapPreviewInfoModal" title="Menu"
           aria-label="Open options menu">
-          <svg viewBox="0 0 448 512" width="12" height="12" fill="currentColor" aria-hidden="true">
-            <path
-              d="M0 96C0 78.3 14.3 64 32 64l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 128C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 288c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32L32 448c-17.7 0-32-14.3-32-32s14.3-32 32-32l384 0c17.7 0 32 14.3 32 32z" />
+          <!-- Three bars, each its own shape, so the collapsed miniplayer can
+               shrink them into the dots of a "more" button. -->
+          <svg class="map-preview-menu-icon" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"
+            aria-hidden="true">
+            <rect class="map-preview-menu-icon-bar" x="1" y="2" width="14" height="2.4" rx="1.2" />
+            <rect class="map-preview-menu-icon-bar" x="1" y="6.8" width="14" height="2.4" rx="1.2" />
+            <rect class="map-preview-menu-icon-bar" x="1" y="11.6" width="14" height="2.4" rx="1.2" />
           </svg>
         </button>
       </div>
@@ -174,6 +182,13 @@
            timestamp, which nothing said when it was a bare span. -->
       <button type="button" class="map-preview-time-label" id="mapPreviewTimeLabel"
         title="Copy timestamp (C)" aria-label="Copy the current timestamp">0:00 / 0:00</button>
+      <!-- The collapsed miniplayer's readout: time played under the start of
+           the timeline, the length under its end. The button above says the
+           same for screen readers. -->
+      <div class="map-preview-mini-times" aria-hidden="true">
+        <span id="mapPreviewMiniElapsed">0:00</span>
+        <span id="mapPreviewMiniTotal">0:00</span>
+      </div>
       <span class="map-preview-control-divider" aria-hidden="true"></span>
       <!-- Mania converts only. Shows the column count and opens the key mod
            picker. A native mania map keeps its own count, so it has none. -->
@@ -381,6 +396,15 @@
     <div class="map-preview-unsupported" id="mapPreviewUnsupported" aria-live="polite">
       <pre class="map-preview-unsupported-ascii" id="mapPreviewUnsupportedAscii" aria-hidden="true"></pre>
       <p class="map-preview-unsupported-title">unsupported webpage :(</p>
+      <button type="button" class="map-preview-unsupported-embed-btn" id="mapPreviewUnsupportedEmbedBtn"
+        aria-label="Open in miniplayer">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.5"
+          aria-hidden="true">
+          <rect x="1.5" y="2.25" width="13" height="11.5" rx="2" />
+          <rect x="7.5" y="7.25" width="5" height="4.5" rx="0.9" fill="currentColor" stroke="none" />
+        </svg>
+        <span>Open in miniplayer</span>
+      </button>
     </div>
     <!-- Covers the shell while the opened map is fetched and laid out, so the
          empty playfield and placeholder header are not painted step by step.

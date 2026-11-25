@@ -110,9 +110,17 @@ export class PreviewRenderer {
     return Boolean(this.timeline?.isDurationAnimating());
   }
 
-  /** The duration growing or the bars moving to another difficulty's. */
+  /**
+   * The duration growing, the bars moving to another difficulty's, or the
+   * collapsed bar's wavy line moving: anything a paused timeline needs frames
+   * for.
+   */
   isTimelineAnimating() {
-    return Boolean(this.timeline?.isDurationAnimating() || this.timeline?.isDensityMorphing());
+    return Boolean(
+      this.timeline?.isDurationAnimating()
+      || this.timeline?.isDensityMorphing()
+      || this.timeline?.isWaveAnimating?.(),
+    );
   }
 
   setDuration(durationMs, { animate = false } = {}) {

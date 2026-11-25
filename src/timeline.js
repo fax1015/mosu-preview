@@ -6,6 +6,7 @@ import {
   findFirstIndexWithEndAtOrAfter,
   findLastIndexAtOrBefore,
 } from './renderers/shared.js';
+import { createWaveMotion, drawWavyProgress } from './ui/wavyProgress.js';
 
 // The preview's timeline: the map itself (density bars from afar, single
 // objects up close) in the small strip between the speed and time controls,
@@ -56,6 +57,8 @@ const FOLLOW_CATCH_UP_MS = 140;
 const DURATION_GROW_MS = 340;
 // How long the density bars take to grow and shrink into another difficulty's.
 const DENSITY_MORPH_MS = 320;
+const PREVIEW_AUDIO_TRANSITION_MS = 240;
+const PREVIEW_AUDIO_DASH_SPEED_PX_PER_MS = 0.007;
 // A frame gap longer than this is a stall, not motion to catch up on.
 const MAX_STEP_MS = 34;
 
@@ -80,7 +83,13 @@ const COLOURS = Object.freeze({
   // Deliberately faint: there to find, not to look at.
   endLine: 'rgba(255, 255, 255, 0.07)',
   pastEnd: 'rgba(0, 0, 0, 0.05)',
+  // The wavy progress line (setProgressStyle('wave')) and the track after it.
+  wave: 'rgb(102, 206, 147)',
+  waveTrack: 'rgba(255, 255, 255, 0.2)',
 });
+
+const PROGRESS_STYLES = Object.freeze(['map', 'wave']);
+const reducedMotionQuery = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null;
 
 const easeOutCubic = (t) => 1 - ((1 - clamp(t, 0, 1)) ** 3);
 const smoothstep = (edge0, edge1, value) => {
@@ -300,6 +309,106 @@ class TimelineRenderer {
     // Indices into `objects`, as a set for drawing and sorted for reading.
     // Objects are in time order, so index order is time order.
     this.selection = new Set();
+    // What it is drawn in; the collapsed miniplayer swaps in its cover-art
+    // palette (see setColours).
+    this.colours = COLOURS;
+    // 'map' draws the map; 'wave' only a wavy progress line, for the collapsed
+    // miniplayer, where the preview it would point into is out of sight.
+    this.progressStyle = 'map';
+    this.waveMotion = createWaveMotion({ isReducedMotion: () => Boolean(reducedMotionQuery?.matches) });
+    this.previewAudioPending = false;
+    this.previewAudioMix = 0;
+    this.previewAudioTransition = null;
+  }
+
+  /**
+   * 'map' or 'wave'. The wave is a progress bar, not a view of the map, so it
+   * shows the whole map and cannot be zoomed; it starts out flat and rises.
+   */
+  setProgressStyle(style) {
+    const next = PROGRESS_STYLES.includes(style) ? style : 'map';
+    if (next === this.progressStyle) {
+      return;
+    }
+    this.progressStyle = next;
+    this.waveMotion.reset();
+    if (next === 'wave') {
+      this.resetZoom({ animate: false });
+    }
+  }
+
+  getProgressStyle() {
+    return this.progressStyle;
+  }
+
+  /** Fade the wavy progress between full audio and the short preview clip. */
+  setPreviewAudioPending(pending, now = performance.now()) {
+    const next = Boolean(pending);
+    if (next === this.previewAudioPending) {
+      return false;
+    }
+
+    const from = this.getPreviewAudioMix(now);
+    const to = next ? 1 : 0;
+    this.previewAudioPending = next;
+    if (reducedMotionQuery?.matches) {
+      this.previewAudioMix = to;
+      this.previewAudioTransition = null;
+    } else {
+      this.previewAudioTransition = { from, to, startAt: now };
+    }
+    return true;
+  }
+
+  getPreviewAudioMix(now = performance.now()) {
+    if (!this.previewAudioTransition) {
+      return this.previewAudioMix;
+    }
+    if (reducedMotionQuery?.matches) {
+      this.previewAudioMix = this.previewAudioTransition.to;
+      this.previewAudioTransition = null;
+      return this.previewAudioMix;
+    }
+
+    const transition = this.previewAudioTransition;
+    const progress = clamp((now - transition.startAt) / PREVIEW_AUDIO_TRANSITION_MS, 0, 1);
+    this.previewAudioMix = transition.from + ((transition.to - transition.from) * easeOutCubic(progress));
+    if (progress >= 1) {
+      this.previewAudioTransition = null;
+    }
+    return this.previewAudioMix;
+  }
+
+  /**
+   * True while the wave is rising or lying down, or is about to: a paused
+   * timeline has to be drawn for it.
+   */
+  isWaveSettling() {
+    return this.progressStyle === 'wave' && this.waveMotion.isMoving(this.isPlaying);
+  }
+
+  /**
+   * True while the wavy line moves on its own, paused or not: rising or lying
+   * down, its preview-clip dashes travelling, or the dashes fading in or out.
+   */
+  isWaveAnimating() {
+    if (this.progressStyle !== 'wave') {
+      return false;
+    }
+    return this.isWaveSettling()
+      || (this.previewAudioPending && !reducedMotionQuery?.matches)
+      || Boolean(this.previewAudioTransition);
+  }
+
+  /**
+   * Draws in `overrides` on top of the usual colours, or the usual colours
+   * alone when given nothing. `playheadStyle: 'bar'` draws the playhead as a
+   * rounded bar with a gap cut around it, in place of the line and flag.
+   */
+  setColours(overrides = null) {
+    this.colours = overrides && typeof overrides === 'object'
+      ? Object.freeze({ ...COLOURS, ...overrides })
+      : COLOURS;
   }
 
   setBeatmap(mapData, durationMs, { previewTimeMs = -1 } = {}) {
@@ -488,6 +597,7 @@ class TimelineRenderer {
   needsAnimationFrame() {
     return Boolean(this.durationAnimation)
       || Boolean(this.densityMorph)
+      || this.isWaveAnimating()
       || this.isViewEasing
       || this.overviewReveal !== (this.fitsMap ? 0 : 1);
   }
@@ -582,6 +692,9 @@ class TimelineRenderer {
   }
 
   zoomAt(anchorMs, factor, anchorRatio, { animate = true } = {}) {
+    if (this.progressStyle === 'wave') {
+      return;
+    }
     const next = zoomView(this.getTargetView(), this.durationMs, anchorMs, factor, anchorRatio);
     this.setView(next.startMs, next.durationMs, { animate });
     this.noteManualMove();
@@ -635,7 +748,8 @@ class TimelineRenderer {
 
   /** Whether the objects are on screen enough to be aimed at. */
   areObjectsGrabbable() {
-    return this.objects.length > 0 && this.getObjectMix() >= OBJECTS_GRABBABLE_MIX;
+    return this.progressStyle !== 'wave'
+      && this.objects.length > 0 && this.getObjectMix() >= OBJECTS_GRABBABLE_MIX;
   }
 
   /**
@@ -936,6 +1050,24 @@ class TimelineRenderer {
 
     ctx.clearRect(0, 0, width, height);
 
+    if (this.progressStyle === 'wave') {
+      this.waveMotion.update(now, this.isPlaying);
+      const loadingMix = this.getPreviewAudioMix(now);
+      drawWavyProgress(ctx, {
+        width,
+        height,
+        headX: playheadX,
+        amplitude: this.waveMotion.getAmplitude(),
+        shiftPx: this.waveMotion.getShift(),
+        loadingMix,
+        loadingShiftPx: reducedMotionQuery?.matches
+          ? 0
+          : (now * PREVIEW_AUDIO_DASH_SPEED_PX_PER_MS) % 7,
+        colours: this.colours,
+      });
+      return;
+    }
+
     this.drawBreaks(ctx, layout, toX, startMs, endMs);
     this.drawKiai(ctx, layout, toX, startMs, endMs, false);
     const visibleSections = this.getVisibleTimingSections(startMs, endMs);
@@ -957,7 +1089,7 @@ class TimelineRenderer {
     this.drawEndMarker(ctx, layout, toX, startMs, endMs);
 
     if (this.hoverX !== null && !this.isInteracting && this.hoverX >= 0 && this.hoverX <= width) {
-      ctx.fillStyle = COLOURS.hover;
+      ctx.fillStyle = this.colours.hover;
       ctx.fillRect(Math.round(this.hoverX), 0, 1, layout.trackBottom);
     }
 
@@ -1002,7 +1134,7 @@ class TimelineRenderer {
       ctx.moveTo(x, bottom);
       ctx.lineTo(x + height, top);
     }
-    ctx.strokeStyle = COLOURS.breakHatch;
+    ctx.strokeStyle = this.colours.breakHatch;
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.restore();
@@ -1016,10 +1148,10 @@ class TimelineRenderer {
       const x0 = Math.max(0, toX(section.startMs));
       const x1 = Math.min(layout.width, toX(section.endMs));
       if (edgesOnly) {
-        ctx.fillStyle = COLOURS.kiaiEdge;
+        ctx.fillStyle = this.colours.kiaiEdge;
         ctx.fillRect(x0, layout.trackTop, x1 - x0, 1.5);
       } else {
-        ctx.fillStyle = COLOURS.kiaiFill;
+        ctx.fillStyle = this.colours.kiaiFill;
         ctx.fillRect(x0, layout.trackTop, x1 - x0, layout.trackBottom - layout.trackTop);
       }
     }
@@ -1108,7 +1240,7 @@ class TimelineRenderer {
     const top = layout.trackTop;
     const bottom = layout.trackBottom;
     const inset = (bottom - top) * 0.28;
-    ctx.fillStyle = COLOURS.gridLine;
+    ctx.fillStyle = this.colours.gridLine;
     for (let index = 0; index < barLines.length; index += 2) {
       ctx.globalAlpha = 0.2 * barLines[index + 1];
       ctx.fillRect(barLines[index], top, 1, bottom - top);
@@ -1180,7 +1312,7 @@ class TimelineRenderer {
     if (strength <= 0.01) {
       return;
     }
-    ctx.fillStyle = COLOURS.gridLine;
+    ctx.fillStyle = this.colours.gridLine;
     ctx.globalAlpha = 0.045 * strength;
     for (const x of rulerXs) {
       ctx.fillRect(x, layout.trackTop, 1, layout.trackBottom - layout.trackTop);
@@ -1233,11 +1365,11 @@ class TimelineRenderer {
     // played (playhead past right edge) or upcoming (playhead at/before left).
     if (playheadX >= layout.width) {
       traceBars();
-      ctx.fillStyle = COLOURS.played;
+      ctx.fillStyle = this.colours.played;
       ctx.fill();
     } else {
       traceBars();
-      ctx.fillStyle = COLOURS.upcoming;
+      ctx.fillStyle = this.colours.upcoming;
       ctx.fill();
       if (playheadX > 0) {
         ctx.save();
@@ -1245,7 +1377,7 @@ class TimelineRenderer {
         ctx.rect(0, layout.trackTop, playheadX, layout.trackBottom - layout.trackTop);
         ctx.clip();
         traceBars();
-        ctx.fillStyle = COLOURS.played;
+        ctx.fillStyle = this.colours.played;
         ctx.fill();
         ctx.restore();
       }
@@ -1268,7 +1400,7 @@ class TimelineRenderer {
 
     ctx.globalAlpha = alpha;
     for (const played of [true, false]) {
-      ctx.fillStyle = played ? COLOURS.played : COLOURS.upcoming;
+      ctx.fillStyle = played ? this.colours.played : this.colours.upcoming;
       ctx.strokeStyle = ctx.fillStyle;
       const bodies = [];
       const heads = [];
@@ -1372,7 +1504,7 @@ class TimelineRenderer {
 
     if (bodies.length > 0) {
       ctx.globalAlpha = alpha * 0.5;
-      ctx.fillStyle = COLOURS.selectedHalo;
+      ctx.fillStyle = this.colours.selectedHalo;
       ctx.beginPath();
       for (let index = 0; index < bodies.length; index += 2) {
         traceCapsule(ctx, bodies[index], bodies[index + 1], middle, bodyHalf + 1);
@@ -1381,7 +1513,7 @@ class TimelineRenderer {
     }
 
     ctx.globalAlpha = alpha;
-    ctx.strokeStyle = COLOURS.selected;
+    ctx.strokeStyle = this.colours.selected;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (const x of heads) {
@@ -1400,7 +1532,7 @@ class TimelineRenderer {
     if (this.previewTimeMs < 0 || x < -6 || x > layout.width + 1) {
       return;
     }
-    ctx.fillStyle = COLOURS.preview;
+    ctx.fillStyle = this.colours.preview;
     ctx.fillRect(x - 0.5, layout.trackTop, 1.5, layout.trackBottom - layout.trackTop);
     ctx.beginPath();
     ctx.moveTo(x, layout.trackTop);
@@ -1412,7 +1544,7 @@ class TimelineRenderer {
 
   // Short marks hanging from the top edge, on the ruler buildRuler laid out.
   drawTicks(ctx, layout, rulerXs) {
-    ctx.fillStyle = COLOURS.tick;
+    ctx.fillStyle = this.colours.tick;
     for (const x of rulerXs) {
       ctx.fillRect(x, layout.trackTop, 1, TICK_HEIGHT_PX);
     }
@@ -1429,17 +1561,17 @@ class TimelineRenderer {
     const height = layout.trackBottom - layout.trackTop;
     if (songEndMs < startMs) {
       // The entire visible stretch is past the song end: keep the shading.
-      ctx.fillStyle = COLOURS.pastEnd;
+      ctx.fillStyle = this.colours.pastEnd;
       ctx.fillRect(0, layout.trackTop, layout.width, height);
       return;
     }
     // A song that runs to the timeline's end would land just off the canvas.
     const x = Math.min(Math.round(toX(songEndMs)), layout.width - 1);
     if (x + 1 < layout.width) {
-      ctx.fillStyle = COLOURS.pastEnd;
+      ctx.fillStyle = this.colours.pastEnd;
       ctx.fillRect(x + 1, layout.trackTop, layout.width - x - 1, height);
     }
-    ctx.fillStyle = COLOURS.endLine;
+    ctx.fillStyle = this.colours.endLine;
     ctx.fillRect(x, layout.trackTop, 1, height);
   }
 
@@ -1447,16 +1579,43 @@ class TimelineRenderer {
     if (x < -5 || x > layout.width + 5) {
       return;
     }
+    if (this.colours.playheadStyle === 'bar') {
+      this.drawPlayheadBar(ctx, layout, x);
+      return;
+    }
     const left = Math.round(x) - 1;
-    ctx.fillStyle = COLOURS.playheadHalo;
+    ctx.fillStyle = this.colours.playheadHalo;
     ctx.fillRect(left - 1, 0, 4, layout.trackBottom);
-    ctx.fillStyle = COLOURS.playhead;
+    ctx.fillStyle = this.colours.playhead;
     ctx.fillRect(left, 0, 2, layout.trackBottom);
     ctx.beginPath();
     ctx.moveTo(left - 2.5, 0);
     ctx.lineTo(left + 4.5, 0);
     ctx.lineTo(left + 1, 3.5);
     ctx.closePath();
+    ctx.fill();
+  }
+
+  // The collapsed miniplayer's playhead: a rounded bar standing a little proud
+  // of the track, with the bars either side of it cut back so it reads as a
+  // handle of its own. The canvas is transparent, so the cut shows the
+  // surface behind it.
+  drawPlayheadBar(ctx, layout, x) {
+    const barWidth = 4;
+    const gap = 3;
+    const height = layout.trackBottom;
+    const left = Math.round(x - (barWidth / 2));
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillRect(left - gap, 0, barWidth + (gap * 2), height);
+    ctx.restore();
+    ctx.fillStyle = this.colours.playhead;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(left, 0, barWidth, height, barWidth / 2);
+    } else {
+      ctx.rect(left, 0, barWidth, height);
+    }
     ctx.fill();
   }
 
@@ -1471,16 +1630,16 @@ class TimelineRenderer {
     // Four pixels hold the rail, the visible stretch and the playhead, and
     // nothing else: markers on it only read as noise at this size.
     ctx.globalAlpha = this.overviewReveal;
-    ctx.fillStyle = COLOURS.rail;
+    ctx.fillStyle = this.colours.rail;
     ctx.fillRect(0, top, width, height);
 
     const { x0, x1 } = this.getOverviewBracket();
-    ctx.fillStyle = COLOURS.bracket;
+    ctx.fillStyle = this.colours.bracket;
     ctx.beginPath();
     traceCapsule(ctx, x0, x1, top + (height / 2), height / 2);
     ctx.fill();
 
-    ctx.fillStyle = COLOURS.playhead;
+    ctx.fillStyle = this.colours.playhead;
     ctx.fillRect(Math.round(toOverviewX(this.currentTimeMs)) - 0.5, top, 1.5, height);
     ctx.globalAlpha = 1;
   }

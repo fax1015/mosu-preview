@@ -37,6 +37,14 @@ export default [
     },
   },
   {
+    // The content script is injected as a classic script, not a module: an
+    // import or export in it would pass a module lint and fail in the page.
+    files: ['src/content.js'],
+    languageOptions: {
+      sourceType: 'script',
+    },
+  },
+  {
     // Background service worker and its direct extraction/network/cache imports
     // run without DOM globals (`window`, `document`, `Audio`, `localStorage`).
     files: [
@@ -52,7 +60,11 @@ export default [
   },
   {
     // Localhost browser performance harness (not an extension page).
-    files: ['scripts/performance-browser.js'],
+    files: [
+      'scripts/performance-browser.js',
+      'scripts/performance-charts.js',
+      'scripts/performance-popup-shim.js',
+    ],
     languageOptions: {
       globals: { ...globals.browser },
     },

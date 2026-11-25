@@ -6,8 +6,17 @@
 // b.ppy.sh preview clip it is 100ms before the beatmap's PreviewTime, and the
 // clip only runs for ~10 seconds. Most of a map therefore has no audio behind it
 // at all, which is something callers have to be able to detect.
+const PREVIEW_AUDIO_SOURCE_PREFIX = 'https://b.ppy.sh/preview/';
 const PREVIEW_CLIP_LEAD_IN_MS = 100;
+// osu!'s b.ppy.sh preview clips run ~10 seconds starting at PreviewTime
+// (minus the lead-in). Used to reject obviously out-of-range seeks before
+// metadata loads so resuming mid-map never blocks on or clamps to the clip.
+const PREVIEW_CLIP_ESTIMATED_DURATION_MS = 10_000;
 const AUDIO_SEEK_TOLERANCE_SEC = 0.25;
+
+const isPreviewAudioSourceUrl = (src) => (
+  typeof src === 'string' && src.startsWith(PREVIEW_AUDIO_SOURCE_PREFIX)
+);
 
 /**
  * Maps a beatmap timestamp onto a position in the audio element.
@@ -47,6 +56,14 @@ const seekAudioElementToMapTime = (audioElement, mapTimeMs, anchorMapMs, { requi
     return false;
   }
 
+  const hasKnownDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0;
+  if (requireCoverage && !hasKnownDuration && isPreviewAudioSourceUrl(audioElement.src)) {
+    const rawSec = (Number(mapTimeMs) - (Number(anchorMapMs) || 0)) / 1000;
+    if (!Number.isFinite(rawSec) || rawSec > PREVIEW_CLIP_ESTIMATED_DURATION_MS / 1000) {
+      return false;
+    }
+  }
+
   const { sec, covered } = resolveAudioSeekTarget(mapTimeMs, anchorMapMs, audioElement.duration);
   if (requireCoverage && !covered) {
     return false;
@@ -74,8 +91,11 @@ const getPreviewClipAnchorMapMs = (previewTimeMs) => (
 
 export {
   AUDIO_SEEK_TOLERANCE_SEC,
+  PREVIEW_AUDIO_SOURCE_PREFIX,
+  PREVIEW_CLIP_ESTIMATED_DURATION_MS,
   PREVIEW_CLIP_LEAD_IN_MS,
   getPreviewClipAnchorMapMs,
+  isPreviewAudioSourceUrl,
   isPreviewClipAnchorable,
   resolveAudioSeekTarget,
   seekAudioElementToMapTime,

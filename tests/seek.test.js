@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { createTimingController } from '../src/core/timing.js';
 import { createPlaybackController } from '../src/audio/playback.js';
 import {
+  PREVIEW_CLIP_ESTIMATED_DURATION_MS,
   getPreviewClipAnchorMapMs,
+  isPreviewAudioSourceUrl,
   isPreviewClipAnchorable,
   resolveAudioSeekTarget,
   seekAudioElementToMapTime,
@@ -185,4 +187,35 @@ test('the preview clip anchor includes b.ppy.sh\'s 100ms lead-in', () => {
   assert.equal(getPreviewClipAnchorMapMs(316364), 316264);
   assert.equal(getPreviewClipAnchorMapMs(50), 0);
   assert.equal(getPreviewClipAnchorMapMs(-1), 0);
+});
+
+test('before metadata loads, preview clips accept seeks inside ~10s and reject out-of-range targets', () => {
+  const previewAudio = createPreviewAudio();
+  previewAudio.duration = Number.NaN;
+  const anchorMapMs = getPreviewClipAnchorMapMs(PREVIEW_TIME_MS);
+
+  assert.equal(isPreviewAudioSourceUrl(previewAudio.src), true);
+  assert.equal(isPreviewAudioSourceUrl('blob:full-audio'), false);
+
+  // Resuming inside the ~10s preview window succeeds even before metadata loads.
+  assert.equal(seekAudioElementToMapTime(previewAudio, PREVIEW_TIME_MS + 2500, anchorMapMs), true);
+  assert.equal(previewAudio.currentTime, 2.6);
+
+  // Resuming past the ~10s preview window fails synchronously instead of
+  // queueing a seek that would clamp to the end of the clip.
+  previewAudio.currentTime = 0;
+  assert.equal(
+    seekAudioElementToMapTime(previewAudio, anchorMapMs + PREVIEW_CLIP_ESTIMATED_DURATION_MS + 500, anchorMapMs),
+    false,
+  );
+  assert.equal(previewAudio.currentTime, 0);
+
+  // Before the preview window also fails synchronously.
+  assert.equal(seekAudioElementToMapTime(previewAudio, 0, anchorMapMs), false);
+  assert.equal(previewAudio.currentTime, 0);
+
+  // Full audio with unknown duration is still treated as reachable.
+  const fullAudio = { ...createPreviewAudio(), src: 'blob:full-audio', duration: Number.NaN, currentTime: 0 };
+  assert.equal(seekAudioElementToMapTime(fullAudio, 120_000, 0), true);
+  assert.equal(fullAudio.currentTime, 120);
 });

@@ -16,6 +16,7 @@ import {
   normalizeManiaKeyCount,
   normalizeProviderOverride,
   normalizePreviewSettings,
+  shouldPlayHitsounds,
 } from './settings.js';
 import {
   addRuntimeMessageListener,
@@ -66,7 +67,7 @@ import {
   pruneFullAudioCache,
   setFullAudioCacheDebugLogger,
 } from './audio/cache.js';
-import { isPreviewClipAnchorable } from './audio/seek.js';
+import { isPreviewAudioSourceUrl, isPreviewClipAnchorable } from './audio/seek.js';
 import { getProviderDisplayName, loadProviderRuntimeState } from './audio/provider.js';
 import { createPlaybackController } from './audio/playback.js';
 import { PREVIEW_AUDIO_PROVIDER_LABEL, createFullAudioController } from './audio/fullAudioController.js';
@@ -77,6 +78,8 @@ import { INSTRUCTION_MESSAGE_MS, createIsland } from './ui/island.js';
 import { createDebugPanelController } from './ui/debugPanel.js';
 import { createDetachController } from './ui/detachController.js';
 import { createEmbeddedController } from './ui/embeddedController.js';
+import { createMiniMorph } from './ui/miniMorph.js';
+import { createMiniTheme } from './ui/miniTheme.js';
 import { bindPopupUiEvents, bindPopover } from './ui/popupUI.js';
 import { createShortcutsPanel } from './ui/shortcutsPanel.js';
 import { toStoredKeybindings } from './core/keybindings.js';
@@ -172,6 +175,7 @@ const keysMoreButton = document.querySelector('#mapPreviewKeysMoreBtn');
 const keysOptions = [...document.querySelectorAll('.map-preview-keys-option')];
 const playfieldCanvas = document.querySelector('#mapPreviewCanvas');
 const canvasWrap = document.querySelector('#mapPreviewCanvasWrap');
+const miniArtImage = document.querySelector('#mapPreviewMiniArtImage');
 const panelsElement = document.querySelector('#mapPreviewPanels');
 const leadPanelLabel = document.querySelector('#mapPreviewLeadLabel');
 const compareControl = document.querySelector('#mapPreviewCompareControl');
@@ -193,7 +197,10 @@ const syncCollapsedTimeLabelInteractivity = (collapsed) => {
   timeLabel.tabIndex = collapsed ? -1 : 0;
   timeLabel.setAttribute('aria-disabled', collapsed ? 'true' : 'false');
   if (collapsed) {
+    // Nothing to copy from the bar, so nothing to announce either: renderFrame
+    // only rewrites the label when the selection changes.
     timeLabel.removeAttribute('title');
+    timeLabel.removeAttribute('aria-label');
   } else {
     lastSelectedCount = -1;
   }
@@ -225,6 +232,7 @@ const debugRunButton = document.querySelector('#mapPreviewDebugRunBtn');
 const debugClearButton = document.querySelector('#mapPreviewDebugClearBtn');
 const debugCloseButton = document.querySelector('#mapPreviewDebugCloseBtn');
 const embedButton = document.querySelector('#mapPreviewEmbedBtn');
+const unsupportedEmbedButton = document.querySelector('#mapPreviewUnsupportedEmbedBtn');
 const detachButton = document.querySelector('#mapPreviewDetachBtn');
 const followButton = document.querySelector('#mapPreviewFollowBtn');
 const miniPlayButton = document.querySelector('#mapPreviewMiniPlayBtn');
@@ -290,6 +298,13 @@ const setModalShellVisible = (modalShell, isVisible) => {
   }
 
   if (isVisible) {
+    // The in-page miniplayer's collapsed bar has no room for a dialog: open
+    // it back up first, and show the dialog once it has (whenExpanded), so it
+    // never appears squeezed into the bar on the way.
+    if (isMiniBarShowing()) {
+      whenExpanded(renderMenusOnceExpanded);
+      return;
+    }
     requestExpandEmbedded?.();
     modalShell.hidden = false;
     modalShell.classList.remove('is-closing');
@@ -307,6 +322,81 @@ const setModalShellVisible = (modalShell, isVisible) => {
     modalHideTimers.delete(modalShell);
   }, MODAL_TRANSITION_MS));
   modalHideTimers.set(modalShell, nextHideTimer);
+};
+
+// Finishes a dialog's closing straight away, for when there is no time to
+// watch it close: the in-page miniplayer collapsing under it.
+const settleModalHidden = (modalShell) => {
+  if (!modalShell || modalShell.classList.contains('is-open')) {
+    return;
+  }
+  const hideTimer = modalHideTimers.get(modalShell);
+  if (hideTimer) {
+    registry.clearTimeout(hideTimer);
+    modalHideTimers.delete(modalShell);
+  }
+  modalShell.hidden = true;
+  modalShell.classList.remove('is-visible', 'is-closing');
+};
+
+// The in-page miniplayer's collapsed bar is what is on screen. Read from the
+// page rather than from state: state flips as soon as the shell asks, and the
+// layout only follows once the old one has faded out (src/ui/miniMorph.js).
+const isMiniBarShowing = () => IS_EMBEDDED_PLAYER
+  && document.documentElement.classList.contains('is-embedded-collapsed');
+
+// The collapsed bar draws its progress as a wavy line (src/ui/wavyProgress.js)
+// unless the setting turns it off; everywhere else the timeline is the map.
+const syncTimelineProgressStyle = () => {
+  renderer.timeline?.setProgressStyle(isMiniBarShowing() && state.miniWavyProgress ? 'wave' : 'map');
+  ensureTimelineDurationAnimation();
+};
+
+// What is waiting for the bar to open back up, run once it has. Each callback
+// waits once however often it is asked for: opening the shortcuts shows both
+// dialogs, and both ask.
+let expandedCallbacks = [];
+
+const whenExpanded = (callback) => {
+  if (!isMiniBarShowing()) {
+    callback();
+    return;
+  }
+  if (expandedCallbacks.includes(callback)) {
+    return;
+  }
+  expandedCallbacks.push(callback);
+  // One request opens the bar for everything waiting on it.
+  if (expandedCallbacks.length === 1) {
+    requestExpandEmbedded?.();
+  }
+};
+
+// Shows whichever dialogs are open by then, in one go.
+const renderMenusOnceExpanded = () => {
+  renderInfoMenu();
+  renderShortcutsMenu();
+};
+
+// A dialog asked for from the collapsed bar is only shown once the bar has
+// opened, so its focus moves in then, after the dialog is shown (both wait in
+// the same queue, in this order), and only if it is still open.
+const focusInfoDialog = () => {
+  if (state.infoMenuOpen) {
+    infoCloseButton?.focus();
+  }
+};
+
+const focusShortcutsDialog = () => {
+  if (state.shortcutsMenuOpen) {
+    shortcutsCloseButton?.focus();
+  }
+};
+
+const runExpandedCallbacks = () => {
+  const callbacks = expandedCallbacks;
+  expandedCallbacks = [];
+  callbacks.forEach((callback) => callback());
 };
 
 // Inside an extension iframe embedded in a host page, synchronized 2D
@@ -363,6 +453,12 @@ const hasFullAudioSource = () => (
     state.audio.src === state.fullAudioObjectUrl
     || (Boolean(state.fullAudioSliceUrl) && state.audio.src === state.fullAudioSliceUrl)
   )
+);
+
+const isUsingPreviewAudio = () => (
+  state.audioSyncEnabled
+  && isPreviewAudioSourceUrl(state.audio?.src)
+  && !hasFullAudioSource()
 );
 
 // True while the visual preview should keep advancing even though the audio
@@ -467,6 +563,12 @@ const syncPlaybackDuration = () => {
   // The end line marks the song's end once the full track is in; until then the
   // timeline marks the last object instead.
   renderer.timeline.setSongEnd(getFullAudioEndMs() || null);
+  if (renderer.timeline.setPreviewAudioPending(isUsingPreviewAudio())) {
+    if (!state.isPlaying) {
+      renderer.renderTimeline();
+    }
+    ensureTimelineDurationAnimation();
+  }
   if (isAnimatingTimeline) {
     ensureTimelineDurationAnimation();
   }
@@ -497,9 +599,15 @@ const tickTimelineDurationAnimation = () => {
 };
 
 // Frames for a paused timeline that is still moving on its own: its length
-// growing into the full track's, or its bars into another difficulty's.
+// growing into the full track's, its bars into another difficulty's, or the
+// collapsed bar's wavy line lying down or its preview-clip dashes moving.
 const ensureTimelineDurationAnimation = () => {
-  if (state.isPlaying || state.timelineAnimationRafId !== null || !renderer.isTimelineAnimating()) {
+  if (state.isPlaying || state.timelineAnimationRafId !== null) {
+    return;
+  }
+  // Pausing draws no frame, so the timeline may not have heard yet.
+  renderer.timeline?.setPlaying(false);
+  if (!renderer.isTimelineAnimating()) {
     return;
   }
 
@@ -619,7 +727,7 @@ const setInfoMenuOpen = (isOpen) => {
   renderInfoMenu();
   renderShortcutsMenu();
   if (isOpen) {
-    infoCloseButton?.focus();
+    whenExpanded(focusInfoDialog);
   } else if (lastInfoFocus) {
     restoreFocus(lastInfoFocus, infoButton);
     lastInfoFocus = null;
@@ -673,7 +781,7 @@ const setShortcutsMenuOpen = (isOpen) => {
   renderInfoMenu();
   renderShortcutsMenu();
   if (isOpen) {
-    shortcutsCloseButton?.focus();
+    whenExpanded(focusShortcutsDialog);
   } else if (lastShortcutsFocus) {
     restoreFocus(lastShortcutsFocus, shortcutsButton);
     lastShortcutsFocus = null;
@@ -805,6 +913,13 @@ const toggleCachedMapsetsPanel = async () => {
     return;
   }
 
+  // The collapsed bar has no room for the list: open the bar first, and the
+  // list once it has, rather than the list squeezed into the bar on the way.
+  if (isMiniBarShowing()) {
+    whenExpanded(openCachedMapsetsOnceExpanded);
+    return;
+  }
+
   setInfoMenuOpen(false);
 
   // The unsupported view shows the list as its main content, so there is nothing
@@ -824,8 +939,12 @@ const toggleCachedMapsetsPanel = async () => {
   // rather than letting the menu entry look broken.
   if (recentPanel.hidden) {
     showPopupToast('No cached mapsets yet');
-  } else {
-    requestExpandEmbedded?.();
+  }
+};
+
+const openCachedMapsetsOnceExpanded = () => {
+  if (recentPanel?.hidden) {
+    void toggleCachedMapsetsPanel();
   }
 };
 
@@ -913,6 +1032,7 @@ const {
   startEmbeddedBridge,
   disposeEmbeddedBridge,
   publishResumeSnapshot,
+  publishMiniPalette,
   requestCloseEmbedded,
   requestExpandEmbedded,
   reportChromeMetrics,
@@ -920,26 +1040,58 @@ const {
   state,
   registry,
   isEmbedded: IS_EMBEDDED_PLAYER,
-  elements: { embedButton, followButton },
+  hostMountId: IS_EMBEDDED_PLAYER ? embeddedParams.mountId : '',
+  elements: { embedButton, unsupportedEmbedButton, followButton },
   addDebugLog,
   showPopupToast,
   loadPreview: (options) => initializePreviewForCurrentTab(options),
   closeDetachedWindowIfOpen,
   flushPendingCacheWrite: waitForPendingCacheWrite,
+  // The shell has started fading the window out (src/content.js): silence it
+  // at once, but leave the play button as it was, so the window leaves
+  // looking the way it did rather than flipping to "paused" on its way out.
+  onHostClosing: () => {
+    isHostClosing = true;
+    if (state.isPlaying) {
+      stopPlayback();
+    }
+  },
   onCollapsedChange: (collapsed) => {
     isCollapseTransitioning = true;
-    document.documentElement.classList.toggle('is-embedded-collapsed', collapsed);
     syncCollapsedTimeLabelInteractivity(collapsed);
-    if (!collapsed) {
-      if (!state.isPlaying && state.mapData) {
-        renderFrame();
-      }
-      scheduleEmbeddedRepaint();
-    } else if (!state.isPlaying && state.mapData) {
-      requestAnimationFrame(() => renderer.renderTimeline());
-    }
-    // Wait until the 280ms container height transition settles before re-measuring
-    // chrome metrics, otherwise mid-transition padding/margin values retarget the
+    syncHitsoundPlaybackMode();
+    // The layout switches a moment later, under the fade (src/ui/miniMorph.js);
+    // the canvases are redrawn for it once it is in place.
+    miniMorph.setCollapsed(collapsed, {
+      onBeforeSwitch: (nowCollapsed) => {
+        // A pointer resting on the timeline is somewhere else entirely now.
+        popupUiControls?.clearTimelineHover();
+        if (nowCollapsed) {
+          dismissOverlaysForMiniBar();
+        }
+      },
+      onSwitch: (nowCollapsed) => {
+        miniTheme?.setTimelineThemed(nowCollapsed);
+        syncTimelineProgressStyle();
+        if (nowCollapsed) {
+          // Collapsed again before it got there: whatever was waiting on the
+          // expanded view was already closed with everything else.
+          expandedCallbacks = [];
+        } else {
+          runExpandedCallbacks();
+        }
+        if (!nowCollapsed) {
+          if (!state.isPlaying && state.mapData) {
+            renderFrame();
+          }
+          scheduleEmbeddedRepaint();
+        } else if (!state.isPlaying && state.mapData) {
+          renderer.renderTimeline();
+        }
+      },
+    });
+    // Wait until the shell's height change (src/content.js) settles before
+    // re-measuring chrome metrics, otherwise mid-transition sizes retarget the
     // height animation and cause a visible two-stage snap.
     collapseRepaintTimer = registry.clearTimeout(collapseRepaintTimer);
     collapseRepaintTimer = registry.addTimeout(setTimeout(() => {
@@ -954,12 +1106,59 @@ const {
       if (!state.isPlaying) {
         renderFrame();
       }
-    }, 320));
+    }, COLLAPSE_SETTLE_MS));
   },
 });
 
+// The shell resizes over 260ms (src/content.js); a little past that, nothing
+// is moving any more.
+const COLLAPSE_SETTLE_MS = 320;
 let collapseRepaintTimer = null;
 let isCollapseTransitioning = false;
+// Set once the shell has started closing the in-page player; nothing is left
+// to do but fade out.
+let isHostClosing = false;
+// The popovers and the timeline's zoom, from bindPopupUiEvents.
+let popupUiControls = null;
+
+// Everything the collapsed bar has no room for, closed outright: the options
+// and shortcuts dialogs, the cached mapsets list, the debug panel, every
+// popover and the difficulty picker, and a zoomed-in timeline. Called while
+// the page is faded out (src/ui/miniMorph.js), so none of it is seen closing.
+const dismissOverlaysForMiniBar = () => {
+  if (state.infoMenuOpen || state.shortcutsMenuOpen) {
+    setInfoMenuOpen(false);
+  }
+  settleModalHidden(infoModal);
+  settleModalHidden(shortcutsModal);
+  closeCachedMapsetsPanel();
+  if (state.debugPanelOpen) {
+    setDebugPanelOpen(false);
+  }
+  popupUiControls?.dismissTransientUi();
+};
+
+// The collapsed bar: switching between it and the expanded view, and painting
+// it in the cover's colours. Only the in-page miniplayer has one.
+const miniMorph = createMiniMorph({
+  root: document.documentElement,
+  popup,
+  allowsMotion,
+  setTimer: (callback, delayMs) => registry.addTimeout(setTimeout(callback, delayMs)),
+  clearTimer: (timer) => registry.clearTimeout(timer),
+});
+const miniTheme = IS_EMBEDDED_PLAYER
+  ? createMiniTheme({
+    root: document.documentElement,
+    getTimeline: () => renderer.timeline,
+    onPalette: (palette) => publishMiniPalette(palette),
+    addDebugLog,
+  })
+  : null;
+miniTheme?.setTimelineThemed(state.embeddedCollapsed);
+syncTimelineProgressStyle();
+const miniElapsedLabel = document.querySelector('#mapPreviewMiniElapsed');
+const miniTotalLabel = document.querySelector('#mapPreviewMiniTotal');
 
 let embeddedRepaintRafId = null;
 let embeddedRepaintRetries = 0;
@@ -1003,7 +1202,15 @@ const scheduleEmbeddedRepaint = () => {
 };
 
 const syncEmbeddedChromeMetrics = () => {
-  if (!IS_EMBEDDED_PLAYER || state.embeddedCollapsed || isCollapseTransitioning || !popup || !canvasWrap) {
+  // The unsupported card hides the preview chrome. Measuring its padding as
+  // the shell chrome would shrink the expanded miniplayer below its normal
+  // preview height; keep the default or last measured preview dimensions.
+  if (!IS_EMBEDDED_PLAYER
+    || state.embeddedCollapsed
+    || isCollapseTransitioning
+    || !popup
+    || popup.classList.contains('is-unsupported')
+    || !canvasWrap) {
     return;
   }
   const header = popup.querySelector('.map-preview-header');
@@ -1190,11 +1397,14 @@ const applyPreviewSettings = (settings = {}) => {
   state.hitsoundStyle = normalized.hitsoundStyle;
   state.autoplay = normalized.autoplay;
   state.embeddedPlayer = normalized.embeddedPlayer;
+  state.miniWavyProgress = normalized.miniWavyProgress;
+  state.miniHitsoundsWhenCollapsed = normalized.miniHitsoundsWhenCollapsed;
+  syncTimelineProgressStyle();
   state.keybindings = normalized.keybindings;
   document.documentElement.classList.toggle('is-embedded-enabled', normalized.embeddedPlayer);
   updateEmbedButtonState();
   shortcutsPanel?.setKeybindings(normalized.keybindings);
-  hitsoundPlayer.setEnabled(normalized.hitsounds);
+  syncHitsoundPlaybackMode();
   hitsoundPlayer.setVolume(normalized.hitsoundVolume);
   hitsoundPlayer.setStyle(normalized.hitsoundStyle);
   // The music joins the WebAudio graph the first time hitsounds are on, so the
@@ -1282,6 +1492,26 @@ const hitsoundPlayer = createHitsoundPlayer({
   latencyHint: IS_MOBILE_VIEW ? 'playback' : undefined,
 });
 
+let lastHitsoundPlaybackMode = null;
+const syncHitsoundPlaybackMode = () => {
+  const enabled = shouldPlayHitsounds({
+    hitsounds: state.hitsounds,
+    isEmbedded: IS_EMBEDDED_PLAYER,
+    collapsed: state.embeddedCollapsed,
+    whenCollapsed: state.miniHitsoundsWhenCollapsed,
+  });
+  if (enabled === lastHitsoundPlaybackMode) {
+    return;
+  }
+  lastHitsoundPlaybackMode = enabled;
+  hitsoundPlayer.setEnabled(enabled);
+  if (enabled) {
+    // Resuming after a collapsed-mode mute starts at the current playhead rather
+    // than replaying events that passed while hitsounds were disabled.
+    hitsoundPlayer.syncTo(state.hitsoundEvents, state.currentTimeMs);
+  }
+};
+
 const timingController = createTimingController({
   state,
   clamp,
@@ -1318,7 +1548,7 @@ state.audio.play = (...args) => {
 // Without it a seek would replay every object between the old and new position.
 let lastMiniPlayState = null;
 const syncMiniPlayButton = () => {
-  if (!miniPlayButton) {
+  if (!miniPlayButton || isHostClosing) {
     return;
   }
   const playing = Boolean(state.isPlaying);
@@ -1428,10 +1658,20 @@ const renderFrame = () => {
 
   // The label only changes once a second, but writing it every frame dirtied
   // layout, which the next frame's canvas size read then had to resolve.
-  const nextTimeLabel = `${renderer.getCurrentLabel()} / ${renderer.getDurationLabel()}`;
+  const currentLabel = renderer.getCurrentLabel();
+  const durationLabel = renderer.getDurationLabel();
+  const nextTimeLabel = `${currentLabel} / ${durationLabel}`;
   if (nextTimeLabel !== lastTimeLabelText) {
     lastTimeLabelText = nextTimeLabel;
     timeLabel.textContent = nextTimeLabel;
+    // The collapsed bar writes the two halves under either end of its
+    // timeline instead.
+    if (miniElapsedLabel) {
+      miniElapsedLabel.textContent = currentLabel;
+    }
+    if (miniTotalLabel) {
+      miniTotalLabel.textContent = durationLabel;
+    }
   }
 
   // What the button will actually copy changes with the selection, so it says
@@ -1849,18 +2089,93 @@ const selectObjectAtPoint = (event, { target = renderer, canvas = playfieldCanva
   return true;
 };
 
+let miniCoverRequestId = 0;
+let activeMiniCoverSetId = '';
+// The frame the cover's fade-in is held back for, until it runs.
+let miniCoverFadeRafId = null;
+
+const cancelMiniCoverFade = () => {
+  if (miniCoverFadeRafId !== null) {
+    cancelAnimationFrame(miniCoverFadeRafId);
+    miniCoverFadeRafId = null;
+  }
+};
+
 const updateMiniCover = (setId) => {
   if (!popup) {
     return;
   }
   const safeSetId = normalizeNumericId(setId);
-  if (safeSetId) {
-    popup.style.setProperty('--mini-cover-image', `url("https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg")`);
-    popup.classList.add('has-mini-cover');
-  } else {
-    popup.style.removeProperty('--mini-cover-image');
-    popup.classList.remove('has-mini-cover');
+  if (!IS_EMBEDDED_PLAYER) {
+    return;
   }
+  if (safeSetId && safeSetId !== activeMiniCoverSetId) {
+    activeMiniCoverSetId = safeSetId;
+    miniCoverRequestId += 1;
+    cancelMiniCoverFade();
+    const requestId = miniCoverRequestId;
+    const coverUrl = `https://assets.ppy.sh/beatmaps/${safeSetId}/covers/list.jpg`;
+    // Clear the old art as soon as the map changes. The new cover is revealed
+    // only after it has loaded, so it fades up from the empty tile.
+    popup.classList.remove('has-mini-cover', 'has-loaded-mini-cover');
+    miniArtImage?.removeAttribute('src');
+    const image = new Image();
+    image.onload = () => {
+      if (requestId !== miniCoverRequestId) {
+        return;
+      }
+      popup.style.setProperty('--mini-cover-image', `url("${coverUrl}")`);
+      if (miniArtImage) {
+        miniArtImage.src = coverUrl;
+      }
+      popup.classList.add('has-mini-cover');
+      // Without motion there is no fade to hold back: the cover is just there.
+      if (!allowsMotion()) {
+        popup.classList.add('has-loaded-mini-cover');
+        return;
+      }
+      popup.classList.remove('has-loaded-mini-cover');
+      const fadeElements = popup.querySelectorAll(
+        '.map-preview-mini-art-image, .map-preview-mini-art-halo, '
+        + '.map-preview-mini-art-bleed, .map-preview-mini-art-far',
+      );
+      fadeElements.forEach((element) => {
+        element.style.setProperty('transition', 'none');
+        element.style.setProperty('opacity', '0');
+      });
+      // Hold the image and its glow at zero opacity for one style frame, then
+      // let their 900ms CSS fade bring the cover in over the surface colour.
+      if (fadeElements.length > 0) {
+        void getComputedStyle(fadeElements[0]).opacity;
+      }
+      cancelMiniCoverFade();
+      miniCoverFadeRafId = requestAnimationFrame(() => {
+        miniCoverFadeRafId = null;
+        if (requestId !== miniCoverRequestId) {
+          return;
+        }
+        popup.classList.add('has-loaded-mini-cover');
+        fadeElements.forEach((element) => {
+          element.style.removeProperty('transition');
+          element.style.removeProperty('opacity');
+        });
+      });
+    };
+    image.onerror = () => {
+      if (requestId === miniCoverRequestId) {
+        activeMiniCoverSetId = '';
+      }
+    };
+    image.src = coverUrl;
+  } else if (!safeSetId) {
+    activeMiniCoverSetId = '';
+    miniCoverRequestId += 1;
+    cancelMiniCoverFade();
+    popup.style.removeProperty('--mini-cover-image');
+    popup.classList.remove('has-mini-cover', 'has-loaded-mini-cover');
+    miniArtImage?.removeAttribute('src');
+  }
+  miniTheme?.setCover(safeSetId);
 };
 
 const setMetadataText = () => {
@@ -2226,6 +2541,7 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
     }
 
     if (!info.valid) {
+      setDetachContext({});
       addDebugLog(`init: invalid tab url (${info.reason})`);
       setHeaderSubtitle();
       configureAudioPreview(null, null);
@@ -2392,7 +2708,12 @@ const initializePreviewForCurrentTab = async ({ sourceUrlOverride = '', resumeOv
       durationMs,
       currentTimeMs: startTimeMs,
     });
-    configureAudioPreview(resolvedSetId, metadata.previewTime, { skipPreviewClip: Boolean(resume) });
+    // Keep the preview clip attached across handoffs (e.g. opening the
+    // miniplayer while full audio is still downloading) so playback inside the
+    // ~10s preview window continues seamlessly and the collapsed wavy progress
+    // bar still knows preview audio is active. Out-of-range resume positions
+    // fall back straight to the manual clock until full audio arrives.
+    configureAudioPreview(resolvedSetId, metadata.previewTime);
 
 
     renderer.setBeatmap(mapData, durationMs, { previewTimeMs: metadata.previewTime });
@@ -2653,7 +2974,7 @@ getCommandShortcut('_execute_action').then((shortcut) => {
   }
 }).catch(() => {});
 
-bindPopupUiEvents({
+popupUiControls = bindPopupUiEvents({
   elements: {
     speedButton,
     speedControl,
@@ -2689,6 +3010,7 @@ bindPopupUiEvents({
     recentPanel,
     popupToast,
     embedButton,
+    unsupportedEmbedButton,
     detachButton,
     followButton,
     miniPlayButton,
@@ -2774,6 +3096,9 @@ window.addEventListener('pagehide', () => {
   state.toastHideTimer = registry.clearTimeout(state.toastHideTimer);
   stopPlayback();
   cancelEmbeddedRepaint();
+  cancelMiniCoverFade();
+  miniMorph.dispose();
+  miniTheme?.dispose();
   state.indicatorTimer = registry.clearTimeout(state.indicatorTimer);
   stopTimelineDurationAnimation();
   releaseFullAudioObjectUrl();

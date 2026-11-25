@@ -615,6 +615,26 @@ const createPlaybackController = ({
       return 'superseded';
     }
 
+    // Before metadata loads, setting `currentTime` on a HAVE_NOTHING element
+    // records the default start position without knowing the real duration.
+    // If play() then discovered a shorter preview clip and clamped backwards
+    // (or ended immediately), keep the visual clock at targetMapMs instead of
+    // pulling the playhead back into the clip.
+    const clampedShort = !reloadedSlice && (
+      Boolean(state.audio.ended)
+      || (
+        Number.isFinite(targetMapMs)
+        && getRawAudioMappedTimeMs() < (
+          targetMapMs + getAudioOutputLatencyMapMs() - AUDIO_SEEK_LANDING_TOLERANCE_MS
+        )
+      )
+    );
+    if (clampedShort) {
+      pauseAudioElement();
+      state.playbackMode = 'none';
+      return 'unavailable';
+    }
+
     state.isPlaying = true;
     adoptAudioClock();
     return 'started';

@@ -203,11 +203,15 @@ to build just one target, run `npm run package:chrome` or `npm run package:firef
 
 ## performance benchmarks
 
-run `npm run performance:micro` for the Node microbenchmarks. Run `npm run performance` to open the browser benchmark, then press **Run 8-second tests**. Each completed run is appended to `performance-results/results.jsonl` with its timestamp, benchmark metrics, build revision, and environment details. Keep this file with the build history to compare results across revisions. The browser benchmark's **Save result as baseline** button separately stores a same-device comparison baseline in that browser's local storage.
+run `npm run performance` to start the benchmark server and open the Benchmark Dashboard in your browser (pass `--no-open` to skip auto-opening, `--port <n>` to choose a port, `--duration <sec>` to change pass length, `--scenario <id>` to pre-select a render workload, `--auto[=<scenario>]` to run a visual pass immediately, `--startup` for the Open & Load tab, `--history` for saved trends, or `--micro` for Node microbenchmarks).
 
-the scenario list has three workloads: 8,000 mixed objects, a synthetic 4,344-anchor slider, and `aspire-conic`, which replays osu! beatmap 5839914 ("conic", Aspire) at 01:23 from the bundled `scripts/benchmark-maps/5839914.osu`. That moment is the slider-body worst case, because 7,427-anchor decorative sliders are on screen. Append `?autobench=aspire-conic` or `?autobench=anchor-heavy-slider` to the page URL to run that scenario's visual-only pass straight away (autobench does not append to `results.jsonl`, and does not support `object-stress`).
+the dashboard covers four areas:
+- **Render**: measures real canvas FPS, frame-interval p50/p95/p99, JS work, and dropped frames across 8 workloads (`anchor-heavy-slider`, `aspire-conic`, `object-stress`, `mania-7k`, `catch-fruits`, `compare-4up` for 4 simultaneous difficulty playfields, `miniplayer-collapsed` for the 156px OKLCH-themed wavy progress bar, and `miniplayer-toggle` for repeated 260ms Material fade-through collapse/expand transitions), individually or via **Run All**.
+- **Open & Load**: loads the real `popup.html` + `popup.css` + `src/mapRequest.js` + `src/popup.js` inside a local sandbox with mocked browser storage/network to time first-click startup phases (`DOM + CSS` → `JS Boot` → `Reveal` → `Parse + Render` → `Paint`) for **Cached Open**, **Cold Open**, **Unsupported Tab**, **Miniplayer Expanded**, and **Miniplayer Collapsed**, plus in-browser subsystem timings.
+- **History**: trends and comparisons across saved `render` and `startup` runs in `performance-results/results.jsonl`, with automatic **Efficiency Mode** detection/tagging (rAF ~30Hz cap, battery status, or manual header toggle) and a filter to hide efficiency-mode runs.
+- **Micro**: runs `npm run performance:micro` (Node timing/timeline speedups plus `.osu` parsing, ruleset conversions, hitsound building, `.osz` ZIP inflation, MP3 frame indexing, OKLCH cover palette extraction, wavy progress drawing, and miniplayer bounds/resume geometry). Pass `--no-save`, `--history [n]`, `--samples <n>`, or `--json` on the CLI.
 
-the benchmark server only listens on this machine. to run it from a phone or another device on the same network, start it with `MOSU_PERF_LAN=1 npm run performance` (PowerShell: `$env:MOSU_PERF_LAN='1'; npm run performance`). Pass `--no-save` to `npm run performance:micro -- --no-save` to skip appending to `performance-results/results.jsonl`.
+the benchmark server only listens on this machine by default. to run it from a phone or another device on the same network, start it with `npm run performance -- --lan` (or `MOSU_PERF_LAN=1 npm run performance`).
 
 ## development
 

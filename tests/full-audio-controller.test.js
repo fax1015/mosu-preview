@@ -49,7 +49,7 @@ const createHarness = (overrides = {}) => {
   const controller = createFullAudioController({
     state,
     registry,
-    hitsoundPlayer: { attachMediaElement() {} },
+    hitsoundPlayer: { attachMediaElement() {}, resumeContext() {} },
     addDebugLog: (msg) => debugLogs.push(msg),
     badge: {
       setAudioBadge: (text, cls) => badges.push({ text, cls }),
@@ -155,4 +155,16 @@ test('fullAudioController captures mapsetInfo before awaiting cache read so meta
   await load;
 
   assert.equal(backfilledInfo?.title, 'Song A');
+});
+
+test('configureAudioPreview attaches the b.ppy.sh preview clip for anchorable PreviewTime', () => {
+  const { state, controller } = createHarness();
+  state.audio.removeAttribute = () => { state.audio.src = ''; };
+
+  controller.configureAudioPreview('970063', 610591);
+
+  assert.equal(state.audioSyncEnabled, true);
+  assert.equal(state.audio.src, 'https://b.ppy.sh/preview/970063.mp3');
+  assert.equal(state.audioAnchorMapMs, 610491);
+  assert.equal(state.audioAnchorSrc, 'https://b.ppy.sh/preview/970063.mp3');
 });

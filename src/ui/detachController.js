@@ -278,7 +278,8 @@ const createDetachController = ({
 
     if (followButton) {
       followButton.classList.toggle('is-following', state.followEnabled);
-      followButton.setAttribute('aria-pressed', state.followEnabled ? 'true' : 'false');
+      // Pressed means pinned: that is the state the button shows as on.
+      followButton.setAttribute('aria-pressed', state.followEnabled ? 'false' : 'true');
       const label = state.followEnabled
         ? 'Following the browser — click to pin this map'
         : 'Pinned to this map — click to follow the browser';

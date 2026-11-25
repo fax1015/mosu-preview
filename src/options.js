@@ -22,6 +22,8 @@ import { clearHistory } from './core/history.js';
 
 const popupSizeSelect = document.querySelector('#popupSize');
 const embeddedPlayerToggle = document.querySelector('#embeddedPlayer');
+const miniWavyProgressToggle = document.querySelector('#miniWavyProgress');
+const miniHitsoundsWhenCollapsedToggle = document.querySelector('#miniHitsoundsWhenCollapsed');
 const maniaScrollSpeedRange = document.querySelector('#maniaScrollSpeedRange');
 const maniaScrollSpeedInput = document.querySelector('#maniaScrollSpeedInput');
 const maniaScrollSpeedValue = document.querySelector('#maniaScrollSpeedValue');
@@ -544,6 +546,8 @@ const getFormSettings = () => ({
     autoFallback: autoFallbackToggle?.checked ?? true,
     autoplay: autoplayToggle?.checked,
     embeddedPlayer: embeddedPlayerToggle?.checked ?? false,
+    miniWavyProgress: miniWavyProgressToggle?.checked,
+    miniHitsoundsWhenCollapsed: miniHitsoundsWhenCollapsedToggle?.checked,
     hitsounds: hitsoundsToggle?.checked ?? false,
     hitsoundVolume: hitsoundVolumeRange ? Number(hitsoundVolumeRange.value) / 100 : undefined,
     hitsoundStyle: hitsoundStyleSelect?.value,
@@ -576,6 +580,12 @@ const applySettingsToForm = (settings) => {
   }
   if (embeddedPlayerToggle) {
     embeddedPlayerToggle.checked = settings.embeddedPlayer;
+  }
+  if (miniWavyProgressToggle) {
+    miniWavyProgressToggle.checked = settings.miniWavyProgress;
+  }
+  if (miniHitsoundsWhenCollapsedToggle) {
+    miniHitsoundsWhenCollapsedToggle.checked = settings.miniHitsoundsWhenCollapsed;
   }
   renderManiaScrollSpeed(settings.maniaScrollSpeed);
   renderProviderPriority();
@@ -767,6 +777,14 @@ const initialize = async () => {
   });
 
   embeddedPlayerToggle?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  miniWavyProgressToggle?.addEventListener('change', async () => {
+    await persistFormSettings();
+  });
+
+  miniHitsoundsWhenCollapsedToggle?.addEventListener('change', async () => {
     await persistFormSettings();
   });
 

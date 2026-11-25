@@ -20,6 +20,8 @@ export const HITSOUND_VOLUME_KEY = 'hitsoundVolume';
 export const HITSOUND_STYLE_KEY = 'hitsoundStyle';
 export const AUTOPLAY_KEY = 'autoplay';
 export const EMBEDDED_PLAYER_KEY = 'embeddedPlayer';
+export const MINI_WAVY_PROGRESS_KEY = 'miniWavyProgress';
+export const MINI_HITSOUNDS_WHEN_COLLAPSED_KEY = 'miniHitsoundsWhenCollapsed';
 export const KEYBINDINGS_KEY = 'keybindings';
 
 export const DEFAULT_AUDIO_VOLUME = 0.8;
@@ -46,6 +48,11 @@ export const DEFAULT_HITSOUND_STYLE = 'argon';
 // waited to be asked.
 export const DEFAULT_AUTOPLAY = true;
 export const DEFAULT_EMBEDDED_PLAYER = false;
+// The collapsed miniplayer's progress as a wavy line rather than the map's
+// timeline. On: it is the miniplayer's look; off is there to compare with.
+export const DEFAULT_MINI_WAVY_PROGRESS = true;
+// Keep existing behaviour unless the user turns collapsed hitsounds off.
+export const DEFAULT_MINI_HITSOUNDS_WHEN_COLLAPSED = true;
 
 // The voices each style plays live in audio/hitsounds.js; this is only the list
 // a stored choice is checked against, so the options page does not have to load
@@ -133,6 +140,8 @@ export const PREVIEW_SETTING_KEYS = Object.freeze([
   HITSOUND_STYLE_KEY,
   AUTOPLAY_KEY,
   EMBEDDED_PLAYER_KEY,
+  MINI_WAVY_PROGRESS_KEY,
+  MINI_HITSOUNDS_WHEN_COLLAPSED_KEY,
   KEYBINDINGS_KEY,
 ]);
 
@@ -296,6 +305,19 @@ export const normalizeHitsounds = (value) => normalizeBooleanSetting(value, DEFA
 export const normalizeAutoplay = (value) => normalizeBooleanSetting(value, DEFAULT_AUTOPLAY);
 
 export const normalizeEmbeddedPlayer = (value) => normalizeBooleanSetting(value, DEFAULT_EMBEDDED_PLAYER);
+export const normalizeMiniWavyProgress = (value) => normalizeBooleanSetting(value, DEFAULT_MINI_WAVY_PROGRESS);
+export const normalizeMiniHitsoundsWhenCollapsed = (value) => normalizeBooleanSetting(
+  value,
+  DEFAULT_MINI_HITSOUNDS_WHEN_COLLAPSED,
+);
+
+/**
+ * Whether hitsounds play: when they are on, except in the in-page
+ * miniplayer's collapsed bar when the setting for it is off.
+ */
+export const shouldPlayHitsounds = ({ hitsounds, isEmbedded, collapsed, whenCollapsed }) => Boolean(
+  hitsounds && (!isEmbedded || !collapsed || whenCollapsed),
+);
 
 export const normalizeHitsoundVolume = (value) => normalizeUnitRange(value, DEFAULT_HITSOUND_VOLUME);
 
@@ -352,6 +374,10 @@ export const normalizePreviewSettings = (items = {}) => ({
   hitsoundStyle: normalizeHitsoundStyle(items?.[HITSOUND_STYLE_KEY] ?? items?.hitsoundStyle),
   autoplay: normalizeAutoplay(items?.[AUTOPLAY_KEY] ?? items?.autoplay),
   embeddedPlayer: normalizeEmbeddedPlayer(items?.[EMBEDDED_PLAYER_KEY] ?? items?.embeddedPlayer),
+  miniWavyProgress: normalizeMiniWavyProgress(items?.[MINI_WAVY_PROGRESS_KEY] ?? items?.miniWavyProgress),
+  miniHitsoundsWhenCollapsed: normalizeMiniHitsoundsWhenCollapsed(
+    items?.[MINI_HITSOUNDS_WHEN_COLLAPSED_KEY] ?? items?.miniHitsoundsWhenCollapsed,
+  ),
   keybindings: normalizeKeybindings(items?.[KEYBINDINGS_KEY] ?? items?.keybindings),
 });
 
@@ -375,6 +401,8 @@ export const toPreviewSettingsStorage = (settings = {}) => {
     [HITSOUND_STYLE_KEY]: normalized.hitsoundStyle,
     [AUTOPLAY_KEY]: normalized.autoplay,
     [EMBEDDED_PLAYER_KEY]: normalized.embeddedPlayer,
+    [MINI_WAVY_PROGRESS_KEY]: normalized.miniWavyProgress,
+    [MINI_HITSOUNDS_WHEN_COLLAPSED_KEY]: normalized.miniHitsoundsWhenCollapsed,
     // Sparse: only what the user moved off its default, so adding a shortcut
     // later does not need a migration of everyone's stored map.
     [KEYBINDINGS_KEY]: toStoredKeybindings(normalized.keybindings),

@@ -308,25 +308,48 @@ html.is-detached-window .map-preview-canvas-wrap {
    shell's height transition. */
 html.is-embedded-player .map-preview-popup {
     overflow: hidden;
-    transition: padding 280ms cubic-bezier(0.32, 0.72, 0, 1),
-                background-color 240ms ease;
+    /* The switch between the expanded view and the collapsed bar fades the
+       popup through (src/ui/miniMorph.js) and settles it up from just under
+       full size, from the top. */
+    transform-origin: 50% 0;
 }
 
-html.is-embedded-player .map-preview-header,
+/* The page under the popup is the popup's own colour in both layouts, so
+   fading the popup through only fades its contents. */
+html.is-embedded-player body {
+    background-color: rgb(36, 34, 42);
+}
+
+html.is-embedded-collapsed body {
+    background-color: var(--mini-surface);
+}
+
+/* For the instant the layout switches: everything lands in its new place
+   and colour at once, under the fade, rather than transitioning there. */
+html.is-mini-switching *,
+html.is-mini-switching *::before,
+html.is-mini-switching *::after {
+    transition: none !important;
+    animation: none !important;
+}
+
 html.is-embedded-player .map-preview-canvas-wrap,
 html.is-embedded-player .map-preview-controls {
     position: relative;
     z-index: 3;
 }
 
+/* The compare picker lives in the header. Lift the whole header above the
+   preview's stacking context so the popover can paint over the playfield. */
+html.is-embedded-player .map-preview-header {
+    position: relative;
+    z-index: 4;
+}
+
 html.is-embedded-player .map-preview-canvas-wrap {
     flex: 1 1 0;
     min-height: 0;
     aspect-ratio: auto;
-    opacity: 1;
-    transition: opacity 200ms ease,
-                margin-bottom 280ms cubic-bezier(0.32, 0.72, 0, 1),
-                border-color 180ms ease;
 }
 
 /* Detaching from a detached window would just spawn a duplicate. */
@@ -357,334 +380,678 @@ html.is-embedded-player .map-preview-follow-btn {
     display: inline-flex;
 }
 
-/* Split album-art panel + dynamic cover-color edge bleed: hidden outside the
-   embedded miniplayer, and smoothly revealed when collapsed into audio mode. */
+/* Collapsed in-page miniplayer
+   ----------------------------
+   The miniplayer on osu.ppy.sh folds into a bar 154px tall inside its 1px
+   shell border (src/content.js: COLLAPSED_HEIGHT), laid out on one 16px
+   margin all round:
+
+       ┌ mosu! preview ─────────── ═══ ─────────────── (^) (×) ┐  shell, 10-32
+       │ [cover]  Title                                 [ ▶ ]  │  40-92
+       │          Artist  [Difficulty]                         │
+       │ ▮▮▮▯▯▯▯ timeline ▯▯▯▯▯▯▯▯▯▯▯     (vol|1x|follow|more)  │  104-138
+       └ 0:36                       2:48 ───────────────────────┘
+
+   The top row is the shell's own bar, see-through over this page, so the
+   cover's colours run up behind it. The elements the expanded view lays out
+   in its header and controls capsule are placed absolutely here instead.
+   Switching between the two is a quick fade-through (src/ui/miniMorph.js),
+   so nothing travels across the window. The colours are the cover art's,
+   from src/ui/miniTheme.js. */
+
+/* The palette. Registered as colours so a new cover fades the whole bar
+   across to its palette instead of snapping. The initial values are the
+   palette for a cover with no colour to take. */
+@property --mini-surface {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(36, 34, 42);
+}
+
+@property --mini-surface-high {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(53, 50, 63);
+}
+
+@property --mini-on-surface {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(241, 239, 248);
+}
+
+@property --mini-on-surface-variant {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(188, 183, 206);
+}
+
+@property --mini-primary-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(67, 52, 127);
+}
+
+@property --mini-on-primary-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(226, 217, 255);
+}
+
+@property --mini-secondary-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(52, 45, 79);
+}
+
+@property --mini-on-secondary-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(184, 172, 255);
+}
+
+@property --mini-accent {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(184, 172, 255);
+}
+
+@property --mini-play-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(236, 233, 246);
+}
+
+@property --mini-on-play-container {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: rgb(31, 29, 38);
+}
+
+html.is-embedded-player {
+    /* Corners and colours changing under the pointer: Material 3's
+       emphasized easing, quick to start and soft to land. Switching between
+       the two layouts is a fade-through instead (src/ui/miniMorph.js). */
+    --m3-shape: cubic-bezier(0.2, 0, 0, 1);
+    --m3-shape-ms: 220ms;
+    --mini-pad: 16px;
+    --mini-row-a-top: 40px;
+    --mini-row-a-height: 52px;
+    --mini-row-b-top: 104px;
+    --mini-row-b-height: 34px;
+    --mini-group-button: 36px;
+    --mini-group-gap: 2px;
+    --mini-group-width: calc((var(--mini-group-button) * 4) + (var(--mini-group-gap) * 3));
+    --mini-gutter: 14px;
+    transition:
+        --mini-surface 700ms ease,
+        --mini-surface-high 700ms ease,
+        --mini-on-surface 700ms ease,
+        --mini-on-surface-variant 700ms ease,
+        --mini-primary-container 700ms ease,
+        --mini-on-primary-container 700ms ease,
+        --mini-secondary-container 700ms ease,
+        --mini-on-secondary-container 700ms ease,
+        --mini-accent 700ms ease,
+        --mini-play-container 700ms ease,
+        --mini-on-play-container 700ms ease;
+}
+
+/* Only the collapsed bar has these. */
 .map-preview-mini-backdrop,
-.map-preview-mini-art {
+.map-preview-mini-art,
+.map-preview-mini-play-btn,
+.map-preview-mini-times {
     display: none;
 }
 
-html.is-embedded-player .map-preview-mini-backdrop {
+/* The cover's colour bleeding in from the left edge: a wide soft blur, a
+   tighter one nearer the cover, and the surface laid over both so the right
+   half stays calm enough for the controls. Pure CSS blur and masks, so a
+   cover served without CORS headers still works. */
+html.is-embedded-collapsed .map-preview-mini-backdrop {
     display: block;
     position: absolute;
     inset: 0;
     z-index: 0;
-    pointer-events: none;
-    opacity: 0;
     overflow: hidden;
-    transition: opacity 260ms ease;
+    pointer-events: none;
 }
 
-/* Dynamic ambient bleed driven directly by the beatmap's own cover art (pure
-   CSS blur + mask, so multi-hue edges bleed organically with no CORS canvas). */
-html.is-embedded-player .map-preview-mini-art-bleed {
+html.is-embedded-player .map-preview-mini-art-bleed,
+html.is-embedded-player .map-preview-mini-art-far {
     position: absolute;
-    inset: -24px -12px -24px -24px;
     background-image: var(--mini-cover-image, linear-gradient(135deg, rgba(84, 58, 168, 0.7), rgba(140, 102, 255, 0.55)));
-    background-size: 224px 160px;
-    background-position: left center;
     background-repeat: no-repeat;
-    filter: blur(38px) saturate(1.55) brightness(1.04);
-    opacity: 0.4;
-    -webkit-mask-image: linear-gradient(90deg,
-        rgba(0, 0, 0, 1) 0%,
-        rgba(0, 0, 0, 0.76) 22%,
-        rgba(0, 0, 0, 0.34) 46%,
-        rgba(0, 0, 0, 0.1) 70%,
-        transparent 94%);
-    mask-image: linear-gradient(90deg,
-        rgba(0, 0, 0, 1) 0%,
-        rgba(0, 0, 0, 0.76) 22%,
-        rgba(0, 0, 0, 0.34) 46%,
-        rgba(0, 0, 0, 0.1) 70%,
-        transparent 94%);
 }
 
-/* Subtle darkening scrim over the right deck so typography & waveform stay crisp. */
+html.is-embedded-player .map-preview-mini-art-bleed {
+    inset: -24px -12px -24px -24px;
+    background-size: 250px 202px;
+    background-position: left center;
+    filter: blur(38px) saturate(1.55) brightness(1.04);
+    opacity: 0;
+    transition: opacity 900ms cubic-bezier(0.2, 0, 0, 1);
+    -webkit-mask-image: linear-gradient(90deg, #000 0%, rgba(0, 0, 0, 0.76) 22%, rgba(0, 0, 0, 0.34) 46%,
+        rgba(0, 0, 0, 0.1) 70%, transparent 94%);
+    mask-image: linear-gradient(90deg, #000 0%, rgba(0, 0, 0, 0.76) 22%, rgba(0, 0, 0, 0.34) 46%,
+        rgba(0, 0, 0, 0.1) 70%, transparent 94%);
+}
+
+html.is-embedded-player .map-preview-mini-art-far {
+    top: -16px;
+    bottom: -16px;
+    left: 0;
+    width: 200px;
+    background-size: cover;
+    background-position: right center;
+    filter: blur(24px) saturate(1.4) brightness(1.03);
+    opacity: 0;
+    transition: opacity 900ms cubic-bezier(0.2, 0, 0, 1);
+    -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.68) 30%,
+        rgba(0, 0, 0, 0.18) 70%, transparent 100%);
+    mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.68) 30%,
+        rgba(0, 0, 0, 0.18) 70%, transparent 100%);
+}
+
+html.is-embedded-player .map-preview-popup.has-loaded-mini-cover .map-preview-mini-art-bleed {
+    opacity: 0.46;
+}
+
+html.is-embedded-player .map-preview-popup.has-loaded-mini-cover .map-preview-mini-art-far {
+    opacity: 0.4;
+}
+
 html.is-embedded-player .map-preview-mini-deck-scrim {
     position: absolute;
     inset: 0;
     background: linear-gradient(90deg,
-        rgba(22, 20, 28, 0.06) 0%,
-        rgba(24, 22, 30, 0.38) 25%,
-        rgba(26, 24, 32, 0.7) 52%,
-        rgba(28, 26, 34, 0.88) 100%);
+        color-mix(in srgb, var(--mini-surface) 8%, transparent) 0%,
+        color-mix(in srgb, var(--mini-surface) 36%, transparent) 25%,
+        color-mix(in srgb, var(--mini-surface) 74%, transparent) 52%,
+        color-mix(in srgb, var(--mini-surface) 92%, transparent) 100%);
 }
 
-/* 1:1 square cover-art panel (112x112 inside the 146px collapsed shell). */
-html.is-embedded-player .map-preview-mini-art {
+/* The cover: a rounded square with a soft glow of itself behind it. */
+html.is-embedded-collapsed .map-preview-mini-art {
+    display: block;
+    position: absolute;
+    z-index: 3;
+    top: var(--mini-row-a-top);
+    left: var(--mini-pad);
+    width: var(--mini-row-a-height);
+    height: var(--mini-row-a-height);
+    pointer-events: none;
+}
+
+html.is-embedded-player .map-preview-mini-art-halo {
+    position: absolute;
+    inset: -18px;
+    border-radius: 50%;
+    background-image: var(--mini-cover-image, none);
+    background-size: cover;
+    background-position: center;
+    filter: blur(16px) saturate(1.5);
+    opacity: 0;
+    transition: opacity 900ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+html.is-embedded-player .map-preview-popup.has-loaded-mini-cover .map-preview-mini-art-halo {
+    opacity: 0.7;
+}
+
+html.is-embedded-player .map-preview-mini-art-tile {
+    position: absolute;
+    inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 112px;
-    z-index: 2;
-    opacity: 0;
-    transform: translateX(-16px);
-    pointer-events: none;
-    transition: opacity 220ms ease,
-                transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+    border-radius: 16px;
+    background-color: var(--mini-surface-high);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
 }
 
-/* Sharp left core of the cover art, softly feathered before the text column. */
-html.is-embedded-player .map-preview-mini-art-sharp {
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 114px;
-    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
-    background-size: cover;
-    background-position: center;
-    -webkit-mask-image: linear-gradient(90deg,
-        #000 0%,
-        #000 42%,
-        rgba(0, 0, 0, 0.68) 62%,
-        rgba(0, 0, 0, 0.18) 82%,
-        transparent 98%);
-    mask-image: linear-gradient(90deg,
-        #000 0%,
-        #000 42%,
-        rgba(0, 0, 0, 0.68) 62%,
-        rgba(0, 0, 0, 0.18) 82%,
-        transparent 98%);
-}
-
-/* Progressive mid-blur band across the right edge of the cover art. */
-html.is-embedded-player .map-preview-mini-art-blur-mid {
-    position: absolute;
-    top: -8px;
-    left: 0;
-    bottom: -8px;
-    width: 132px;
-    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
-    background-size: cover;
-    background-position: center;
-    filter: blur(10px) saturate(1.2);
-    opacity: 0.78;
-    -webkit-mask-image: linear-gradient(90deg,
-        transparent 36%,
-        rgba(0, 0, 0, 0.78) 60%,
-        rgba(0, 0, 0, 0.26) 80%,
-        transparent 100%);
-    mask-image: linear-gradient(90deg,
-        transparent 36%,
-        rgba(0, 0, 0, 0.78) 60%,
-        rgba(0, 0, 0, 0.26) 80%,
-        transparent 100%);
-}
-
-/* Soft far-edge blur bloom extending gently into the right deck. */
-html.is-embedded-player .map-preview-mini-art-blur-far {
-    position: absolute;
-    top: -16px;
-    left: 16px;
-    bottom: -16px;
-    width: 184px;
-    background-image: var(--mini-cover-image, linear-gradient(135deg, #271b48 0%, #52348c 100%));
-    background-size: cover;
-    background-position: right center;
-    filter: blur(24px) saturate(1.4) brightness(1.03);
-    opacity: 0.38;
-    -webkit-mask-image: linear-gradient(90deg,
-        transparent 28%,
-        rgba(0, 0, 0, 0.68) 50%,
-        rgba(0, 0, 0, 0.18) 76%,
-        transparent 100%);
-    mask-image: linear-gradient(90deg,
-        transparent 28%,
-        rgba(0, 0, 0, 0.68) 50%,
-        rgba(0, 0, 0, 0.18) 76%,
-        transparent 100%);
-}
-
-html.is-embedded-player .map-preview-mini-art-vignette {
+html.is-embedded-player .map-preview-mini-art-image {
     position: absolute;
     inset: 0;
-    background: radial-gradient(circle at 48% 50%, rgba(16, 15, 22, 0.3) 0%, rgba(16, 15, 22, 0.08) 65%, transparent 100%);
-    pointer-events: none;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    object-fit: cover;
+    opacity: 0;
+    transition: opacity 900ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* An empty <img> can show the browser's broken-image glyph even with empty
+   alt text. Keep the element out of layout until a real cover URL is assigned. */
+html.is-embedded-player .map-preview-mini-art-image:not([src]) {
+    display: none;
+}
+
+html.is-embedded-player .map-preview-popup.has-loaded-mini-cover .map-preview-mini-art-image {
+    opacity: 1;
 }
 
 html.is-embedded-player .map-preview-mini-art-fallback {
-    position: absolute;
-    width: 24px;
-    height: 24px;
-    fill: rgba(210, 194, 255, 0.26);
-    transform: translateX(-2px);
-    pointer-events: none;
+    width: 20px;
+    height: 20px;
+    fill: var(--mini-on-surface-variant);
+    opacity: 0.6;
 }
 
 html.is-embedded-player .map-preview-popup.has-mini-cover .map-preview-mini-art-fallback {
     display: none;
 }
 
-/* Collapsed split album-art audio deck inside osu.ppy.sh.
-   Right deck uses centered vertical rhythm (metadata -> 9px -> waveform -> 5px
-   -> footer) aligned to a shared 126px left rail and 16px right rail. */
-html.is-embedded-collapsed .map-preview-popup {
-    padding: 9px 16px 9px 126px;
+/* Play and pause: a soft square that rounds into a circle while it plays,
+   and squares up a little under the pointer. The two glyphs swap with a
+   turn. */
+html.is-embedded-collapsed .map-preview-mini-play-btn {
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
-    background: rgb(30, 28, 36);
+    position: absolute;
+    z-index: 4;
+    top: var(--mini-row-a-top);
+    right: var(--mini-pad);
+    width: var(--mini-row-a-height);
+    height: var(--mini-row-a-height);
+    padding: 0;
+    border: 0;
+    border-radius: 16px;
+    background: var(--mini-play-container);
+    color: var(--mini-on-play-container);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 4px 10px rgba(0, 0, 0, 0.22);
+    cursor: pointer;
+    transition: border-radius var(--m3-shape-ms) var(--m3-shape),
+                scale var(--m3-shape-ms) var(--m3-shape);
 }
 
-html.is-embedded-collapsed .map-preview-mini-backdrop {
+html.is-embedded-collapsed .map-preview-mini-play-btn.is-playing {
+    border-radius: 26px;
+}
+
+/* State layer: the button's own ink, faintly, so it lifts the same way
+   whatever colour the cover gave it. */
+html.is-embedded-player .map-preview-mini-play-btn::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: currentColor;
+    opacity: 0;
+    transition: opacity 150ms ease;
+    pointer-events: none;
+}
+
+html.is-embedded-collapsed .map-preview-mini-play-btn:hover::after {
+    opacity: 0.08;
+}
+
+html.is-embedded-collapsed .map-preview-mini-play-btn:active {
+    border-radius: 12px;
+    scale: 0.92;
+}
+
+html.is-embedded-collapsed .map-preview-mini-play-btn:active::after {
+    opacity: 0.14;
+}
+
+html.is-embedded-player .map-preview-mini-play-btn:focus-visible {
+    outline: 2px solid var(--mini-on-surface);
+    outline-offset: 2px;
+}
+
+html.is-embedded-player .map-preview-mini-play-icon {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    fill: currentColor;
+    transition: opacity 120ms ease,
+                transform var(--m3-shape-ms) var(--m3-shape);
+}
+
+/* The triangle's own box is centred; one pixel left makes it look so. */
+html.is-embedded-player .map-preview-mini-play-icon--play {
+    transform: translateX(-1px);
+}
+
+html.is-embedded-player .map-preview-mini-play-icon--pause {
+    opacity: 0;
+    transform: scale(0.3) rotate(-90deg);
+}
+
+html.is-embedded-player .map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--play {
+    opacity: 0;
+    transform: translateX(-1px) scale(0.3) rotate(90deg);
+}
+
+html.is-embedded-player .map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--pause {
     opacity: 1;
+    transform: none;
 }
 
-html.is-embedded-collapsed .map-preview-mini-art {
-    opacity: 1;
-    transform: translateX(0);
-    pointer-events: auto;
+/* The page itself. Padding and flow give way to the absolute layout; the
+   header and the controls capsule stay in the document but lend their
+   children to it, so those children are positioned against the page. */
+html.is-embedded-collapsed .map-preview-popup {
+    padding: 0;
+    background: var(--mini-surface);
 }
 
+html.is-embedded-collapsed .map-preview-popup.is-unsupported {
+    min-height: 0;
+}
+
+html.is-embedded-collapsed .map-preview-popup.is-unsupported .map-preview-unsupported {
+    min-height: 0;
+    flex: 1 1 auto;
+    border: 0;
+    border-radius: 0;
+    background: var(--mini-surface);
+    padding: 0.75rem;
+}
+
+html.is-embedded-collapsed .map-preview-popup.is-unsupported .map-preview-recent-panel {
+    display: none;
+}
+
+html.is-embedded-player .map-preview-popup.is-unsupported .map-preview-recent-panel {
+    display: none;
+}
+
+html.is-embedded-collapsed .map-preview-header,
+html.is-embedded-collapsed .map-preview-header-actions,
+html.is-embedded-collapsed .map-preview-controls {
+    position: static;
+}
+
+html.is-embedded-collapsed .map-preview-header {
+    margin: 0;
+    /* The expanded header sits above the playfield for its compare popover.
+       As a static flex item that z-index would still cover the collapsed
+       controls, so let its absolutely positioned children join the mini-bar's
+       own layer order instead. */
+    z-index: auto;
+}
+
+html.is-embedded-collapsed .map-preview-controls {
+    --map-preview-capsule-inner-height: var(--mini-row-b-height);
+    display: block;
+    height: 0;
+    min-height: 0;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+}
+
+/* The playfield folds to nothing, so the renderer stops drawing a frame
+   nobody can see. */
 html.is-embedded-collapsed .map-preview-canvas-wrap {
     flex: 0 0 0;
-    min-height: 0;
     height: 0;
-    margin-bottom: 0;
+    min-height: 0;
+    margin: 0;
     border-width: 0;
-    border-color: transparent;
-    opacity: 0;
+    visibility: hidden;
     pointer-events: none;
 }
 
 html.is-embedded-collapsed .map-preview-debug-panel,
-html.is-embedded-collapsed .map-preview-compare-control {
-    display: none;
-}
-
-html.is-embedded-collapsed .map-preview-header {
-    margin-bottom: 9px;
-    gap: 10px;
-    align-items: center;
-}
-
-html.is-embedded-collapsed .map-preview-headings {
-    gap: 2px;
-}
-
-html.is-embedded-collapsed .map-preview-title {
-    font-size: 1.02rem;
-    font-weight: 700;
-    line-height: 1.16;
-    letter-spacing: -0.015em;
-    color: #fff;
-    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.42);
-}
-
-html.is-embedded-collapsed .map-preview-subtitle {
-    font-size: 0.67rem;
-    line-height: 1.2;
-    color: rgba(188, 183, 206, 0.72);
-}
-
-html.is-embedded-collapsed .map-preview-version {
-    color: rgba(212, 208, 226, 0.8);
-    font-weight: 600;
-}
-
-html.is-embedded-collapsed .map-preview-header-actions {
-    gap: 2px;
-}
-
-html.is-embedded-collapsed .map-preview-info-btn {
-    width: 22px;
-    height: 22px;
-    flex: 0 0 22px;
-    border-color: transparent;
-    border-radius: 999px;
-    color: rgba(204, 199, 220, 0.56);
-}
-
-html.is-embedded-collapsed .map-preview-info-btn:hover {
-    background: rgba(255, 255, 255, 0.11);
-    border-color: transparent;
-    color: var(--text-primary);
-}
-
-html.is-embedded-collapsed .map-preview-follow-btn.is-following {
-    color: rgba(236, 233, 246, 0.86);
-    background: rgba(255, 255, 255, 0.06);
-    border-color: transparent;
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
-}
-
-/* 2-row right-hand transport deck: full-width waveform tightly paired with
-   its timestamp and matched volume/speed pills directly beneath it. */
-html.is-embedded-collapsed .map-preview-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-rows: 24px 22px;
-    grid-auto-flow: row;
-    align-items: center;
-    column-gap: 6px;
-    row-gap: 5px;
-    padding: 0;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-}
-
+html.is-embedded-collapsed .map-preview-compare-control,
+html.is-embedded-collapsed .map-preview-detach-btn,
+html.is-embedded-collapsed .map-preview-embed-btn,
 html.is-embedded-collapsed .map-preview-control-divider,
 html.is-embedded-collapsed .map-preview-keys-control {
     display: none;
 }
 
-html.is-embedded-collapsed .map-preview-timeline {
-    grid-column: 1 / -1;
-    grid-row: 1;
-    width: 100%;
-    height: 24px;
-    border-radius: 7px;
-    background: rgba(12, 11, 16, 0.42);
-    backdrop-filter: blur(6px);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+/* Title, artist and difficulty, between the cover and the play button. */
+html.is-embedded-collapsed .map-preview-headings {
+    position: absolute;
+    z-index: 3;
+    top: var(--mini-row-a-top);
+    left: calc(var(--mini-pad) + var(--mini-row-a-height) + var(--mini-gutter));
+    right: calc(var(--mini-pad) + var(--mini-row-a-height) + var(--mini-gutter));
+    height: var(--mini-row-a-height);
+    justify-content: center;
+    gap: 4px;
 }
 
-/* Static readout in collapsed mode: not clickable, aligned with the left rail
-   and lifted by Torus's 0.1em baseline offset to match the right pills. */
-html.is-embedded-collapsed .map-preview-time-label {
-    grid-column: 1;
-    grid-row: 2;
-    justify-self: start;
-    justify-content: flex-start;
-    width: auto;
-    height: 22px;
-    padding: 0 0 0.1em;
-    font-size: 0.68rem;
+html.is-embedded-collapsed .map-preview-title {
+    font-size: 17px;
+    line-height: 20px;
+    letter-spacing: -0.01em;
+    color: var(--mini-on-surface);
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.4);
+}
+
+html.is-embedded-collapsed .map-preview-subtitle {
+    align-items: center;
+    gap: 6px;
+    height: 20px;
+    font-size: 12px;
+    color: var(--mini-on-surface-variant);
+}
+
+html.is-embedded-collapsed .map-preview-artist {
     font-weight: 600;
+}
+
+html.is-embedded-collapsed .map-preview-artist:not(:empty) + .map-preview-version:not(:empty)::before {
+    content: none;
+}
+
+/* The difficulty becomes a chip. */
+html.is-embedded-collapsed .map-preview-version {
+    border-radius: 6px;
+    height: 20px;
+    padding: 0 8px;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 20px;
     letter-spacing: 0.01em;
-    color: rgba(206, 201, 222, 0.7);
-    text-align: left;
+    background: var(--mini-secondary-container);
+    color: var(--mini-on-secondary-container);
+}
+
+/* The timeline, with the time played under its start and the length under
+   its end. The canvas has no intrinsic width to stretch, so it is given one. */
+html.is-embedded-collapsed .map-preview-timeline {
+    position: absolute;
+    z-index: 3;
+    top: var(--mini-row-b-top);
+    left: var(--mini-pad);
+    width: calc(100% - (var(--mini-pad) * 2) - var(--mini-group-width) - var(--mini-gutter));
+    height: 20px;
+}
+
+html.is-embedded-collapsed .map-preview-timeline-tooltip {
+    top: calc(var(--mini-row-b-top) - 24px);
+    bottom: auto;
+}
+
+html.is-embedded-collapsed .map-preview-mini-times {
+    display: flex;
+    justify-content: space-between;
+    position: absolute;
+    z-index: 3;
+    top: calc(var(--mini-row-b-top) + 23px);
+    left: var(--mini-pad);
+    width: calc(100% - (var(--mini-pad) * 2) - var(--mini-group-width) - var(--mini-gutter));
+    height: 11px;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--mini-on-surface-variant);
     pointer-events: none;
-    cursor: default;
+}
+
+html.is-embedded-collapsed .map-preview-mini-times > :first-child {
+    color: var(--mini-on-surface);
+}
+
+/* The copy-timestamp button has nothing to copy from here, but it still says
+   where playback is, so it stays for screen readers. Keep its measured width
+   while clipping it: map loads can happen in this layout, and the same width
+   is needed when the expanded row returns. */
+html.is-embedded-collapsed .map-preview-time-label {
+    position: absolute;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* Volume, speed, follow and the options menu as one connected group: outer
+   corners round, inner ones tight, two pixels apart, each the same element
+   the expanded view shows elsewhere. Pressed, a button squares up; open or
+   switched on, it rounds into a pill in the cover's colour. */
+html.is-embedded-collapsed .map-preview-volume-control,
+html.is-embedded-collapsed .map-preview-speed-control {
+    --map-preview-pill-width: var(--mini-group-button);
+    position: absolute;
+    z-index: 5;
+    top: var(--mini-row-b-top);
+    height: var(--mini-row-b-height);
 }
 
 html.is-embedded-collapsed .map-preview-volume-control {
-    grid-column: 2;
-    grid-row: 2;
-    --map-preview-pill-width: 28px;
-    height: 22px;
+    right: calc(var(--mini-pad) + ((var(--mini-group-button) + var(--mini-group-gap)) * 3));
+}
+
+html.is-embedded-collapsed .map-preview-speed-control {
+    right: calc(var(--mini-pad) + ((var(--mini-group-button) + var(--mini-group-gap)) * 2));
+}
+
+html.is-embedded-collapsed .map-preview-follow-btn {
+    position: absolute;
+    z-index: 5;
+    top: var(--mini-row-b-top);
+    right: calc(var(--mini-pad) + var(--mini-group-button) + var(--mini-group-gap));
+}
+
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn {
+    position: absolute;
+    z-index: 5;
+    top: var(--mini-row-b-top);
+    right: var(--mini-pad);
+}
+
+html.is-embedded-player .map-preview-volume-btn,
+html.is-embedded-player .map-preview-speed-btn,
+html.is-embedded-player .map-preview-follow-btn,
+html.is-embedded-player #mapPreviewHeaderInfoBtn {
+    transition: border-radius var(--m3-shape-ms) var(--m3-shape),
+                background-color 200ms ease,
+                border-color 200ms ease,
+                color 200ms ease,
+                transform 200ms cubic-bezier(0.32, 0.72, 0, 1),
+                scale var(--m3-shape-ms) var(--m3-shape);
+}
+
+html.is-embedded-collapsed .map-preview-volume-btn,
+html.is-embedded-collapsed .map-preview-speed-btn,
+html.is-embedded-collapsed .map-preview-follow-btn,
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn {
+    width: var(--mini-group-button);
+    height: var(--mini-row-b-height);
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: var(--mini-surface-high);
+    color: var(--mini-on-surface-variant);
+    box-shadow: none;
+    transform: none;
 }
 
 html.is-embedded-collapsed .map-preview-volume-btn {
-    width: 28px;
-    height: 22px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-    color: rgba(220, 216, 234, 0.82);
+    border-radius: 17px 6px 6px 17px;
+}
+
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn {
+    border-radius: 6px 17px 17px 6px;
+}
+
+html.is-embedded-collapsed .map-preview-speed-btn {
+    padding-bottom: 0.1em;
+    font-size: 12px;
+}
+
+html.is-embedded-collapsed .map-preview-volume-btn:hover,
+html.is-embedded-collapsed .map-preview-speed-btn:hover,
+html.is-embedded-collapsed .map-preview-follow-btn:hover,
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn:hover {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--mini-surface-high), var(--mini-on-surface) 9%);
+    color: var(--mini-on-surface);
+    transform: none;
+}
+
+html.is-embedded-collapsed .map-preview-volume-btn:active,
+html.is-embedded-collapsed .map-preview-speed-btn:active,
+html.is-embedded-collapsed .map-preview-follow-btn:active,
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn:active {
+    border-radius: 10px;
+    scale: 0.92;
+    transform: none;
+}
+
+html.is-embedded-collapsed .map-preview-follow-btn:not(.is-following),
+html.is-embedded-collapsed .map-preview-volume-control.is-volume-open .map-preview-volume-btn,
+html.is-embedded-collapsed .map-preview-speed-control.is-speed-open .map-preview-speed-btn {
+    border-radius: 17px;
+    background: var(--mini-primary-container);
+    color: var(--mini-on-primary-container);
+    box-shadow: none;
+}
+
+html.is-embedded-collapsed .map-preview-follow-btn:not(.is-following):hover {
+    background: color-mix(in srgb, var(--mini-primary-container), var(--mini-on-primary-container) 9%);
+    color: var(--mini-on-primary-container);
+}
+
+html.is-embedded-collapsed .map-preview-volume-btn:focus-visible,
+html.is-embedded-collapsed .map-preview-speed-btn:focus-visible,
+html.is-embedded-collapsed .map-preview-follow-btn:focus-visible,
+html.is-embedded-collapsed #mapPreviewHeaderInfoBtn:focus-visible {
+    outline: 2px solid var(--mini-on-surface);
+    outline-offset: 2px;
+}
+
+html.is-embedded-collapsed .map-preview-follow-btn svg {
+    width: 15px;
+    height: 15px;
 }
 
 html.is-embedded-collapsed .map-preview-volume-icon {
-    width: 14px;
-    height: 11px;
+    width: 17px;
+    height: 14px;
 }
 
-/* Volume sits on the right in collapsed mode, so anchor its popover rightwards. */
+/* The menu's three bars, drawn in to the three dots of a "more" button. */
+html.is-embedded-player .map-preview-menu-icon {
+    overflow: visible;
+}
+
+html.is-embedded-player .map-preview-menu-icon-bar {
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+html.is-embedded-collapsed .map-preview-menu-icon {
+    width: 15px;
+    height: 15px;
+}
+
+html.is-embedded-collapsed .map-preview-menu-icon-bar {
+    transform: scale(0.19, 1.1);
+}
+
+/* The sliders still open above their buttons; volume now sits right of
+   centre, so its panel hangs leftwards from it like speed's does. */
 html.is-embedded-collapsed .map-preview-volume-popover {
     left: auto;
     right: 0;
@@ -696,107 +1063,26 @@ html.is-embedded-collapsed .map-preview-volume-panel::after {
     right: calc((var(--map-preview-pill-width) / 2) - 5px);
 }
 
-html.is-embedded-collapsed .map-preview-speed-control {
-    grid-column: 3;
-    grid-row: 2;
-    --map-preview-pill-width: 36px;
-    height: 22px;
-}
-
-html.is-embedded-collapsed .map-preview-speed-btn {
-    width: 36px;
-    height: 22px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-    color: rgba(226, 222, 240, 0.84);
-    font-size: 0.67rem;
-}
-
-html.is-embedded-collapsed .map-preview-volume-btn:hover,
-html.is-embedded-collapsed .map-preview-speed-btn:hover {
-    background: rgba(255, 255, 255, 0.14);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-    color: #fff;
-}
-
-html.is-embedded-collapsed .map-preview-volume-control.is-volume-open .map-preview-volume-btn,
-html.is-embedded-collapsed .map-preview-speed-control.is-speed-open .map-preview-speed-btn {
-    color: var(--accent-primary);
-    background: rgba(140, 102, 255, 0.18);
-    box-shadow: inset 0 0 0 1px rgba(140, 102, 255, 0.34);
-}
-
-.map-preview-mini-play-btn {
-    position: relative;
-    z-index: 3;
-    transform: translateX(-2px);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    border-radius: 999px;
-    background: rgba(18, 17, 24, 0.56);
-    backdrop-filter: blur(10px);
-    color: #fff;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14);
-    cursor: pointer;
-    transition: background-color 160ms ease,
-                border-color 160ms ease,
-                transform 180ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-.map-preview-mini-play-btn:hover {
-    background: rgba(255, 255, 255, 0.22);
-    border-color: rgba(255, 255, 255, 0.48);
-    transform: translateX(-2px) scale(1.07);
-}
-
-.map-preview-mini-play-btn:active {
-    transform: translateX(-2px) scale(0.94);
-}
-
-.map-preview-mini-play-btn:focus-visible {
-    outline: 2px solid rgba(205, 223, 255, 0.9);
-    outline-offset: 2px;
-}
-
-.map-preview-mini-play-btn svg {
-    width: 12px;
-    height: 12px;
-    fill: currentColor;
-}
-
-.map-preview-mini-play-icon--play {
-    transform: translateX(1px);
-}
-
-.map-preview-mini-play-icon--pause {
-    display: none;
-}
-
-.map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--play {
-    display: none;
-}
-
-.map-preview-mini-play-btn.is-playing .map-preview-mini-play-icon--pause {
-    display: block;
-}
-
 @media (prefers-reduced-motion: reduce) {
-    html.is-embedded-player .map-preview-popup,
-    html.is-embedded-player .map-preview-canvas-wrap,
-    html.is-embedded-player .map-preview-mini-backdrop,
-    html.is-embedded-player .map-preview-mini-art,
-    .map-preview-mini-play-btn {
+    html.is-embedded-player,
+    html.is-embedded-player .map-preview-mini-play-btn,
+    html.is-embedded-player .map-preview-mini-play-icon,
+    html.is-embedded-player .map-preview-mini-art-image,
+    html.is-embedded-player .map-preview-mini-art-halo,
+    html.is-embedded-player .map-preview-mini-art-bleed,
+    html.is-embedded-player .map-preview-mini-art-far,
+    html.is-embedded-player .map-preview-volume-btn,
+    html.is-embedded-player .map-preview-speed-btn,
+    html.is-embedded-player .map-preview-follow-btn,
+    html.is-embedded-player #mapPreviewHeaderInfoBtn {
         transition: none;
     }
 }
 
-.map-preview-follow-btn.is-following {
+/* Following the browser is the default and looks like any other button;
+   pinned to one map is the setting someone chose, so that is the state that
+   stands out. */
+.map-preview-follow-btn:not(.is-following) {
     color: var(--text-primary);
     border-color: rgba(255, 255, 255, 0.24);
     background: rgba(255, 255, 255, 0.08);
@@ -973,6 +1259,11 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     overflow: hidden;
 }
 
+html.is-embedded-player .map-preview-popup.is-unsupported {
+    min-height: 0;
+    height: 100%;
+}
+
 .map-preview-popup.is-unsupported> :not(.map-preview-unsupported):not(.map-preview-recent-panel):not(.map-preview-info-modal-shell) {
     display: none !important;
 }
@@ -996,6 +1287,43 @@ body.is-firefox-popup .map-preview-toggle-indicator {
     font-weight: 700;
     letter-spacing: 0.01em;
     color: rgba(232, 234, 242, 0.96);
+}
+
+.map-preview-unsupported-embed-btn {
+    position: relative;
+    z-index: 2;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    min-height: 30px;
+    padding: 0 0.7rem;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+html.is-embedded-enabled:not(.is-detached-window):not(.is-embedded-player):not(.is-mobile-view)
+    .map-preview-unsupported-embed-btn:not(:disabled) {
+    display: inline-flex;
+}
+
+.map-preview-unsupported-embed-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.map-preview-unsupported-embed-btn:focus-visible {
+    outline: 2px solid var(--accent-secondary);
+    outline-offset: 2px;
+}
+
+.map-preview-unsupported-embed-btn:disabled {
+    cursor: default;
 }
 
 .map-preview-unsupported-ascii {

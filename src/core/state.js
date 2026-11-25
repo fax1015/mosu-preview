@@ -107,6 +107,8 @@ const createInitialState = ({ audio = null } = {}) => {
     autoFallback: normalizedSettings.autoFallback,
     autoplay: normalizedSettings.autoplay,
     embeddedPlayer: normalizedSettings.embeddedPlayer,
+    miniWavyProgress: normalizedSettings.miniWavyProgress,
+    miniHitsoundsWhenCollapsed: normalizedSettings.miniHitsoundsWhenCollapsed,
     keybindings: normalizedSettings.keybindings,
     // Which action the shortcuts panel is waiting for a key for, or null.
     capturingShortcutAction: null,

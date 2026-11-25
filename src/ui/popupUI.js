@@ -101,6 +101,7 @@ const bindPopupUiEvents = ({
     recentClearBtn,
     recentPanel,
     embedButton,
+    unsupportedEmbedButton,
     detachButton,
     followButton,
     miniPlayButton,
@@ -397,6 +398,10 @@ const bindPopupUiEvents = ({
     void openEmbeddedPlayer?.();
   });
 
+  unsupportedEmbedButton?.addEventListener('click', () => {
+    void openEmbeddedPlayer?.();
+  });
+
   detachButton?.addEventListener('click', () => {
     void openDetachedWindow?.();
   });
@@ -574,6 +579,27 @@ const bindPopupUiEvents = ({
     }
     closePreview();
   });
+
+  return {
+    // The timeline forgetting a pointer that is no longer over it.
+    clearTimelineHover: () => timelineControls.clearHover(),
+    /**
+     * Closes every popover and the difficulty picker, and zooms the timeline
+     * back out to the whole map: none of them has room in the in-page
+     * miniplayer's collapsed bar, and a slider left open there would hang
+     * over the title.
+     */
+    dismissTransientUi: () => {
+      timelineControls.clearHover();
+      dismissComparePicker();
+      speedPopover.dismiss();
+      volumePopover.dismiss();
+      keysPopover.dismiss();
+      if (timelineControls.isZoomed()) {
+        timelineControls.resetZoom();
+      }
+    },
+  };
 };
 
 export { bindPopupUiEvents, bindPopover };

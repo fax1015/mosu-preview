@@ -3,6 +3,18 @@ import assert from 'node:assert/strict';
 import { CleanupRegistry } from '../src/core/cleanup.js';
 import { EMBEDDED_MESSAGE_CHANNEL, OSU_ORIGIN } from '../src/core/embeddedPlayer.js';
 
+// src/webextension.js takes hold of the extension API object once, when it is
+// first imported, so every test here works on this one object, filled in
+// afresh for each.
+const browserMock = {};
+const useBrowser = (api) => {
+  for (const key of Object.keys(browserMock)) {
+    delete browserMock[key];
+  }
+  Object.assign(browserMock, api);
+  globalThis.browser = browserMock;
+};
+
 test('embeddedController opens embedded player once, closes detached window, and surfaces reload hint on missing receiver', async () => {
   const prevBrowser = globalThis.browser;
   const prevChrome = globalThis.chrome;
@@ -15,6 +27,7 @@ test('embeddedController opens embedded player once, closes detached window, and
   const injectedScripts = [];
   let failSendCount = 0;
   let shouldFailInject = false;
+  let refuseOpenCount = 0;
   let closeQueryGate = null;
 
   globalThis.window = {
@@ -23,7 +36,7 @@ test('embeddedController opens embedded player once, closes detached window, and
     removeEventListener: () => {},
   };
 
-  globalThis.browser = {
+  useBrowser({
     scripting: {
       executeScript: async (injection) => {
         injectedScripts.push(injection);
@@ -49,11 +62,15 @@ test('embeddedController opens embedded player once, closes detached window, and
           failSendCount -= 1;
           throw new Error('Could not establish connection. Receiving end does not exist.');
         }
+        if (message.type === 'mosuEmbeddedOpen' && refuseOpenCount > 0) {
+          refuseOpenCount -= 1;
+          return { ok: false };
+        }
         return message.type === 'mosuEmbeddedClose' ? { ok: true, closed: tabId === 10 } : { ok: true };
       },
       onUpdated: { addListener: () => {} },
     },
-  };
+  });
 
   try {
     const { createEmbeddedController } = await import(`../src/ui/embeddedController.js?case=open-${Date.now()}`);
@@ -154,6 +171,14 @@ test('embeddedController opens embedded player once, closes detached window, and
     assert.equal(recoveredOpen, true);
     assert.deepEqual(injectedScripts, [{ target: { tabId: 10 }, files: ['src/content.js'] }]);
 
+    // A content script that is there and turns the mount down (a close
+    // overtook it) is not injected again: that would change nothing.
+    refuseOpenCount = 1;
+    const refusedOpen = await controller.openEmbeddedPlayer();
+    assert.equal(refusedOpen, false);
+    assert.equal(injectedScripts.length, 1, 'no second injection');
+    assert.match(toasts[toasts.length - 1], /Could not pin preview/i);
+
     // If injection itself also fails, surface an error toast without crashing.
     failSendCount = 1;
     shouldFailInject = true;
@@ -180,9 +205,19 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
   const messageListeners = [];
   const postedToParent = [];
   const tabUpdatedListeners = [];
+  const runtimeListeners = [];
+  // What happened, in order: the runtime listener has to be up before 'ready'.
+  const sequence = [];
 
   const mockParent = {
-    postMessage: (msg, origin) => postedToParent.push({ msg, origin }),
+    postMessage: (msg, origin) => {
+      postedToParent.push({ msg, origin });
+      sequence.push(`posted:${msg.type}`);
+    },
+  };
+  const removeFrom = (list) => (fn) => {
+    const idx = list.indexOf(fn);
+    if (idx >= 0) list.splice(idx, 1);
   };
 
   globalThis.parent = mockParent;
@@ -198,12 +233,23 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
     },
   };
 
-  globalThis.browser = {
+  useBrowser({
+    runtime: {
+      onMessage: {
+        addListener: (fn) => {
+          runtimeListeners.push(fn);
+          sequence.push('runtime-listener');
+        },
+        removeListener: removeFrom(runtimeListeners),
+      },
+    },
     tabs: {
       getCurrent: async () => ({ id: 42, url: 'https://osu.ppy.sh/beatmapsets/55#osu/123' }),
-      onUpdated: { addListener: (fn) => tabUpdatedListeners.push(fn) },
+      onUpdated: { addListener: (fn) => tabUpdatedListeners.push(fn), removeListener: removeFrom(tabUpdatedListeners) },
     },
-  };
+  });
+  const MOUNT_ID = 'ab'.repeat(16);
+  const TOKEN = 'cd'.repeat(32);
 
   const registry = new CleanupRegistry();
   try {
@@ -222,22 +268,30 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
       followSyncTimer: null,
     };
     const followButton = {
+      attributes: {},
       classList: { toggle() {} },
-      setAttribute() {},
+      setAttribute(name, value) {
+        this.attributes[name] = value;
+      },
       title: '',
     };
     const loaded = [];
     const collapsedEvents = [];
+    let closingCalls = 0;
 
     const controller = createEmbeddedController({
       state,
       registry,
       isEmbedded: true,
+      hostMountId: MOUNT_ID,
       elements: { embedButton: null, followButton },
       addDebugLog: () => {},
       showPopupToast: () => {},
       loadPreview: async (opts) => loaded.push(opts),
       onCollapsedChange: (val) => collapsedEvents.push(val),
+      onHostClosing: () => {
+        closingCalls += 1;
+      },
     });
 
     controller.startEmbeddedBridge({ initialFollowEnabled: true });
@@ -245,21 +299,58 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
     // Ready handshake and initial snapshot posted strictly to OSU_ORIGIN.
     assert.ok(postedToParent.some((entry) => entry.origin === OSU_ORIGIN && entry.msg.type === 'ready'));
     assert.ok(postedToParent.some((entry) => entry.origin === OSU_ORIGIN && entry.msg.type === 'playbackSnapshot'));
+    assert.ok(
+      sequence.indexOf('runtime-listener') < sequence.indexOf('posted:ready'),
+      'listening for the secret before saying ready',
+    );
+    assert.equal(postedToParent.some((entry) => JSON.stringify(entry.msg).includes(TOKEN)), false);
+
+    // The shell's secret, handed over by extension messaging. Another
+    // shell's, or one from outside an osu! page, is not taken.
+    const handOver = (message, sender = { url: 'https://osu.ppy.sh/beatmapsets/55' }) => {
+      let answer = null;
+      for (const listener of runtimeListeners) {
+        listener({ type: 'mosuEmbeddedHostToken', ...message }, sender, (response) => { answer = response; });
+      }
+      return answer;
+    };
+    assert.equal(handOver({ mount: 'ef'.repeat(16), token: TOKEN }), null, 'another shell');
+    assert.equal(handOver({ mount: MOUNT_ID, token: TOKEN }, { url: 'https://evil.example/' }), null);
+    assert.equal(handOver({ mount: MOUNT_ID, token: 'short' }), null);
 
     const dispatchHost = (data, origin = OSU_ORIGIN, source = mockParent) => {
       for (const listener of messageListeners) {
-        listener({ origin, source, data });
+        listener({ origin, source, data: { token: TOKEN, ...data } });
       }
     };
 
+    // Until the secret has arrived, even a message from the shell is not taken.
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true });
+    assert.deepEqual(collapsedEvents, []);
+    assert.deepEqual(handOver({ mount: MOUNT_ID, token: TOKEN }), { ok: true });
+
     // Untrusted origin is ignored.
     dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true }, 'https://evil.example');
+    assert.deepEqual(collapsedEvents, []);
+
+    // The osu! page's own scripts share the shell's origin and can post to
+    // this window, but they do not have the secret.
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true, token: undefined });
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true, token: 'ee'.repeat(32) });
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true }, OSU_ORIGIN, null);
     assert.deepEqual(collapsedEvents, []);
 
     // Valid collapse message updates state & invokes callback.
     dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'collapsedChanged', collapsed: true });
     assert.equal(state.embeddedCollapsed, true);
     assert.deepEqual(collapsedEvents, [true]);
+
+    // The shell starting to close stops playback straight away; a page that
+    // is not the shell cannot ask for it.
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'closing' }, 'https://evil.example');
+    assert.equal(closingCalls, 0);
+    dispatchHost({ channel: EMBEDDED_MESSAGE_CHANNEL, type: 'closing' });
+    assert.equal(closingCalls, 1);
 
     // requestExpand only posts while collapsed.
     assert.equal(controller.requestExpandEmbedded(), true);
@@ -287,6 +378,8 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
     // Pinning prevents follow switches until unpinned.
     controller.toggleEmbeddedFollowEnabled();
     assert.equal(state.followEnabled, false);
+    // Pinned is the state the button shows as on.
+    assert.equal(followButton.attributes['aria-pressed'], 'true');
     dispatchHost({
       channel: EMBEDDED_MESSAGE_CHANNEL,
       type: 'pageUrlChanged',
@@ -297,6 +390,7 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
 
     // Unpinning catches up immediately to the latest URL.
     controller.toggleEmbeddedFollowEnabled();
+    assert.equal(followButton.attributes['aria-pressed'], 'false');
     await Promise.resolve();
     assert.equal(loaded.length, 2);
     assert.equal(loaded[1].sourceUrlOverride, 'https://osu.ppy.sh/beatmapsets/55#osu/777');
@@ -307,6 +401,8 @@ test('embeddedController iframe bridge follows Turbo/hash URLs, respects pin tog
 
     controller.disposeEmbeddedBridge();
     assert.equal(messageListeners.length, 0);
+    assert.equal(runtimeListeners.length, 0, 'stops listening for a secret');
+    assert.equal(tabUpdatedListeners.length, 0, 'stops watching the tab');
   } finally {
     registry.cleanup();
     if (prevBrowser === undefined) delete globalThis.browser;
@@ -426,6 +522,8 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
     runtime: {
       getURL: (p) => `moz-extension://test-uuid/${p}`,
       onMessage: { addListener: (fn) => runtimeListeners.push(fn) },
+      // The iframe taking the shell's secret.
+      sendMessage: async (message) => (message?.type === 'mosuEmbeddedHostToken' ? { ok: true } : undefined),
     },
     storage: {
       local: {
@@ -458,6 +556,8 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
     Set,
     JSON,
     Promise,
+    crypto: globalThis.crypto,
+    TextEncoder,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(source, sandbox);
@@ -495,6 +595,8 @@ test('content.js mounts Shadow DOM host on documentElement (outside body) and su
       data: { channel: EMBEDDED_MESSAGE_CHANNEL, type: 'ready' },
     });
   }
+  // The secret is handed over before anything goes in.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   // Turbo replaces <body>; host on <html> stays untouched and URL update is forwarded.
   const nextBody = makeNode('body');

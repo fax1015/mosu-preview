@@ -682,3 +682,35 @@ test('playback still paints on its own frame, with no extra hop', async () => {
   frames.runFrame(16);
   assert.equal(rendered.length, before + 1, 'exactly one paint for the frame');
 });
+
+test('if play() loads a shorter preview clip and clamps backwards, playback falls back without moving the playhead', async () => {
+  const anchorMapMs = 610_491;
+  const harness = createHarness({
+    anchorMapMs,
+    durationMs: 62 * 60_000,
+    durationSec: Number.NaN,
+  });
+  const { audio, state, controller, gate } = harness;
+  audio.src = 'https://b.ppy.sh/preview/970063.mp3';
+  state.audioAnchorSrc = audio.src;
+
+  // Simulate a HAVE_NOTHING preview element whose real duration turns out to be
+  // only 5s once play() loads metadata, clamping currentTime backwards from 8s.
+  const originalPlay = audio.play.bind(audio);
+  audio.play = () => {
+    audio.duration = 5;
+    audio.currentTime = 5;
+    audio.ended = true;
+    return originalPlay();
+  };
+
+  state.currentTimeMs = anchorMapMs + 8000;
+  const started = controller.togglePlayback();
+  await gate.settleNext(true);
+
+  assert.equal(await started, true);
+  assert.equal(state.isPlaying, true);
+  assert.equal(state.playbackMode, 'manual', 'falls back to the visual clock');
+  assert.equal(state.currentTimeMs, anchorMapMs + 8000, 'playhead must not jump back to the shorter clip end');
+  assert.equal(audio.paused, true);
+});

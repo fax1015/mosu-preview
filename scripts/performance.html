@@ -4,50 +4,299 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'; script-src 'self'; style-src 'unsafe-inline'; media-src blob:; connect-src 'self';">
-  <title>mosu! preview performance test</title>
-  <style>
-    :root { font: 16px/1.45 system-ui, sans-serif; color: #f1f1f3; background: #101114; }
-    body { max-width: 760px; margin: 0 auto; padding: 20px; }
-    h1 { font-size: 1.35rem; margin: 0 0 8px; }
-    p { color: #c1c1c8; }
-    button { min-height: 44px; padding: 8px 14px; border: 0; border-radius: 8px; background: #3b9b6a; color: white; font: inherit; font-weight: 650; }
-    button:disabled { opacity: .55; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
-    .secondary { background: #393b43; }
-    .canvas-wrap { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 16px 0; }
-    canvas { display: block; width: 100%; height: auto; background: #08080a; border-radius: 6px; }
-    #timeline { height: 42px; }
-    #status { min-height: 1.5em; color: #b8d9c5; }
-    #results { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-    th, td { padding: 8px 6px; border-bottom: 1px solid #34353b; text-align: right; white-space: nowrap; }
-    th:first-child, td:first-child { text-align: left; }
-    .note { font-size: .88rem; }
-    code { color: #c5e5d0; }
-  </style>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; form-action 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-src 'self'; media-src blob:; connect-src 'self';">
+  <title>mosu! preview · Benchmark</title>
+  <link rel="stylesheet" href="/scripts/performance.css">
 </head>
 <body>
-  <h1>mosu! preview performance test</h1>
-    <p>This runs the real canvas renderer and synthesized hitsounds in this browser. Keep the page foregrounded and use the same device, browser, and power mode for comparisons.</p>
-  <div class="actions">
-    <label for="scenario">Scenario</label>
-    <select id="scenario">
-      <option value="anchor-heavy-slider">Anchor-heavy slider (00:12 reference)</option>
-      <option value="aspire-conic">conic (5839914) — anchor-dense Aspire map (01:23)</option>
-      <option value="object-stress">8,000 mixed objects</option>
-    </select>
-    <button id="run">Run 8-second tests</button>
-    <button id="save" class="secondary" disabled>Save result as baseline</button>
-    <button id="clear" class="secondary">Clear baseline</button>
+  <div class="app-shell">
+    <header class="top-bar">
+      <div class="brand">
+        <h1>mosu! preview</h1>
+        <span id="meta-pill" class="pill"></span>
+        <button type="button" id="power-pill" class="pill pill-btn" title="Click to toggle Efficiency Mode tag (Auto / Efficiency / Normal)">Probing Hz…</button>
+      </div>
+
+      <nav class="tab-bar" role="tablist" aria-label="Benchmark sections">
+        <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="browser">
+          Render
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="startup">
+          Open &amp; Load
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="history">
+          History <span id="history-count" class="tab-count">0</span>
+        </button>
+        <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="micro">
+          Micro <span id="micro-count" class="tab-count">0</span>
+        </button>
+      </nav>
+    </header>
+
+    <!-- TAB 1: RENDER BENCHMARK -->
+    <section id="tab-browser" class="tab-panel" role="tabpanel">
+      <div class="runner-grid">
+        <div class="card controls-card">
+          <label for="scenario" class="visually-hidden">Scenario</label>
+          <select id="scenario" class="visually-hidden">
+            <option value="anchor-heavy-slider">Anchor slider</option>
+            <option value="aspire-conic">conic (5839914)</option>
+            <option value="object-stress">Mixed objects</option>
+            <option value="mania-7k">Mania 7K</option>
+            <option value="catch-fruits">Catch convert</option>
+            <option value="compare-4up">4-panel Compare</option>
+            <option value="miniplayer-collapsed">Miniplayer Collapsed</option>
+            <option value="miniplayer-toggle">Miniplayer Toggle</option>
+          </select>
+
+          <div id="scenario-cards" class="scenario-grid" role="radiogroup" aria-label="Benchmark scenario"></div>
+
+          <div class="config-row">
+            <div id="mode-control" class="segmented" role="group" aria-label="Pass mode">
+              <button type="button" class="seg-btn active" data-mode="full">Visual + Audio</button>
+              <button type="button" class="seg-btn" data-mode="visual">Visual only</button>
+            </div>
+            <div id="duration-control" class="segmented" role="group" aria-label="Pass duration">
+              <button type="button" class="seg-btn" data-duration="3000">3s</button>
+              <button type="button" class="seg-btn active" data-duration="8000">8s</button>
+              <button type="button" class="seg-btn" data-duration="15000">15s</button>
+            </div>
+          </div>
+
+          <div class="actions-row">
+            <button type="button" id="run" class="btn btn-primary">Run</button>
+            <button type="button" id="run-all" class="btn btn-accent">Run All</button>
+            <button type="button" id="stop" class="btn btn-danger" hidden>Stop</button>
+          </div>
+
+          <div class="status-bar">
+            <div class="status-top">
+              <div id="status" role="status">Ready</div>
+              <div id="live-metrics" class="live-metrics" aria-live="off">
+                <span><strong id="live-fps">—</strong> fps</span>
+                <span><strong id="live-interval">—</strong></span>
+                <span>JS <strong id="live-work">—</strong></span>
+                <span hidden><strong id="live-frames">0</strong></span>
+              </div>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <div id="visibility-banner" class="visibility-banner" hidden>
+              Tab was backgrounded — re-run foregrounded for accurate results.
+            </div>
+          </div>
+        </div>
+
+        <div class="card preview-card">
+          <div id="canvas-preview-wrap">
+            <div class="canvas-stage">
+              <canvas id="playfield" width="512" height="384" aria-label="Beatmap playfield"></canvas>
+              <span id="stage-badge" class="stage-badge">Idle</span>
+            </div>
+            <canvas id="timeline" width="512" height="40" aria-label="Beatmap timeline" style="margin-top: 8px;"></canvas>
+          </div>
+          <div id="miniplayer-render-stage" class="popup-stage miniplayer-render-stage" hidden></div>
+        </div>
+      </div>
+
+      <div id="suite-summary-card" class="card results-section" hidden>
+        <div class="section-head">
+          <h2 class="card-title">Suite Comparison</h2>
+          <div id="suite-tabs" class="suite-tabs"></div>
+        </div>
+        <div id="suite-chart-host" class="chart-host"></div>
+      </div>
+
+      <div id="results-card" class="card results-section" hidden>
+        <div class="results-toolbar">
+          <div class="results-heading">
+            <h2 id="results-title" class="card-title">Results</h2>
+            <span id="results-meta" class="meta-inline"></span>
+          </div>
+          <div class="toolbar-actions">
+            <select id="compare-select" class="select-input" aria-label="Compare against">
+              <option value="baseline">vs Baseline</option>
+              <option value="previous">vs Previous</option>
+              <option value="none">No diff</option>
+            </select>
+            <button type="button" id="save" class="btn btn-secondary btn-sm" disabled>Pin</button>
+            <button type="button" id="clear" class="btn btn-ghost btn-sm" hidden>Unpin</button>
+            <button type="button" id="copy-md" class="btn btn-secondary btn-sm" disabled>Copy MD</button>
+            <button type="button" id="export-json" class="btn btn-secondary btn-sm" disabled>JSON</button>
+          </div>
+        </div>
+        <div id="results"></div>
+      </div>
+    </section>
+
+    <!-- TAB 2: OPEN & LOAD (POPUP STARTUP + SUBSYSTEMS) -->
+    <section id="tab-startup" class="tab-panel" role="tabpanel" hidden>
+      <div class="runner-grid startup-grid">
+        <div class="card controls-card">
+          <div id="startup-mode-cards" class="scenario-grid" role="radiogroup" aria-label="Popup open mode"></div>
+
+          <div class="config-row">
+            <div id="startup-iter-control" class="segmented" role="group" aria-label="Open iterations">
+              <button type="button" class="seg-btn" data-iters="3">3×</button>
+              <button type="button" class="seg-btn active" data-iters="5">5×</button>
+              <button type="button" class="seg-btn" data-iters="10">10×</button>
+            </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="startup-save-toggle" checked>
+              Save
+            </label>
+          </div>
+
+          <div class="actions-row">
+            <button type="button" id="run-startup" class="btn btn-primary">Run Open Test</button>
+            <button type="button" id="run-startup-all" class="btn btn-accent">Run All Modes</button>
+            <button type="button" id="stop-startup" class="btn btn-danger" hidden>Stop</button>
+          </div>
+
+          <div class="status-bar">
+            <div class="status-top">
+              <div id="startup-status" role="status">Ready</div>
+              <div class="live-metrics">
+                <span>Last <strong id="startup-last">—</strong></span>
+              </div>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <div id="startup-progress-fill" class="progress-fill"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card preview-card popup-stage-card">
+          <div id="popup-stage" class="popup-stage">
+            <span class="popup-stage-placeholder">Live popup preview</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="startup-results-card" class="card results-section" hidden>
+        <div class="results-toolbar">
+          <div class="results-heading">
+            <h2 id="startup-results-title" class="card-title">Startup Breakdown</h2>
+            <span id="startup-results-meta" class="meta-inline"></span>
+          </div>
+          <div id="startup-suite-tabs" class="suite-tabs"></div>
+        </div>
+        <div id="startup-results"></div>
+      </div>
+    </section>
+
+    <!-- TAB 3: RUN HISTORY -->
+    <section id="tab-history" class="tab-panel" role="tabpanel" hidden>
+      <div class="card">
+        <div class="filter-bar">
+          <div id="history-kind-control" class="segmented" role="group" aria-label="History kind">
+            <button type="button" class="seg-btn active" data-kind="browser">Render</button>
+            <button type="button" class="seg-btn" data-kind="startup">Open &amp; Load</button>
+          </div>
+
+          <select id="history-scenario" class="select-input" aria-label="Filter scenario">
+            <option value="all">All scenarios</option>
+            <option value="aspire-conic">conic (5839914)</option>
+            <option value="anchor-heavy-slider">Anchor slider</option>
+            <option value="object-stress">Mixed objects</option>
+            <option value="mania-7k">Mania 7K</option>
+            <option value="catch-fruits">Catch convert</option>
+            <option value="compare-4up">4-panel Compare</option>
+            <option value="miniplayer-collapsed">Miniplayer Collapsed</option>
+            <option value="miniplayer-toggle">Miniplayer Toggle</option>
+          </select>
+
+          <select id="history-metric" class="select-input" aria-label="Trend metric">
+            <option value="fps">FPS</option>
+            <option value="intervalP95">Frame p95 (ms)</option>
+            <option value="workP95">JS work p95 (ms)</option>
+            <option value="droppedPercent">Dropped (%)</option>
+            <option value="setupMs">Setup (ms)</option>
+          </select>
+
+          <select id="history-startup-mode" class="select-input" aria-label="Filter open mode" hidden>
+            <option value="all">All open modes</option>
+            <option value="cached">Cached open</option>
+            <option value="cold">Cold open</option>
+            <option value="unsupported">Unsupported tab</option>
+            <option value="miniplayer-expanded">Miniplayer expanded</option>
+            <option value="miniplayer-collapsed">Miniplayer collapsed</option>
+          </select>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="history-same-device">
+            This device
+          </label>
+
+          <label class="checkbox-label">
+            <input type="checkbox" id="history-exclude-efficiency">
+            Hide efficiency
+          </label>
+
+          <button type="button" id="refresh-history" class="btn btn-secondary btn-sm push-right">Refresh</button>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <h3 id="history-chart-title" class="chart-title">Trend</h3>
+            <div id="history-chart-legend" class="chart-legend"></div>
+          </div>
+          <div id="history-chart-host" class="chart-host"></div>
+        </div>
+
+        <div id="history-table-wrap" class="table-wrap" style="margin-top: 14px;"></div>
+      </div>
+    </section>
+
+    <!-- TAB 4: NODE MICROBENCHMARKS -->
+    <section id="tab-micro" class="tab-panel" role="tabpanel" hidden>
+      <div class="card">
+        <div class="section-head">
+          <div class="results-heading">
+            <h2 class="card-title">Node Microbenchmarks</h2>
+            <span id="micro-status" class="meta-inline"></span>
+          </div>
+          <div class="toolbar-actions">
+            <label class="checkbox-label">
+              <input type="checkbox" id="micro-save-toggle" checked>
+              Save
+            </label>
+            <button type="button" id="run-micro" class="btn btn-primary btn-sm">Run</button>
+          </div>
+        </div>
+
+        <div id="micro-latest" class="micro-cards"></div>
+
+        <div class="chart-card" id="micro-ops-card" hidden>
+          <div class="chart-head">
+            <h3 class="chart-title">Extension Subsystems</h3>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-swatch" style="background: #59c8f0;"></span>Parse</span>
+              <span class="legend-item"><span class="legend-swatch" style="background: #8c66ff;"></span>Convert</span>
+              <span class="legend-item"><span class="legend-swatch" style="background: #efc45f;"></span>Audio / ZIP</span>
+            </div>
+          </div>
+          <div id="micro-ops-host" class="chart-host"></div>
+        </div>
+
+        <div class="chart-card" style="margin-top: 12px;">
+          <div class="chart-head">
+            <h3 class="chart-title">Speedup Trend</h3>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-swatch" style="background: var(--accent);"></span>Overall</span>
+              <span class="legend-item"><span class="legend-swatch" style="background: var(--green);"></span>Timing</span>
+              <span class="legend-item"><span class="legend-swatch" style="background: var(--amber);"></span>Timeline</span>
+            </div>
+          </div>
+          <div id="micro-chart-host" class="chart-host"></div>
+        </div>
+
+        <div id="micro-table-wrap" class="table-wrap" style="margin-top: 14px;"></div>
+      </div>
+    </section>
   </div>
-  <div id="status" role="status">Ready. Audio begins only after you press Run.</div>
-  <div class="canvas-wrap">
-    <canvas id="playfield" width="512" height="384" aria-label="Beatmap playfield"></canvas>
-    <canvas id="timeline" width="512" height="42" aria-label="Beatmap timeline"></canvas>
-  </div>
-  <div id="results"></div>
-  <p class="note">The anchor-heavy scenarios hold their worst moment for 8 seconds: a generated 4,344-anchor slider at its hit time, and osu! beatmap 5839914 ("conic", Aspire) at 01:23, where its 7,427-anchor decorative sliders are on screen. Add <code>?autobench=aspire-conic</code> or <code>?autobench=anchor-heavy-slider</code> to the URL to run just that visual pass. Each completed run is appended to <code>performance-results/results.jsonl</code> with build and device details. The saved baseline stays in this browser’s local storage for same-device, same-scenario comparisons.</p>
+
   <script type="module" src="/scripts/performance-browser.js"></script>
 </body>
 </html>

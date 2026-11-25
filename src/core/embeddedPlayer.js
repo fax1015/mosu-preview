@@ -19,6 +19,12 @@ const SET_ID_PARAM = 'setId';
 const MODE_PARAM = 'mode';
 const TIME_PARAM = 't';
 const PAUSED_PARAM = 'paused';
+const SOURCE_URL_PARAM = 'sourceUrl';
+// Which shell on the page the iframe belongs to (src/content.js). Not a secret:
+// the secret comes by extension messaging, keyed by it.
+const EMBEDDED_MOUNT_PARAM = 'mount';
+const EMBEDDED_MOUNT_ID_RE = /^[0-9a-f]{32}$/;
+const EMBEDDED_HOST_TOKEN_RE = /^[0-9a-f]{64}$/;
 
 const EMBEDDED_BOUNDS_KEY = 'mosuEmbeddedPlayerBoundsV1';
 const EMBEDDED_RESUME_STORAGE_KEY = 'mosuEmbeddedResumeV1';
@@ -27,6 +33,8 @@ const EMBEDDED_RESUME_FUTURE_SKEW_MS = 5 * 1000;
 const MAX_RESUME_TIME_MS = 24 * 60 * 60 * 1000;
 
 const EMBEDDED_MESSAGE_CHANNEL = 'mosu-preview-embedded-v1';
+// The runtime message that hands the iframe its shell's secret.
+const EMBEDDED_HOST_TOKEN_MESSAGE = 'mosuEmbeddedHostToken';
 const OSU_ORIGIN = 'https://osu.ppy.sh';
 
 // Matches the original popup's 4:3 playfield (see popup.css & core/panelLayout.js).
@@ -75,7 +83,8 @@ const MIN_EMBEDDED_WIDTH = 340;
 const MIN_EMBEDDED_HEIGHT = embeddedHeightForWidth(MIN_EMBEDDED_WIDTH);
 const MAX_EMBEDDED_WIDTH = 1400;
 const MAX_EMBEDDED_HEIGHT = embeddedHeightForWidth(MAX_EMBEDDED_WIDTH);
-const COLLAPSED_EMBEDDED_HEIGHT = 146;
+// The collapsed bar's 154px page plus the shell's 1px border top and bottom.
+const COLLAPSED_EMBEDDED_HEIGHT = 156;
 const VIEWPORT_MARGIN = 8;
 
 const isOsuWebsiteUrl = (rawUrl) => {
@@ -84,11 +93,22 @@ const isOsuWebsiteUrl = (rawUrl) => {
   }
   try {
     const parsed = new URL(rawUrl.trim());
-    return parsed.protocol === 'https:' && parsed.hostname === 'osu.ppy.sh';
+    return parsed.protocol === 'https:'
+      && parsed.hostname === 'osu.ppy.sh'
+      && !parsed.username
+      && !parsed.password;
   } catch {
     return false;
   }
 };
+
+const normalizeMountId = (value) => (
+  typeof value === 'string' && EMBEDDED_MOUNT_ID_RE.test(value) ? value : ''
+);
+
+const normalizeHostToken = (value) => (
+  typeof value === 'string' && EMBEDDED_HOST_TOKEN_RE.test(value) ? value : ''
+);
 
 const toFiniteNumber = (value) => {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') {
@@ -116,14 +136,17 @@ const readEmbeddedParams = (search = '') => {
   }
 
   const beatmapId = normalizeNumericId(params.get(BEATMAP_ID_PARAM));
+  const sourceUrlCandidate = String(params.get(SOURCE_URL_PARAM) || '').trim();
+  const sourceUrl = isOsuWebsiteUrl(sourceUrlCandidate) ? sourceUrlCandidate : '';
   const flag = params.get(EMBEDDED_FLAG_PARAM);
   const pausedFlag = params.get(PAUSED_PARAM);
   const collapsedFlag = params.get(EMBEDDED_COLLAPSED_PARAM);
   const followFlag = params.get(EMBEDDED_FOLLOW_PARAM);
 
   return {
-    isEmbedded: (flag === '1' || flag === 'true') && beatmapId !== '',
+    isEmbedded: (flag === '1' || flag === 'true') && Boolean(beatmapId || sourceUrl),
     beatmapId,
+    sourceUrl,
     setId: normalizeNumericId(params.get(SET_ID_PARAM)),
     mode: parseModeToken(params.get(MODE_PARAM)),
     resumeTimeMs: normalizeResumeTimeMs(params.get(TIME_PARAM)),
@@ -131,12 +154,15 @@ const readEmbeddedParams = (search = '') => {
     collapsed: collapsedFlag === '1' || collapsedFlag === 'true',
     // Default to following the hosting osu! tab unless explicitly pinned (`follow=0`).
     followEnabled: followFlag !== '0' && followFlag !== 'false',
+    mountId: normalizeMountId(params.get(EMBEDDED_MOUNT_PARAM)),
   };
 };
 
 /**
- * Builds the extension-relative URL for the embedded iframe. Returns '' when
- * there is no valid beatmap id to hand over.
+ * Builds the extension-relative URL for the embedded iframe, the same one
+ * src/content.js builds (tests/content-script.test.js holds them to it). A
+ * beatmap id is handed over when there is one, the osu! page it came from
+ * otherwise; with neither it returns ''.
  */
 const buildEmbeddedPageUrl = ({
   beatmapId,
@@ -146,16 +172,21 @@ const buildEmbeddedPageUrl = ({
   resumePaused,
   collapsed = false,
   followEnabled = true,
+  sourceUrl = '',
+  mountId = '',
 } = {}) => {
   const normalizedBeatmapId = normalizeNumericId(beatmapId);
-  if (!normalizedBeatmapId) {
+  const normalizedSourceUrl = isOsuWebsiteUrl(sourceUrl) ? new URL(sourceUrl.trim()).toString() : '';
+  if (!normalizedBeatmapId && !normalizedSourceUrl) {
     return '';
   }
 
-  const params = new URLSearchParams({
-    [EMBEDDED_FLAG_PARAM]: '1',
-    [BEATMAP_ID_PARAM]: normalizedBeatmapId,
-  });
+  const params = new URLSearchParams({ [EMBEDDED_FLAG_PARAM]: '1' });
+  if (normalizedBeatmapId) {
+    params.set(BEATMAP_ID_PARAM, normalizedBeatmapId);
+  } else {
+    params.set(SOURCE_URL_PARAM, normalizedSourceUrl);
+  }
 
   const normalizedSetId = normalizeNumericId(setId);
   if (normalizedSetId) {
@@ -181,6 +212,11 @@ const buildEmbeddedPageUrl = ({
 
   if (followEnabled === false) {
     params.set(EMBEDDED_FOLLOW_PARAM, '0');
+  }
+
+  const normalizedMountId = normalizeMountId(mountId);
+  if (normalizedMountId) {
+    params.set(EMBEDDED_MOUNT_PARAM, normalizedMountId);
   }
 
   return `${DETACHED_PAGE}?${params.toString()}`;
@@ -410,6 +446,7 @@ export {
   EMBEDDED_RESUME_STORAGE_KEY,
   EMBEDDED_RESUME_MAX_AGE_MS,
   EMBEDDED_MESSAGE_CHANNEL,
+  EMBEDDED_HOST_TOKEN_MESSAGE,
   OSU_ORIGIN,
   DEFAULT_EMBEDDED_BOUNDS,
   EMBEDDED_ASPECT_RATIO,
@@ -422,6 +459,8 @@ export {
   COLLAPSED_EMBEDDED_HEIGHT,
   VIEWPORT_MARGIN,
   isOsuWebsiteUrl,
+  normalizeMountId,
+  normalizeHostToken,
   readEmbeddedParams,
   buildEmbeddedPageUrl,
   embeddedHeightForWidth,

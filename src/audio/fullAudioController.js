@@ -172,7 +172,7 @@ const createFullAudioController = ({
     return false;
   };
 
-  const configureAudioPreview = (setId, previewTimeMs, { skipPreviewClip = false } = {}) => {
+  const configureAudioPreview = (setId, previewTimeMs) => {
     state.fullAudioJobId += 1;
     abortPopupExtraction();
     setFullAudioState({
@@ -209,23 +209,6 @@ const createFullAudioController = ({
       setAudioElementSource('', 0);
       setFullAudioLoading(true);
       setAudioBadge('loading', 'Loading audio', 'Reading the beatmap to line the audio up.');
-      return;
-    }
-
-    // Resuming lands mid-map, and the b.ppy.sh clip only spans ~10s around the
-    // beatmap's preview point, so it essentially never covers that position.
-    // Attaching it anyway was actively harmful: the clip's duration is still
-    // unknown when playback starts, so the seek out to the resume point is
-    // accepted unvalidated, the element clamps to the end of the clip, and the
-    // forced resync then reports that clamped position back as the playhead --
-    // landing the preview seconds into the map instead of where it left off.
-    if (skipPreviewClip) {
-      setAudioElementSource('', 0);
-      setAudioBadge(
-        'loading',
-        'Waiting for full audio',
-        'Picking the preview up mid-map, past what the short preview clip covers. Waiting for the full track.',
-      );
       return;
     }
 

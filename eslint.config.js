@@ -59,11 +59,12 @@ export default [
     },
   },
   {
-    // Localhost browser performance harness (not an extension page).
+    // Localhost browser harnesses (not extension pages).
     files: [
       'scripts/performance-browser.js',
       'scripts/performance-charts.js',
       'scripts/performance-popup-shim.js',
+      'scripts/miniplayer-harness/iframe-shim.js',
     ],
     languageOptions: {
       globals: { ...globals.browser },

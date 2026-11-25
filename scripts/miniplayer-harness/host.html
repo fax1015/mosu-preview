@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mosu! miniplayer harness</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 30% 20%, #3a2c33, #1f191c 60%);
+      color: #ddd;
+      font: 13px/1.4 system-ui, sans-serif;
+    }
+    .panel {
+      position: fixed;
+      left: 16px;
+      top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-width: 520px;
+    }
+    button {
+      font: inherit;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #555;
+      background: #2c2530;
+      color: #eee;
+      cursor: pointer;
+    }
+  </style>
+  <script>
+    (() => {
+      // The shell's root is closed; the harness keeps hold of it to look in.
+      const nativeAttachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function attachShadow(init) {
+        const root = nativeAttachShadow.call(this, init);
+        window.__lastShadow = root;
+        window.__shadowMode = init?.mode;
+        return root;
+      };
+      const listeners = [];
+      const stores = { sync: { embeddedPlayer: true }, local: {} };
+      const area = (name) => ({
+        get(keys, callback) {
+          const out = {};
+          [].concat(keys || []).forEach((key) => {
+            if (key in stores[name]) out[key] = stores[name][key];
+          });
+          setTimeout(() => callback?.(out), 0);
+        },
+        set(items, callback) {
+          Object.assign(stores[name], items);
+          setTimeout(() => callback?.(), 0);
+        },
+        remove(keys, callback) {
+          [].concat(keys).forEach((key) => delete stores[name][key]);
+          setTimeout(() => callback?.(), 0);
+        },
+      });
+      window.chrome = {
+        runtime: {
+          id: 'harness',
+          lastError: undefined,
+          getURL: (path) => new URL(path, `${location.origin}/`).href,
+          onMessage: { addListener: (fn) => listeners.push(fn) },
+          // Runtime messages reach the extension's pages: here, the iframe.
+          sendMessage: (message, callback) => {
+            window.__runtimeSent = [...(window.__runtimeSent || []), message];
+            const frameWindow = window.__frame()?.contentWindow;
+            const response = frameWindow?.__deliverRuntimeMessage?.(message, {
+              url: 'https://osu.ppy.sh/beatmapsets/2027241',
+              frameId: 0,
+              tab: { id: 7 },
+            });
+            setTimeout(() => callback?.(response), 0);
+          },
+        },
+        storage: {
+          sync: area('sync'),
+          local: area('local'),
+          onChanged: { addListener() {} },
+        },
+      };
+      window.__openMap = (beatmapId, setId) => {
+        listeners.forEach((fn) => fn(
+          { type: 'mosuEmbeddedOpen', beatmapId, setId, mode: null, resumeTimeMs: -1, resumePaused: false },
+          {},
+          (response) => console.log('[harness] open', JSON.stringify(response)),
+        ));
+      };
+      window.__shadow = () => (document.getElementById('mosu-preview-embedded-host') ? window.__lastShadow : null);
+      window.__frame = () => window.__shadow()?.querySelector('iframe');
+      window.__toggle = () => window.__shadow()?.querySelector('.mosu-btn:not(.mosu-btn--close)')?.click();
+      window.__isCollapsed = () => window.__shadow()?.querySelector('.mosu-shell')?.classList.contains('is-collapsed');
+      window.__anims = [];
+      // Toggles, then holds every finite animation in the shell and the page
+      // at `ms`, so a frame of the movement can be looked at.
+      window.__freezeAfterToggle = async (ms) => {
+        window.__toggle();
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        const docs = [document, window.__shadow(), window.__frame().contentDocument];
+        window.__anims = docs.flatMap((doc) => (doc.getAnimations ? doc.getAnimations() : []))
+          .filter((animation) => Number.isFinite(animation.effect?.getComputedTiming?.().endTime));
+        window.__anims.forEach((animation) => {
+          animation.pause();
+          animation.currentTime = ms;
+        });
+        return window.__anims.length;
+      };
+      window.__seek = (ms) => {
+        window.__anims.forEach((animation) => {
+          animation.currentTime = ms;
+        });
+        return ms;
+      };
+      window.__resume = () => {
+        window.__anims.forEach((animation) => {
+          try {
+            animation.finish();
+          } catch {
+            animation.play();
+          }
+        });
+        window.__anims = [];
+        return 'resumed';
+      };
+    })();
+  </script>
+  <script src="/src/content.js"></script>
+</head>
+<body>
+  <div class="panel">
+    <button type="button" onclick="__openMap('4224160', '2027241')">M2U - Grafiore</button>
+    <button type="button" onclick="__openMap('1860433', '863227')">Brian The Sun - Lonely Go!</button>
+    <button type="button" onclick="__openMap('129891', '39804')">xi - FREEDOM DiVE</button>
+    <button type="button" onclick="__openMap('75', '1')">DISCO PRINCE</button>
+    <button type="button" onclick="__toggle()">Collapse / expand</button>
+  </div>
+</body>
+</html>

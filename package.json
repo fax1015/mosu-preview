@@ -12,6 +12,7 @@
     "package:firefox": "node scripts/package.mjs firefox",
     "performance": "node scripts/performance-server.mjs",
     "performance:micro": "node scripts/performance.mjs",
+    "harness": "node scripts/miniplayer-harness/server.mjs",
     "test": "node --test",
     "lint": "eslint ."
   },
